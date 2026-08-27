@@ -4,7 +4,7 @@ import yfinance as yf
 
 
 # --------------------------------------------------
-# ZÁKLADNÍ NASTAVENÍ STRÁNKY
+# ZÁKLADNÍ NASTAVENÍ
 # --------------------------------------------------
 
 st.set_page_config(
@@ -15,14 +15,69 @@ st.set_page_config(
 
 st.title("🔎 Stock Screener")
 
-tab1, tab2 = st.tabs([
+
+# --------------------------------------------------
+# FUNKCE PRO NAČTENÍ NASDAQ UNIVERZA
+# --------------------------------------------------
+
+@st.cache_data(ttl=3600)
+def nacti_nasdaq_universe():
+
+    url = (
+        "https://www.nasdaqtrader.com/"
+        "dynamic/SymDir/"
+        "nasdaqlisted.txt"
+    )
+
+    df = pd.read_csv(
+        url,
+        sep="|"
+    )
+
+    # Odstranění technického posledního řádku
+    df = df[
+        df["Symbol"] != "File Creation Time"
+    ]
+
+    puvodni_pocet = len(df)
+
+    # Odstranění testovacích titulů
+    if "Test Issue" in df.columns:
+
+        df = df[
+            df["Test Issue"] == "N"
+        ]
+
+    # Odstranění ETF
+    if "ETF" in df.columns:
+
+        df = df[
+            df["ETF"] == "N"
+        ]
+
+    # Odstranění NextShares
+    if "NextShares" in df.columns:
+
+        df = df[
+            df["NextShares"] == "N"
+        ]
+
+    return df, puvodni_pocet
+
+
+# --------------------------------------------------
+# ZÁLOŽKY
+# --------------------------------------------------
+
+tab1, tab2, tab3 = st.tabs([
     "📊 Test fundamentálních dat",
-    "🏛 NASDAQ Universe"
+    "🏛 NASDAQ Universe",
+    "🔬 Analýza univerza"
 ])
 
 
 # ==================================================
-# TAB 1 – TEST FUNDAMENTÁLNÍCH DAT
+# TAB 1 – FUNDAMENTÁLNÍ DATA
 # ==================================================
 
 with tab1:
@@ -30,35 +85,17 @@ with tab1:
     st.subheader("Test dostupnosti fundamentálních dat")
 
     TEST_TICKERS = [
-        "AAPL",
-        "MSFT",
-        "NVDA",
-        "META",
-        "GOOGL",
-        "AMZN",
-        "TSLA",
-        "INTC",
-        "CSCO",
-        "PEP",
-        "KO",
-        "JPM",
-        "XOM",
-        "JNJ",
-        "WMT",
-        "DIS",
-        "BA",
-        "PYPL",
-        "PLTR",
-        "NFLX"
+        "AAPL", "MSFT", "NVDA", "META", "GOOGL",
+        "AMZN", "TSLA", "INTC", "CSCO", "PEP",
+        "KO", "JPM", "XOM", "JNJ", "WMT",
+        "DIS", "BA", "PYPL", "PLTR", "NFLX"
     ]
-
 
     pocet = st.selectbox(
         "Počet testovaných společností:",
         [5, 10, 20],
         index=1
     )
-
 
     if st.button(
         "🔄 Spustit test dostupnosti dat",
@@ -71,7 +108,6 @@ with tab1:
 
         progress_bar = st.progress(0)
         status = st.empty()
-
 
         for i, ticker in enumerate(tickers):
 
@@ -124,11 +160,9 @@ with tab1:
                     "Debt / Equity": None
                 })
 
-
             progress_bar.progress(
                 (i + 1) / len(tickers)
             )
-
 
         status.success("Hotovo!")
 
@@ -140,11 +174,6 @@ with tab1:
             df,
             use_container_width=True
         )
-
-
-        # ------------------------------------------
-        # DOSTUPNOST DAT
-        # ------------------------------------------
 
         st.subheader(
             "📈 Dostupnost jednotlivých dat"
@@ -177,7 +206,6 @@ with tab1:
                     "Dostupnost %": procento
                 })
 
-
         df_dostupnost = pd.DataFrame(
             dostupnost
         )
@@ -198,136 +226,22 @@ with tab2:
         "🏛 Test načtení univerza NASDAQ"
     )
 
-    st.write(
-        """
-        Tato část zatím pouze zjišťuje,
-        zda dokážeme automaticky získat
-        seznam titulů obchodovaných na NASDAQu.
-        """
-    )
-
-
     if st.button(
         "📥 Načíst NASDAQ Universe",
         key="nasdaq_universe"
     ):
 
-        status = st.empty()
-
-        status.write(
-            "Načítám seznam titulů..."
-        )
-
         try:
 
-            url = (
-                "https://www.nasdaqtrader.com/"
-                "dynamic/SymDir/"
-                "nasdaqlisted.txt"
+            df_nasdaq, puvodni_pocet = (
+                nacti_nasdaq_universe()
             )
 
-            df_nasdaq = pd.read_csv(
-                url,
-                sep="|"
-            )
-
-
-            # --------------------------------------
-            # ODSTRANĚNÍ POSLEDNÍHO TECHNICKÉHO ŘÁDKU
-            # --------------------------------------
-
-            df_nasdaq = df_nasdaq[
-                df_nasdaq["Symbol"]
-                != "File Creation Time"
-            ]
-
-
-            # --------------------------------------
-            # ZÁKLADNÍ ÚPRAVA
-            # --------------------------------------
-
-            puvodni_pocet = len(df_nasdaq)
-
-
-            # Vyřadíme testovací tituly
-
-            if "Test Issue" in df_nasdaq.columns:
-
-                df_nasdaq = df_nasdaq[
-                    df_nasdaq["Test Issue"] == "N"
-                ]
-
-
-            # Vyřadíme ETF
-
-            if "ETF" in df_nasdaq.columns:
-
-                df_nasdaq = df_nasdaq[
-                    df_nasdaq["ETF"] == "N"
-                ]
-
-
-            # Vyřadíme NextShares,
-            # pokud se ve zdroji objeví
-
-            if "NextShares" in df_nasdaq.columns:
-
-                df_nasdaq = df_nasdaq[
-                    df_nasdaq["NextShares"] == "N"
-                ]
-
-
-            # --------------------------------------
-            # PŘEJMENOVÁNÍ SLOUPCŮ
-            # --------------------------------------
-
-            df_display = df_nasdaq.rename(
-                columns={
-                    "Symbol": "Ticker",
-                    "Security Name": "Název společnosti",
-                    "ETF": "ETF",
-                    "Test Issue": "Testovací titul"
-                }
-            )
-
-
-            # Vybereme hlavní sloupce
-
-            sloupce = [
-                "Ticker",
-                "Název společnosti"
-            ]
-
-
-            if "Financial Status" in df_display.columns:
-
-                sloupce.append(
-                    "Financial Status"
-                )
-
-
-            if "Market Category" in df_display.columns:
-
-                sloupce.append(
-                    "Market Category"
-                )
-
-
-            df_display = df_display[
-                sloupce
-            ]
-
+            status = st.empty()
 
             status.success(
                 "NASDAQ Universe načten!"
             )
-
-
-            # --------------------------------------
-            # ZÁKLADNÍ STATISTIKY
-            # --------------------------------------
-
-            st.subheader("📊 Výsledek")
 
             col1, col2 = st.columns(2)
 
@@ -338,13 +252,35 @@ with tab2:
 
             col2.metric(
                 "Po základním vyčištění",
-                len(df_display)
+                len(df_nasdaq)
             )
 
+            df_display = df_nasdaq.rename(
+                columns={
+                    "Symbol": "Ticker",
+                    "Security Name":
+                        "Název společnosti"
+                }
+            )
 
-            # --------------------------------------
-            # TABULKA
-            # --------------------------------------
+            sloupce = [
+                "Ticker",
+                "Název společnosti"
+            ]
+
+            if "Financial Status" in df_display.columns:
+                sloupce.append(
+                    "Financial Status"
+                )
+
+            if "Market Category" in df_display.columns:
+                sloupce.append(
+                    "Market Category"
+                )
+
+            df_display = df_display[
+                sloupce
+            ]
 
             st.subheader(
                 "🏛 Seznam nalezených titulů"
@@ -356,52 +292,195 @@ with tab2:
                 height=600
             )
 
+        except Exception as e:
+
+            st.error(
+                "Nepodařilo se načíst NASDAQ Universe."
+            )
+
+            st.exception(e)
+
+
+# ==================================================
+# TAB 3 – ANALÝZA UNIVERZA
+# ==================================================
+
+with tab3:
+
+    st.subheader(
+        "🔬 Rentgen NASDAQ Universe"
+    )
+
+    st.write(
+        """
+        Tato analýza se zatím nesnaží
+        definitivně určit typ každého instrumentu.
+        Pouze hledá typické výrazy v názvech titulů.
+        """
+    )
+
+    if st.button(
+        "🔬 Analyzovat NASDAQ Universe",
+        key="analyse_universe"
+    ):
+
+        try:
+
+            df, puvodni_pocet = (
+                nacti_nasdaq_universe()
+            )
+
+            nazvy = df[
+                "Security Name"
+            ].astype(str)
 
             # --------------------------------------
-            # VYHLEDÁNÍ TICKERU
+            # KATEGORIE
+            # --------------------------------------
+
+            categories = {
+
+                "Preferred Shares":
+                    r"Preferred|Preference",
+
+                "Warrants":
+                    r"Warrant",
+
+                "Rights":
+                    r"\bRight\b",
+
+                "Units":
+                    r"\bUnit\b",
+
+                "SPAC / Acquisition":
+                    r"Acquisition|Blank Check",
+
+                "ADR":
+                    r"ADR|Depositary",
+
+                "Trust":
+                    r"Trust",
+
+                "Fund":
+                    r"Fund",
+
+                "Ordinary Shares":
+                    r"Ordinary Shares",
+
+                "Common Stock":
+                    r"Common Stock"
+            }
+
+            vysledky = []
+
+            for category, pattern in (
+                categories.items()
+            ):
+
+                pocet = nazvy.str.contains(
+                    pattern,
+                    case=False,
+                    regex=True,
+                    na=False
+                ).sum()
+
+                vysledky.append({
+                    "Kategorie": category,
+                    "Počet nalezených titulů":
+                        pocet
+                })
+
+            df_categories = pd.DataFrame(
+                vysledky
+            )
+
+            # --------------------------------------
+            # VÝSLEDKY
             # --------------------------------------
 
             st.subheader(
-                "🔍 Rychlé vyhledání společnosti"
+                "📊 Typy instrumentů podle názvu"
             )
 
-            hledat = st.text_input(
-                "Napiš ticker nebo část názvu:"
+            st.dataframe(
+                df_categories,
+                use_container_width=True
             )
 
+            # --------------------------------------
+            # UKÁZKY
+            # --------------------------------------
 
-            if hledat:
+            st.subheader(
+                "🔍 Ukázky jednotlivých kategorií"
+            )
 
-                hledat_upper = hledat.upper()
+            vybrana_kategorie = st.selectbox(
+                "Vyber kategorii:",
+                list(categories.keys())
+            )
 
-                vysledek_hledani = df_display[
-                    df_display[
-                        "Ticker"
-                    ].astype(str).str.upper()
-                    .str.contains(
-                        hledat_upper,
-                        na=False
-                    )
-                    |
-                    df_display[
-                        "Název společnosti"
-                    ].astype(str).str.upper()
-                    .str.contains(
-                        hledat_upper,
-                        na=False
-                    )
-                ]
+            pattern = categories[
+                vybrana_kategorie
+            ]
 
-                st.dataframe(
-                    vysledek_hledani,
-                    use_container_width=True
+            ukazka = df[
+                nazvy.str.contains(
+                    pattern,
+                    case=False,
+                    regex=True,
+                    na=False
                 )
+            ][[
+                "Symbol",
+                "Security Name"
+            ]]
 
+            st.dataframe(
+                ukazka,
+                use_container_width=True,
+                height=500
+            )
+
+            # --------------------------------------
+            # NEIDENTIFIKOVANÉ
+            # --------------------------------------
+
+            st.subheader(
+                "❓ Nezařazené tituly"
+            )
+
+            combined_pattern = "|".join(
+                categories.values()
+            )
+
+            nezarazene = df[
+                ~nazvy.str.contains(
+                    combined_pattern,
+                    case=False,
+                    regex=True,
+                    na=False
+                )
+            ][[
+                "Symbol",
+                "Security Name"
+            ]]
+
+            st.write(
+                f"Počet nezařazených titulů: "
+                f"{len(nezarazene)}"
+            )
+
+            st.dataframe(
+                nezarazene.head(200),
+                use_container_width=True,
+                height=500
+            )
 
         except Exception as e:
 
-            status.error(
-                "Nepodařilo se načíst NASDAQ Universe."
+            st.error(
+                "Analýzu se nepodařilo provést."
             )
 
             st.exception(e)
