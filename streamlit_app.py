@@ -355,8 +355,6 @@ with tab2:
             )
 
             st.exception(e)
-
-
 # ==================================================
 # TAB 3 – KLASIFIKACE UNIVERZA
 # ==================================================
@@ -373,6 +371,17 @@ with tab3:
         kategorie podle prioritních pravidel.
         """
     )
+
+    # --------------------------------------
+    # INICIALIZACE PAMĚTI
+    # --------------------------------------
+
+    if "df_klasifikace" not in st.session_state:
+        st.session_state.df_klasifikace = None
+
+    # --------------------------------------
+    # TLAČÍTKO PRO SPUŠTĚNÍ KLASIFIKACE
+    # --------------------------------------
 
     if st.button(
         "🔬 Spustit klasifikaci",
@@ -392,108 +401,8 @@ with tab3:
                 klasifikuj_titul
             )
 
-            # --------------------------------------
-            # SOUHRN
-            # --------------------------------------
-
-            souhrn = (
-                df["Kategorie"]
-                .value_counts()
-                .reset_index()
-            )
-
-            souhrn.columns = [
-                "Kategorie",
-                "Počet titulů"
-            ]
-
-            st.subheader(
-                "📊 Klasifikace titulů"
-            )
-
-            st.dataframe(
-                souhrn,
-                use_container_width=True
-            )
-
-            # --------------------------------------
-            # KANDIDÁTI PRO SCREENING
-            # --------------------------------------
-
-            kandidati = df[
-                df["Kategorie"].isin([
-                    "Common Stock",
-                    "Ordinary Shares",
-                    "ADR",
-                    "Other / Unknown"
-                ])
-            ]
-
-            st.subheader(
-                "🟢 Kandidáti pro Stock Screener"
-            )
-
-            col1, col2 = st.columns(2)
-
-            col1.metric(
-                "Celkem titulů",
-                len(df)
-            )
-
-            col2.metric(
-                "Potenciální kandidáti",
-                len(kandidati)
-            )
-
-            # --------------------------------------
-            # VÝBĚR KATEGORIE
-            # --------------------------------------
-
-            st.subheader(
-                "🔍 Prohlédnout kategorii"
-            )
-
-            vyber = st.selectbox(
-                "Kategorie:",
-                sorted(
-                    df["Kategorie"]
-                    .unique()
-                )
-            )
-
-            ukazka = df[
-                df["Kategorie"] == vyber
-            ][[
-                "Symbol",
-                "Security Name",
-                "Kategorie"
-            ]]
-
-            st.dataframe(
-                ukazka,
-                use_container_width=True,
-                height=500
-            )
-
-            # --------------------------------------
-            # UKÁZKA KANDIDÁTŮ
-            # --------------------------------------
-
-            st.subheader(
-                "🟢 Ukázka kandidátů"
-            )
-
-            st.dataframe(
-                kandidati[
-                    [
-                        "Symbol",
-                        "Security Name",
-                        "Kategorie"
-                    ]
-                ].head(200),
-                use_container_width=True,
-                height=500
-            )
+            # ULOŽENÍ DO PAMĚTI APLIKACE
+            st.session_state.df_klasifikace = df
 
         except Exception as e:
 
@@ -502,3 +411,115 @@ with tab3:
             )
 
             st.exception(e)
+
+    # --------------------------------------
+    # PRÁCE S ULOŽENÝMI DATY
+    # --------------------------------------
+
+    if st.session_state.df_klasifikace is not None:
+
+        df = st.session_state.df_klasifikace
+
+        # --------------------------------------
+        # SOUHRN
+        # --------------------------------------
+
+        souhrn = (
+            df["Kategorie"]
+            .value_counts()
+            .reset_index()
+        )
+
+        souhrn.columns = [
+            "Kategorie",
+            "Počet titulů"
+        ]
+
+        st.subheader(
+            "📊 Klasifikace titulů"
+        )
+
+        st.dataframe(
+            souhrn,
+            use_container_width=True
+        )
+
+        # --------------------------------------
+        # KANDIDÁTI PRO SCREENING
+        # --------------------------------------
+
+        kandidati = df[
+            df["Kategorie"].isin([
+                "Common Stock",
+                "Ordinary Shares",
+                "ADR",
+                "Other / Unknown"
+            ])
+        ]
+
+        st.subheader(
+            "🟢 Kandidáti pro Stock Screener"
+        )
+
+        col1, col2 = st.columns(2)
+
+        col1.metric(
+            "Celkem titulů",
+            len(df)
+        )
+
+        col2.metric(
+            "Potenciální kandidáti",
+            len(kandidati)
+        )
+
+        # --------------------------------------
+        # VÝBĚR KATEGORIE
+        # --------------------------------------
+
+        st.subheader(
+            "🔍 Prohlédnout kategorii"
+        )
+
+        vyber = st.selectbox(
+            "Kategorie:",
+            sorted(
+                df["Kategorie"]
+                .unique()
+            ),
+            key="vyber_kategorie"
+        )
+
+        ukazka = df[
+            df["Kategorie"] == vyber
+        ][[
+            "Symbol",
+            "Security Name",
+            "Kategorie"
+        ]]
+
+        st.dataframe(
+            ukazka,
+            use_container_width=True,
+            height=500
+        )
+
+        # --------------------------------------
+        # UKÁZKA KANDIDÁTŮ
+        # --------------------------------------
+
+        st.subheader(
+            "🟢 Ukázka kandidátů"
+        )
+
+        st.dataframe(
+            kandidati[
+                [
+                    "Symbol",
+                    "Security Name",
+                    "Kategorie"
+                ]
+            ].head(200),
+            use_container_width=True,
+            height=500
+        )
