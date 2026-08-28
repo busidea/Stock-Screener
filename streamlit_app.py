@@ -43,26 +43,84 @@ def nacti_nasdaq_universe():
 
     # Odstranění testovacích titulů
     if "Test Issue" in df.columns:
-
         df = df[
             df["Test Issue"] == "N"
         ]
 
     # Odstranění ETF
     if "ETF" in df.columns:
-
         df = df[
             df["ETF"] == "N"
         ]
 
     # Odstranění NextShares
     if "NextShares" in df.columns:
-
         df = df[
             df["NextShares"] == "N"
         ]
 
     return df, puvodni_pocet
+
+
+# --------------------------------------------------
+# KLASIFIKACE TITULŮ
+# --------------------------------------------------
+
+def klasifikuj_titul(nazev):
+
+    nazev = str(nazev).lower()
+
+    # Priorita 1 – Warrants
+    if "warrant" in nazev:
+        return "Warrant"
+
+    # Priorita 2 – Rights
+    if " right" in nazev:
+        return "Right"
+
+    # Priorita 3 – Units
+    if " unit" in nazev:
+        return "Unit"
+
+    # Priorita 4 – Preferred shares
+    if (
+        "preferred" in nazev
+        or "preference" in nazev
+    ):
+        return "Preferred Share"
+
+    # Priorita 5 – Funds
+    if "fund" in nazev:
+        return "Fund"
+
+    # Priorita 6 – Trusts
+    if "trust" in nazev:
+        return "Trust"
+
+    # Priorita 7 – SPAC / Acquisition
+    if (
+        "acquisition" in nazev
+        or "blank check" in nazev
+    ):
+        return "SPAC / Acquisition"
+
+    # Priorita 8 – ADR
+    if (
+        "adr" in nazev
+        or "depositary" in nazev
+    ):
+        return "ADR"
+
+    # Priorita 9 – Ordinary Shares
+    if "ordinary shares" in nazev:
+        return "Ordinary Shares"
+
+    # Priorita 10 – Common Stock
+    if "common stock" in nazev:
+        return "Common Stock"
+
+    # Ostatní
+    return "Other / Unknown"
 
 
 # --------------------------------------------------
@@ -72,7 +130,7 @@ def nacti_nasdaq_universe():
 tab1, tab2, tab3 = st.tabs([
     "📊 Test fundamentálních dat",
     "🏛 NASDAQ Universe",
-    "🔬 Analýza univerza"
+    "🔬 Klasifikace univerza"
 ])
 
 
@@ -237,9 +295,7 @@ with tab2:
                 nacti_nasdaq_universe()
             )
 
-            status = st.empty()
-
-            status.success(
+            st.success(
                 "NASDAQ Universe načten!"
             )
 
@@ -302,26 +358,25 @@ with tab2:
 
 
 # ==================================================
-# TAB 3 – ANALÝZA UNIVERZA
+# TAB 3 – KLASIFIKACE UNIVERZA
 # ==================================================
 
 with tab3:
 
     st.subheader(
-        "🔬 Rentgen NASDAQ Universe"
+        "🔬 Klasifikace NASDAQ Universe"
     )
 
     st.write(
         """
-        Tato analýza se zatím nesnaží
-        definitivně určit typ každého instrumentu.
-        Pouze hledá typické výrazy v názvech titulů.
+        Každému titulu je přiřazena právě jedna hlavní
+        kategorie podle prioritních pravidel.
         """
     )
 
     if st.button(
-        "🔬 Analyzovat NASDAQ Universe",
-        key="analyse_universe"
+        "🔬 Spustit klasifikaci",
+        key="classify_universe"
     ):
 
         try:
@@ -330,110 +385,88 @@ with tab3:
                 nacti_nasdaq_universe()
             )
 
-            nazvy = df[
+            # Přidání klasifikace
+            df["Kategorie"] = df[
                 "Security Name"
-            ].astype(str)
-
-            # --------------------------------------
-            # KATEGORIE
-            # --------------------------------------
-
-            categories = {
-
-                "Preferred Shares":
-                    r"Preferred|Preference",
-
-                "Warrants":
-                    r"Warrant",
-
-                "Rights":
-                    r"\bRight\b",
-
-                "Units":
-                    r"\bUnit\b",
-
-                "SPAC / Acquisition":
-                    r"Acquisition|Blank Check",
-
-                "ADR":
-                    r"ADR|Depositary",
-
-                "Trust":
-                    r"Trust",
-
-                "Fund":
-                    r"Fund",
-
-                "Ordinary Shares":
-                    r"Ordinary Shares",
-
-                "Common Stock":
-                    r"Common Stock"
-            }
-
-            vysledky = []
-
-            for category, pattern in (
-                categories.items()
-            ):
-
-                pocet = nazvy.str.contains(
-                    pattern,
-                    case=False,
-                    regex=True,
-                    na=False
-                ).sum()
-
-                vysledky.append({
-                    "Kategorie": category,
-                    "Počet nalezených titulů":
-                        pocet
-                })
-
-            df_categories = pd.DataFrame(
-                vysledky
+            ].apply(
+                klasifikuj_titul
             )
 
             # --------------------------------------
-            # VÝSLEDKY
+            # SOUHRN
             # --------------------------------------
 
+            souhrn = (
+                df["Kategorie"]
+                .value_counts()
+                .reset_index()
+            )
+
+            souhrn.columns = [
+                "Kategorie",
+                "Počet titulů"
+            ]
+
             st.subheader(
-                "📊 Typy instrumentů podle názvu"
+                "📊 Klasifikace titulů"
             )
 
             st.dataframe(
-                df_categories,
+                souhrn,
                 use_container_width=True
             )
 
             # --------------------------------------
-            # UKÁZKY
+            # KANDIDÁTI PRO SCREENING
+            # --------------------------------------
+
+            kandidati = df[
+                df["Kategorie"].isin([
+                    "Common Stock",
+                    "Ordinary Shares",
+                    "ADR",
+                    "Other / Unknown"
+                ])
+            ]
+
+            st.subheader(
+                "🟢 Kandidáti pro Stock Screener"
+            )
+
+            col1, col2 = st.columns(2)
+
+            col1.metric(
+                "Celkem titulů",
+                len(df)
+            )
+
+            col2.metric(
+                "Potenciální kandidáti",
+                len(kandidati)
+            )
+
+            # --------------------------------------
+            # VÝBĚR KATEGORIE
             # --------------------------------------
 
             st.subheader(
-                "🔍 Ukázky jednotlivých kategorií"
+                "🔍 Prohlédnout kategorii"
             )
 
-            vybrana_kategorie = st.selectbox(
-                "Vyber kategorii:",
-                list(categories.keys())
+            vyber = st.selectbox(
+                "Kategorie:",
+                sorted(
+                    df["Kategorie"]
+                    .unique()
+                )
             )
-
-            pattern = categories[
-                vybrana_kategorie
-            ]
 
             ukazka = df[
-                nazvy.str.contains(
-                    pattern,
-                    case=False,
-                    regex=True,
-                    na=False
-                )
+                df["Kategorie"] == vyber
             ][[
                 "Symbol",
-                "Security Name"
+                "Security Name",
+                "Kategorie"
             ]]
 
             st.dataframe(
@@ -443,36 +476,21 @@ with tab3:
             )
 
             # --------------------------------------
-            # NEIDENTIFIKOVANÉ
+            # UKÁZKA KANDIDÁTŮ
             # --------------------------------------
 
             st.subheader(
-                "❓ Nezařazené tituly"
-            )
-
-            combined_pattern = "|".join(
-                categories.values()
-            )
-
-            nezarazene = df[
-                ~nazvy.str.contains(
-                    combined_pattern,
-                    case=False,
-                    regex=True,
-                    na=False
-                )
-            ][[
-                "Symbol",
-                "Security Name"
-            ]]
-
-            st.write(
-                f"Počet nezařazených titulů: "
-                f"{len(nezarazene)}"
+                "🟢 Ukázka kandidátů"
             )
 
             st.dataframe(
-                nezarazene.head(200),
+                kandidati[
+                    [
+                        "Symbol",
+                        "Security Name",
+                        "Kategorie"
+                    ]
+                ].head(200),
                 use_container_width=True,
                 height=500
             )
@@ -480,7 +498,7 @@ with tab3:
         except Exception as e:
 
             st.error(
-                "Analýzu se nepodařilo provést."
+                "Klasifikaci se nepodařilo provést."
             )
 
             st.exception(e)
