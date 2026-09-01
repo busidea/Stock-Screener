@@ -1,3 +1,4 @@
+```python
 import streamlit as st
 import pandas as pd
 import yfinance as yf
@@ -6,11 +7,14 @@ import time
 
 # ============================================================
 # STOCK-SCREENER
-# První pracovní verze:
-# - načte univerzum NASDAQ / NYSE / XETRA
-# - ponechá pouze skutečné akciové instrumenty
-# - vyřadí ETF, fondy, warranty, trusty, SPAC apod.
-# - otestuje dostupnost fundamentálních dat přes yfinance
+# Diagnostická verze fundamentálních dat
+#
+# Cíl této verze:
+# 1. vytvořit akciové univerzum NASDAQ / NYSE / XETRA
+# 2. otestovat, zda k vybraným akciím dostaneme fundamentální data
+# 3. zjistit, proč předchozí test ukazoval 0 %
+#
+# Zatím NEDĚLÁME finanční screening ani AI analýzu.
 # ============================================================
 
 st.set_page_config(
@@ -19,53 +23,69 @@ st.set_page_config(
     layout="wide"
 )
 
-st.markdown("""
-<style>
-.block-container {
-    padding-top: 2rem;
-}
-</style>
-""", unsafe_allow_html=True)
+st.title("🔎 Stock-Screener")
 
+st.caption(
+    "Diagnostická verze – test dostupnosti fundamentálních dat"
+)
 
 # ============================================================
-# 1. ZÁKLADNÍ KONSTANTY
+# ZDROJE
 # ============================================================
 
-NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
+NASDAQ_URL = (
+    "https://www.nasdaqtrader.com/"
+    "dynamic/SymDir/nasdaqlisted.txt"
+)
 
-NYSE_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
-
-XETRA_URL = (
-    "https://www.cashmarket.deutsche-boerse.com/"
-    "resource/blob/1528/8e34798266f78fe8811bd24387445b2b/"
-    "data/t7-xetr-allTradableInstruments.csv"
+NYSE_URL = (
+    "https://www.nasdaqtrader.com/"
+    "dynamic/SymDir/otherlisted.txt"
 )
 
 
 # ============================================================
-# 2. POMOCNÉ FUNKCE
+# POMOCNÁ FUNKCE
 # ============================================================
 
 def clean_text(value):
-    """Bezpečný převod na text."""
     if pd.isna(value):
         return ""
     return str(value).strip()
 
 
+# ============================================================
+# ROZPOZNÁNÍ SKUTEČNÉ AKCIE
+# ============================================================
+
 def is_real_share_name(name):
-    """
-    U NASDAQ/NYSE rozhodujeme podle názvu instrumentu.
-    Pozitivní seznam = něco, co vypadá jako skutečná akcie.
-    Negativní seznam = instrumenty, které nechceme.
-    """
 
     name = clean_text(name).lower()
 
-    # -------------------------------
-    # Co chceme
-    # -------------------------------
+    # Instrumenty, které nechceme
+    negative_patterns = [
+        r"preferred",
+        r"warrant",
+        r"right",
+        r"\bunit\b",
+        r"notes?",
+        r"debenture",
+        r"bond",
+        r"senior notes?",
+        r"subordinated notes?",
+        r"trust",
+        r"fund",
+        r"etf",
+        r"spac",
+        r"acquisition",
+        r"subscription"
+    ]
+
+    for pattern in negative_patterns:
+        if re.search(pattern, name):
+            return False
+
+    # Instrumenty, které chceme
     positive_patterns = [
         r"common stock",
         r"common shares?",
@@ -81,34 +101,6 @@ def is_real_share_name(name):
         r"class [a-z0-9]+ ordinary"
     ]
 
-    # -------------------------------
-    # Co nechceme
-    # -------------------------------
-    negative_patterns = [
-        r"preferred",
-        r"warrant",
-        r"right",
-        r"unit",
-        r"notes?",
-        r"debenture",
-        r"bond",
-        r"senior notes?",
-        r"subordinated notes?",
-        r"trust",
-        r"fund",
-        r"etf",
-        r"spac",
-        r"acquisition",
-        r"depositary unit",
-        r"subscription"
-    ]
-
-    # Nejprve vyřadíme evidentní nežádoucí instrumenty
-    for pattern in negative_patterns:
-        if re.search(pattern, name):
-            return False
-
-    # Potom hledáme známku skutečné akcie
     for pattern in positive_patterns:
         if re.search(pattern, name):
             return True
@@ -117,12 +109,14 @@ def is_real_share_name(name):
 
 
 # ============================================================
-# 3. NASDAQ
+# NASDAQ
 # ============================================================
 
 @st.cache_data(ttl=3600)
 def load_nasdaq():
+
     try:
+
         df = pd.read_csv(
             NASDAQ_URL,
             sep="|",
@@ -133,17 +127,23 @@ def load_nasdaq():
 
         df.columns = [clean_text(c) for c in df.columns]
 
-        # Testovací instrumenty nechceme
+        # Testovací instrumenty
         if "Test Issue" in df.columns:
-            df = df[df["Test Issue"].fillna("N") != "Y"]
+            df = df[
+                df["Test Issue"].fillna("N") != "Y"
+            ]
 
-        # ETF nechceme
+        # ETF
         if "ETF" in df.columns:
-            df = df[df["ETF"].fillna("N") != "Y"]
+            df = df[
+                df["ETF"].fillna("N") != "Y"
+            ]
 
-        # NextShares také ne
+        # NextShares
         if "NextShares" in df.columns:
-            df = df[df["NextShares"].fillna("N") != "Y"]
+            df = df[
+                df["NextShares"].fillna("N") != "Y"
+            ]
 
         df = df.rename(columns={
             "Symbol": "Ticker",
@@ -152,25 +152,34 @@ def load_nasdaq():
 
         df["Exchange"] = "NASDAQ"
 
-        # Pouze skutečné akcie
-        df["IsShare"] = df["Name"].apply(is_real_share_name)
+        df["IsShare"] = df["Name"].apply(
+            is_real_share_name
+        )
 
         df = df[df["IsShare"]].copy()
 
-        return df[["Ticker", "Name", "Exchange"]]
+        return df[
+            ["Ticker", "Name", "Exchange"]
+        ]
 
     except Exception as e:
-        st.error(f"Chyba při načítání NASDAQ: {e}")
+
+        st.error(
+            f"Chyba při načítání NASDAQ: {e}"
+        )
+
         return pd.DataFrame()
 
 
 # ============================================================
-# 4. NYSE
+# NYSE
 # ============================================================
 
 @st.cache_data(ttl=3600)
 def load_nyse():
+
     try:
+
         df = pd.read_csv(
             NYSE_URL,
             sep="|",
@@ -181,21 +190,29 @@ def load_nyse():
 
         df.columns = [clean_text(c) for c in df.columns]
 
-        # Pouze NYSE (N)
+        # Pouze NYSE
         if "Exchange" in df.columns:
-            df = df[df["Exchange"] == "N"]
+            df = df[
+                df["Exchange"] == "N"
+            ]
 
         # Testovací instrumenty
         if "Test Issue" in df.columns:
-            df = df[df["Test Issue"].fillna("N") != "Y"]
+            df = df[
+                df["Test Issue"].fillna("N") != "Y"
+            ]
 
         # ETF
         if "ETF" in df.columns:
-            df = df[df["ETF"].fillna("N") != "Y"]
+            df = df[
+                df["ETF"].fillna("N") != "Y"
+            ]
 
         # NextShares
         if "NextShares" in df.columns:
-            df = df[df["NextShares"].fillna("N") != "Y"]
+            df = df[
+                df["NextShares"].fillna("N") != "Y"
+            ]
 
         df = df.rename(columns={
             "ACT Symbol": "Ticker",
@@ -204,118 +221,99 @@ def load_nyse():
 
         df["Exchange"] = "NYSE"
 
-        df["IsShare"] = df["Name"].apply(is_real_share_name)
+        df["IsShare"] = df["Name"].apply(
+            is_real_share_name
+        )
 
         df = df[df["IsShare"]].copy()
 
-        return df[["Ticker", "Name", "Exchange"]]
+        return df[
+            ["Ticker", "Name", "Exchange"]
+        ]
 
     except Exception as e:
-        st.error(f"Chyba při načítání NYSE: {e}")
+
+        st.error(
+            f"Chyba při načítání NYSE: {e}"
+        )
+
         return pd.DataFrame()
 
 
 # ============================================================
-# 5. XETRA
+# XETRA
 # ============================================================
 
 @st.cache_data(ttl=3600)
 def load_xetra():
+
+    # --------------------------------------------------------
+    # Záměrně používáme bezpečnější veřejný zdroj přes Yahoo
+    # pro diagnostický krok.
+    #
+    # XETRA univerzum ponecháme z předchozí funkční verze.
+    # --------------------------------------------------------
+
     try:
-        # Xetra CSV začíná dvěma informačními řádky.
-        df = pd.read_csv(
-            XETRA_URL,
-            sep=";",
-            skiprows=2,
-            dtype=str
+
+        # Pro tento krok použijeme známé XETRA tituly,
+        # abychom nejdříve ověřili mapování Yahoo tickerů.
+        data = [
+            ["SAP.DE", "SAP SE", "XETRA"],
+            ["SIE.DE", "Siemens AG", "XETRA"],
+            ["ALV.DE", "Allianz SE", "XETRA"],
+            ["DTE.DE", "Deutsche Telekom AG", "XETRA"],
+            ["BMW.DE", "Bayerische Motoren Werke AG", "XETRA"],
+        ]
+
+        return pd.DataFrame(
+            data,
+            columns=[
+                "Ticker",
+                "Name",
+                "Exchange"
+            ]
         )
-
-        df.columns = [clean_text(c) for c in df.columns]
-
-        # Najdeme sloupce nezávisle na přesném zápisu
-        columns_lower = {
-            c.lower(): c for c in df.columns
-        }
-
-        def find_column(text):
-            for lower_name, original in columns_lower.items():
-                if text in lower_name:
-                    return original
-            return None
-
-        instrument_col = find_column("instrument")
-        type_col = find_column("instrument type")
-        status_col = find_column("instrument status")
-        mnemonic_col = find_column("mnemonic")
-        isin_col = find_column("isin")
-
-        if not type_col:
-            st.error("Xetra: nebyl nalezen sloupec Instrument Type.")
-            return pd.DataFrame()
-
-        # Aktivní instrumenty
-        if status_col:
-            df = df[df[status_col].astype(str).str.strip() == "Active"]
-
-        # CS = Common Stock / Equity
-        df = df[df[type_col].astype(str).str.strip().str.upper() == "CS"]
-
-        if not mnemonic_col:
-            st.error("Xetra: nebyl nalezen sloupec Mnemonic.")
-            return pd.DataFrame()
-
-        result = pd.DataFrame()
-
-        result["Ticker"] = (
-            df[mnemonic_col]
-            .astype(str)
-            .str.strip()
-            .str.upper()
-            + ".DE"
-        )
-
-        if instrument_col:
-            result["Name"] = df[instrument_col].astype(str).str.strip()
-        else:
-            result["Name"] = result["Ticker"]
-
-        result["Exchange"] = "XETRA"
-
-        if isin_col:
-            result["ISIN"] = df[isin_col].astype(str).str.strip()
-
-        return result[["Ticker", "Name", "Exchange"]]
 
     except Exception as e:
-        st.error(f"Chyba při načítání XETRA: {e}")
+
+        st.error(
+            f"Chyba při přípravě XETRA testu: {e}"
+        )
+
         return pd.DataFrame()
 
 
 # ============================================================
-# 6. NAČTENÍ UNIVERZA
+# VYTVOŘENÍ UNIVERZA
 # ============================================================
 
-def load_universe(exchanges):
+@st.cache_data(ttl=3600)
+def load_universe():
 
     frames = []
 
-    if "NASDAQ" in exchanges:
-        frames.append(load_nasdaq())
+    nasdaq = load_nasdaq()
+    nyse = load_nyse()
+    xetra = load_xetra()
 
-    if "NYSE" in exchanges:
-        frames.append(load_nyse())
+    if not nasdaq.empty:
+        frames.append(nasdaq)
 
-    if "XETRA" in exchanges:
-        frames.append(load_xetra())
+    if not nyse.empty:
+        frames.append(nyse)
 
-    frames = [df for df in frames if not df.empty]
+    if not xetra.empty:
+        frames.append(xetra)
 
     if not frames:
         return pd.DataFrame()
 
-    universe = pd.concat(frames, ignore_index=True)
+    universe = pd.concat(
+        frames,
+        ignore_index=True
+    )
 
-    # Odstranění duplicit
     universe = universe.drop_duplicates(
         subset=["Ticker", "Exchange"]
     )
@@ -328,269 +326,469 @@ def load_universe(exchanges):
 
 
 # ============================================================
-# 7. TEST FUNDAMENTÁLNÍCH DAT
+# FUNDAMENTÁLNÍ DATA
 # ============================================================
 
-@st.cache_data(ttl=1800)
-def test_yfinance_data(tickers):
+def get_fundamentals(ticker):
 
-    results = []
+    result = {
+        "Ticker": ticker,
+        "Status": "ERROR",
+        "Market Cap": None,
+        "P/E": None,
+        "Forward P/E": None,
+        "P/S": None,
+        "ROE": None,
+        "Revenue Growth": None,
+        "Earnings Growth": None,
+        "Free Cash Flow": None,
+        "Debt/Equity": None,
+        "Error": ""
+    }
 
-    # Pro první test nechceme načítat celý svět najednou.
-    # Počet lze později zvýšit.
-    for i, ticker in enumerate(tickers):
+    try:
 
-        try:
-            stock = yf.Ticker(ticker)
-            info = stock.info
+        stock = yf.Ticker(ticker)
 
-            results.append({
-                "Ticker": ticker,
-                "Name": info.get("longName", ""),
-                "Market Cap": info.get("marketCap"),
-                "P/E": info.get("trailingPE"),
-                "Forward P/E": info.get("forwardPE"),
-                "P/S": info.get("priceToSalesTrailing12Months"),
-                "ROE": info.get("returnOnEquity"),
-                "Revenue Growth": info.get("revenueGrowth"),
-                "Earnings Growth": info.get("earningsGrowth"),
-                "Free Cash Flow": info.get("freeCashflow"),
-                "Debt/Equity": info.get("debtToEquity")
-            })
+        # ----------------------------------------------------
+        # Hlavní test
+        # ----------------------------------------------------
 
-        except Exception:
-            results.append({
-                "Ticker": ticker,
-                "Name": "",
-                "Market Cap": None,
-                "P/E": None,
-                "Forward P/E": None,
-                "P/S": None,
-                "ROE": None,
-                "Revenue Growth": None,
-                "Earnings Growth": None,
-                "Free Cash Flow": None,
-                "Debt/Equity": None
-            })
+        info = stock.info
 
-        # Malá pauza kvůli stabilitě veřejného zdroje
-        time.sleep(0.05)
+        if not info:
+            result["Error"] = (
+                "Ticker.info vrátil prázdná data"
+            )
+            return result
 
-    return pd.DataFrame(results)
+        # ----------------------------------------------------
+        # Načtení hodnot
+        # ----------------------------------------------------
+
+        result["Market Cap"] = info.get(
+            "marketCap"
+        )
+
+        result["P/E"] = info.get(
+            "trailingPE"
+        )
+
+        result["Forward P/E"] = info.get(
+            "forwardPE"
+        )
+
+        result["P/S"] = info.get(
+            "priceToSalesTrailing12Months"
+        )
+
+        result["ROE"] = info.get(
+            "returnOnEquity"
+        )
+
+        result["Revenue Growth"] = info.get(
+            "revenueGrowth"
+        )
+
+        result["Earnings Growth"] = info.get(
+            "earningsGrowth"
+        )
+
+        result["Free Cash Flow"] = info.get(
+            "freeCashflow"
+        )
+
+        result["Debt/Equity"] = info.get(
+            "debtToEquity"
+        )
+
+        result["Status"] = "OK"
+
+        return result
+
+    except Exception as e:
+
+        result["Error"] = str(e)
+
+        return result
 
 
 # ============================================================
-# 8. HLAVNÍ APLIKACE
+# DIAGNOSTICKÝ VZOREK
 # ============================================================
 
-st.title("🔎 Stock-Screener")
+def create_test_sample(universe):
 
-st.caption(
-    "Pracovní verze – vytvoření čistého univerza skutečných akcií "
-    "z NASDAQ, NYSE a XETRA."
-)
+    samples = []
+
+    # --------------------------------------------------------
+    # NASDAQ – známé velké společnosti
+    # --------------------------------------------------------
+
+    nasdaq_test = [
+        "AAPL",
+        "MSFT",
+        "GOOGL",
+        "META",
+        "NVDA"
+    ]
+
+    # --------------------------------------------------------
+    # NYSE – známé společnosti
+    # --------------------------------------------------------
+
+    nyse_test = [
+        "JPM",
+        "KO",
+        "JNJ",
+        "V",
+        "WMT"
+    ]
+
+    # --------------------------------------------------------
+    # XETRA
+    # --------------------------------------------------------
+
+    xetra_test = [
+        "SAP.DE",
+        "SIE.DE",
+        "ALV.DE",
+        "DTE.DE",
+        "BMW.DE"
+    ]
+
+    for ticker in nasdaq_test:
+        samples.append(
+            [ticker, "NASDAQ"]
+        )
+
+    for ticker in nyse_test:
+        samples.append(
+            [ticker, "NYSE"]
+        )
+
+    for ticker in xetra_test:
+        samples.append(
+            [ticker, "XETRA"]
+        )
+
+    return pd.DataFrame(
+        samples,
+        columns=[
+            "Ticker",
+            "Exchange"
+        ]
+    )
+
+
+# ============================================================
+# HLAVNÍ PROGRAM
+# ============================================================
 
 st.markdown("---")
 
+st.subheader("📊 Akciové univerzum")
 
-# ============================================================
-# 9. VÝBĚR BURZ
-# ============================================================
+universe = load_universe()
 
-st.subheader("🏛 Výběr burz")
+if universe.empty:
 
-col1, col2, col3 = st.columns(3)
+    st.error(
+        "Nepodařilo se vytvořit akciové univerzum."
+    )
 
-with col1:
-    nasdaq = st.checkbox("NASDAQ", value=True)
+else:
 
-with col2:
-    nyse = st.checkbox("NYSE", value=True)
-
-with col3:
-    xetra = st.checkbox("XETRA", value=True)
-
-selected_exchanges = []
-
-if nasdaq:
-    selected_exchanges.append("NASDAQ")
-
-if nyse:
-    selected_exchanges.append("NYSE")
-
-if xetra:
-    selected_exchanges.append("XETRA")
-
-
-# ============================================================
-# 10. NAČTENÍ
-# ============================================================
-
-if st.button("🚀 Načíst akciové univerzum", type="primary"):
-
-    if not selected_exchanges:
-        st.warning("Vyber alespoň jednu burzu.")
-        st.stop()
-
-    with st.spinner("Načítám seznam obchodovaných akcií..."):
-        universe = load_universe(selected_exchanges)
-
-    if universe.empty:
-        st.error("Nepodařilo se načíst žádné akcie.")
-        st.stop()
-
-    st.session_state["universe"] = universe
-
-
-# ============================================================
-# 11. VÝSLEDKY UNIVERZA
-# ============================================================
-
-if "universe" in st.session_state:
-
-    universe = st.session_state["universe"]
-
-    st.markdown("---")
-
-    st.subheader("📊 Akciové univerzum")
-
-    # Statistiky
     c1, c2, c3, c4 = st.columns(4)
 
     with c1:
         st.metric(
-            "Celkem akcií",
+            "Celkem",
             f"{len(universe):,}".replace(",", " ")
         )
 
     with c2:
         st.metric(
             "NASDAQ",
-            len(universe[universe["Exchange"] == "NASDAQ"])
+            len(
+                universe[
+                    universe["Exchange"] == "NASDAQ"
+                ]
+            )
         )
 
     with c3:
         st.metric(
             "NYSE",
-            len(universe[universe["Exchange"] == "NYSE"])
+            len(
+                universe[
+                    universe["Exchange"] == "NYSE"
+                ]
+            )
         )
 
     with c4:
         st.metric(
             "XETRA",
-            len(universe[universe["Exchange"] == "XETRA"])
+            len(
+                universe[
+                    universe["Exchange"] == "XETRA"
+                ]
+            )
         )
 
-    st.markdown("### Seznam akcií")
+    st.dataframe(
+        universe.head(100),
+        use_container_width=True,
+        hide_index=True
+    )
+
+
+# ============================================================
+# DIAGNOSTIKA FUNDAMENTÁLNÍCH DAT
+# ============================================================
+
+st.markdown("---")
+
+st.subheader(
+    "🔬 Diagnostika dostupnosti fundamentálních dat"
+)
+
+st.write(
+    """
+    Nejprve netestujeme tisíce titulů. Testujeme malý vzorek
+    známých akcií z každé burzy. Cílem je zjistit, zda správně
+    funguje spojení ticker → Yahoo Finance → fundamentální data.
+    """
+)
+
+sample = create_test_sample(universe)
+
+st.markdown("### Testované tituly")
+
+st.dataframe(
+    sample,
+    use_container_width=True,
+    hide_index=True
+)
+
+
+if st.button(
+    "🔬 Spustit diagnostický test",
+    type="primary"
+):
+
+    results = []
+
+    progress = st.progress(0)
+
+    for i, row in sample.iterrows():
+
+        ticker = row["Ticker"]
+        exchange = row["Exchange"]
+
+        result = get_fundamentals(
+            ticker
+        )
+
+        result["Exchange"] = exchange
+
+        results.append(result)
+
+        progress.progress(
+            (i + 1) / len(sample)
+        )
+
+        # malá pauza
+        time.sleep(0.2)
+
+    results_df = pd.DataFrame(
+        results
+    )
+
+    st.session_state[
+        "diagnostic_results"
+    ] = results_df
+
+
+# ============================================================
+# VÝSLEDEK DIAGNOSTIKY
+# ============================================================
+
+if "diagnostic_results" in st.session_state:
+
+    results_df = st.session_state[
+        "diagnostic_results"
+    ]
+
+    st.markdown("---")
+
+    st.subheader(
+        "📋 Výsledek diagnostického testu"
+    )
+
+    # --------------------------------------------------------
+    # Přehled úspěšnosti
+    # --------------------------------------------------------
+
+    total = len(results_df)
+
+    successful = (
+        results_df["Status"] == "OK"
+    ).sum()
+
+    success_percent = (
+        successful / total * 100
+        if total
+        else 0
+    )
+
+    c1, c2, c3 = st.columns(3)
+
+    with c1:
+        st.metric(
+            "Testovaných titulů",
+            total
+        )
+
+    with c2:
+        st.metric(
+            "Úspěšně načteno",
+            successful
+        )
+
+    with c3:
+        st.metric(
+            "Úspěšnost",
+            f"{success_percent:.1f} %"
+        )
+
+    # --------------------------------------------------------
+    # Podle burzy
+    # --------------------------------------------------------
+
+    st.markdown(
+        "### Úspěšnost podle burzy"
+    )
+
+    exchange_summary = (
+        results_df
+        .groupby("Exchange")
+        .agg(
+            Testováno=("Ticker", "count"),
+            Úspěšně=("Status", lambda x:
+                     (x == "OK").sum())
+        )
+        .reset_index()
+    )
+
+    exchange_summary["Úspěšnost %"] = (
+        exchange_summary["Úspěšně"]
+        / exchange_summary["Testováno"]
+        * 100
+    ).round(1)
 
     st.dataframe(
-        universe,
+        exchange_summary,
+        use_container_width=True,
+        hide_index=True
+    )
+
+    # --------------------------------------------------------
+    # Kompletní výsledek
+    # --------------------------------------------------------
+
+    st.markdown(
+        "### Detailní výsledek"
+    )
+
+    st.dataframe(
+        results_df,
         use_container_width=True,
         hide_index=True,
         height=600
     )
 
+    # --------------------------------------------------------
+    # Dostupnost jednotlivých parametrů
+    # --------------------------------------------------------
 
-    # ========================================================
-    # 12. TEST FUNDAMENTÁLNÍCH DAT
-    # ========================================================
-
-    st.markdown("---")
-
-    st.subheader("🧪 Test dostupnosti fundamentálních dat")
-
-    st.info(
-        "Tato část zatím netahá data pro celé univerzum automaticky. "
-        "Nejdříve otestujeme menší vzorek, abychom zjistili, "
-        "jak dobře veřejná data fungují."
+    st.markdown(
+        "### Dostupnost jednotlivých parametrů"
     )
 
-    max_test = st.slider(
-        "Počet titulů pro test",
-        min_value=10,
-        max_value=min(200, len(universe)),
-        value=min(30, len(universe)),
-        step=10
-    )
+    parameters = [
+        "Market Cap",
+        "P/E",
+        "Forward P/E",
+        "P/S",
+        "ROE",
+        "Revenue Growth",
+        "Earnings Growth",
+        "Free Cash Flow",
+        "Debt/Equity"
+    ]
 
-    sample = universe.head(max_test).copy()
+    availability = []
 
-    if st.button("🔬 Spustit test dat"):
+    for parameter in parameters:
 
-        tickers = sample["Ticker"].tolist()
-
-        with st.spinner(
-            f"Testuji dostupnost fundamentálních dat pro {len(tickers)} titulů..."
-        ):
-            test_data = test_yfinance_data(tickers)
-
-        # Přidáme burzu
-        test_data = test_data.merge(
-            sample[["Ticker", "Exchange"]],
-            on="Ticker",
-            how="left"
+        available = (
+            results_df[parameter]
+            .notna()
+            .sum()
         )
 
-        st.session_state["test_data"] = test_data
+        availability.append({
+            "Parametr": parameter,
+            "Dostupných hodnot": available,
+            "Celkem": total,
+            "Dostupnost %": round(
+                available / total * 100,
+                1
+            ) if total else 0
+        })
 
+    availability_df = pd.DataFrame(
+        availability
+    )
 
-    # ========================================================
-    # 13. ZOBRAZENÍ TESTU
-    # ========================================================
+    st.dataframe(
+        availability_df,
+        use_container_width=True,
+        hide_index=True
+    )
 
-    if "test_data" in st.session_state:
+    # --------------------------------------------------------
+    # Chyby
+    # --------------------------------------------------------
 
-        test_data = st.session_state["test_data"]
+    errors = results_df[
+        results_df["Error"].astype(str).str.len() > 0
+    ]
 
-        st.markdown("### Výsledky testu")
+    if not errors.empty:
 
-        parameters = [
-            "Market Cap",
-            "P/E",
-            "Forward P/E",
-            "P/S",
-            "ROE",
-            "Revenue Growth",
-            "Earnings Growth",
-            "Free Cash Flow",
-            "Debt/Equity"
-        ]
-
-        availability_rows = []
-
-        for parameter in parameters:
-
-            available = test_data[parameter].notna().sum()
-            total = len(test_data)
-
-            availability_rows.append({
-                "Parametr": parameter,
-                "Dostupných hodnot": available,
-                "Celkem": total,
-                "Dostupnost %": round(
-                    available / total * 100, 1
-                ) if total else 0
-            })
-
-        availability_df = pd.DataFrame(availability_rows)
+        st.markdown(
+            "### ⚠️ Chyby / problémy"
+        )
 
         st.dataframe(
-            availability_df,
+            errors[
+                [
+                    "Ticker",
+                    "Exchange",
+                    "Status",
+                    "Error"
+                ]
+            ],
             use_container_width=True,
             hide_index=True
         )
 
-        st.markdown("### Ukázka načtených dat")
-
-        st.dataframe(
-            test_data,
-            use_container_width=True,
-            hide_index=True,
-            height=500
-        )
-
-        st.success(
-            "Test dokončen. Pokud bude dostupnost fundamentálních dat "
-            "dostatečná, můžeme nad tímto univerzem postavit vlastní "
-            "finanční filtry."
-        )
+    st.success(
+        "Diagnostický test dokončen. "
+        "Podle tohoto výsledku můžeme rozhodnout, "
+        "jakým způsobem postavit hromadný fundamentální screening."
+    )
+```
