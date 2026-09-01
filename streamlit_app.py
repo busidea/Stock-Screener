@@ -7,13 +7,6 @@ import time
 # ============================================================
 # STOCK-SCREENER
 # Diagnostická verze fundamentálních dat
-#
-# Cíl této verze:
-# 1. vytvořit akciové univerzum NASDAQ / NYSE / XETRA
-# 2. otestovat, zda k vybraným akciím dostaneme fundamentální data
-# 3. zjistit, proč předchozí test ukazoval 0 %
-#
-# Zatím NEDĚLÁME finanční screening ani AI analýzu.
 # ============================================================
 
 st.set_page_config(
@@ -23,24 +16,15 @@ st.set_page_config(
 )
 
 st.title("🔎 Stock-Screener")
+st.caption("Diagnostická verze – test dostupnosti fundamentálních dat")
 
-st.caption(
-    "Diagnostická verze – test dostupnosti fundamentálních dat"
-)
 
 # ============================================================
 # ZDROJE
 # ============================================================
 
-NASDAQ_URL = (
-    "https://www.nasdaqtrader.com/"
-    "dynamic/SymDir/nasdaqlisted.txt"
-)
-
-NYSE_URL = (
-    "https://www.nasdaqtrader.com/"
-    "dynamic/SymDir/otherlisted.txt"
-)
+NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
+NYSE_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
 
 
 # ============================================================
@@ -61,7 +45,6 @@ def is_real_share_name(name):
 
     name = clean_text(name).lower()
 
-    # Instrumenty, které nechceme
     negative_patterns = [
         r"preferred",
         r"warrant",
@@ -84,7 +67,6 @@ def is_real_share_name(name):
         if re.search(pattern, name):
             return False
 
-    # Instrumenty, které chceme
     positive_patterns = [
         r"common stock",
         r"common shares?",
@@ -126,23 +108,14 @@ def load_nasdaq():
 
         df.columns = [clean_text(c) for c in df.columns]
 
-        # Testovací instrumenty
         if "Test Issue" in df.columns:
-            df = df[
-                df["Test Issue"].fillna("N") != "Y"
-            ]
+            df = df[df["Test Issue"].fillna("N") != "Y"]
 
-        # ETF
         if "ETF" in df.columns:
-            df = df[
-                df["ETF"].fillna("N") != "Y"
-            ]
+            df = df[df["ETF"].fillna("N") != "Y"]
 
-        # NextShares
         if "NextShares" in df.columns:
-            df = df[
-                df["NextShares"].fillna("N") != "Y"
-            ]
+            df = df[df["NextShares"].fillna("N") != "Y"]
 
         df = df.rename(columns={
             "Symbol": "Ticker",
@@ -157,15 +130,15 @@ def load_nasdaq():
 
         df = df[df["IsShare"]].copy()
 
-        return df[
-            ["Ticker", "Name", "Exchange"]
-        ]
+        return df[[
+            "Ticker",
+            "Name",
+            "Exchange"
+        ]]
 
     except Exception as e:
 
-        st.error(
-            f"Chyba při načítání NASDAQ: {e}"
-        )
+        st.error(f"Chyba při načítání NASDAQ: {e}")
 
         return pd.DataFrame()
 
@@ -189,29 +162,17 @@ def load_nyse():
 
         df.columns = [clean_text(c) for c in df.columns]
 
-        # Pouze NYSE
         if "Exchange" in df.columns:
-            df = df[
-                df["Exchange"] == "N"
-            ]
+            df = df[df["Exchange"] == "N"]
 
-        # Testovací instrumenty
         if "Test Issue" in df.columns:
-            df = df[
-                df["Test Issue"].fillna("N") != "Y"
-            ]
+            df = df[df["Test Issue"].fillna("N") != "Y"]
 
-        # ETF
         if "ETF" in df.columns:
-            df = df[
-                df["ETF"].fillna("N") != "Y"
-            ]
+            df = df[df["ETF"].fillna("N") != "Y"]
 
-        # NextShares
         if "NextShares" in df.columns:
-            df = df[
-                df["NextShares"].fillna("N") != "Y"
-            ]
+            df = df[df["NextShares"].fillna("N") != "Y"]
 
         df = df.rename(columns={
             "ACT Symbol": "Ticker",
@@ -226,15 +187,15 @@ def load_nyse():
 
         df = df[df["IsShare"]].copy()
 
-        return df[
-            ["Ticker", "Name", "Exchange"]
-        ]
+        return df[[
+            "Ticker",
+            "Name",
+            "Exchange"
+        ]]
 
     except Exception as e:
 
-        st.error(
-            f"Chyba při načítání NYSE: {e}"
-        )
+        st.error(f"Chyba při načítání NYSE: {e}")
 
         return pd.DataFrame()
 
@@ -246,41 +207,22 @@ def load_nyse():
 @st.cache_data(ttl=3600)
 def load_xetra():
 
-    # --------------------------------------------------------
-    # Záměrně používáme bezpečnější veřejný zdroj přes Yahoo
-    # pro diagnostický krok.
-    #
-    # XETRA univerzum ponecháme z předchozí funkční verze.
-    # --------------------------------------------------------
+    data = [
+        ["SAP.DE", "SAP SE", "XETRA"],
+        ["SIE.DE", "Siemens AG", "XETRA"],
+        ["ALV.DE", "Allianz SE", "XETRA"],
+        ["DTE.DE", "Deutsche Telekom AG", "XETRA"],
+        ["BMW.DE", "Bayerische Motoren Werke AG", "XETRA"]
+    ]
 
-    try:
-
-        # Pro tento krok použijeme známé XETRA tituly,
-        # abychom nejdříve ověřili mapování Yahoo tickerů.
-        data = [
-            ["SAP.DE", "SAP SE", "XETRA"],
-            ["SIE.DE", "Siemens AG", "XETRA"],
-            ["ALV.DE", "Allianz SE", "XETRA"],
-            ["DTE.DE", "Deutsche Telekom AG", "XETRA"],
-            ["BMW.DE", "Bayerische Motoren Werke AG", "XETRA"],
+    return pd.DataFrame(
+        data,
+        columns=[
+            "Ticker",
+            "Name",
+            "Exchange"
         ]
-
-        return pd.DataFrame(
-            data,
-            columns=[
-                "Ticker",
-                "Name",
-                "Exchange"
-            ]
-        )
-
-    except Exception as e:
-
-        st.error(
-            f"Chyba při přípravě XETRA testu: {e}"
-        )
-
-        return pd.DataFrame()
+    )
 
 
 # ============================================================
@@ -314,11 +256,17 @@ def load_universe():
     )
 
     universe = universe.drop_duplicates(
-        subset=["Ticker", "Exchange"]
+        subset=[
+            "Ticker",
+            "Exchange"
+        ]
     )
 
     universe = universe.sort_values(
-        ["Exchange", "Ticker"]
+        [
+            "Exchange",
+            "Ticker"
+        ]
     ).reset_index(drop=True)
 
     return universe
@@ -349,10 +297,6 @@ def get_fundamentals(ticker):
 
         stock = yf.Ticker(ticker)
 
-        # ----------------------------------------------------
-        # Hlavní test
-        # ----------------------------------------------------
-
         info = stock.info
 
         if not info:
@@ -360,10 +304,6 @@ def get_fundamentals(ticker):
                 "Ticker.info vrátil prázdná data"
             )
             return result
-
-        # ----------------------------------------------------
-        # Načtení hodnot
-        # ----------------------------------------------------
 
         result["Market Cap"] = info.get(
             "marketCap"
@@ -416,13 +356,9 @@ def get_fundamentals(ticker):
 # DIAGNOSTICKÝ VZOREK
 # ============================================================
 
-def create_test_sample(universe):
+def create_test_sample():
 
     samples = []
-
-    # --------------------------------------------------------
-    # NASDAQ – známé velké společnosti
-    # --------------------------------------------------------
 
     nasdaq_test = [
         "AAPL",
@@ -432,10 +368,6 @@ def create_test_sample(universe):
         "NVDA"
     ]
 
-    # --------------------------------------------------------
-    # NYSE – známé společnosti
-    # --------------------------------------------------------
-
     nyse_test = [
         "JPM",
         "KO",
@@ -443,10 +375,6 @@ def create_test_sample(universe):
         "V",
         "WMT"
     ]
-
-    # --------------------------------------------------------
-    # XETRA
-    # --------------------------------------------------------
 
     xetra_test = [
         "SAP.DE",
@@ -457,19 +385,22 @@ def create_test_sample(universe):
     ]
 
     for ticker in nasdaq_test:
-        samples.append(
-            [ticker, "NASDAQ"]
-        )
+        samples.append([
+            ticker,
+            "NASDAQ"
+        ])
 
     for ticker in nyse_test:
-        samples.append(
-            [ticker, "NYSE"]
-        )
+        samples.append([
+            ticker,
+            "NYSE"
+        ])
 
     for ticker in xetra_test:
-        samples.append(
-            [ticker, "XETRA"]
-        )
+        samples.append([
+            ticker,
+            "XETRA"
+        ])
 
     return pd.DataFrame(
         samples,
@@ -481,7 +412,7 @@ def create_test_sample(universe):
 
 
 # ============================================================
-# HLAVNÍ PROGRAM
+# AKCIOVÉ UNIVERZUM
 # ============================================================
 
 st.markdown("---")
@@ -544,7 +475,7 @@ else:
 
 
 # ============================================================
-# DIAGNOSTIKA FUNDAMENTÁLNÍCH DAT
+# DIAGNOSTIKA
 # ============================================================
 
 st.markdown("---")
@@ -555,13 +486,14 @@ st.subheader(
 
 st.write(
     """
-    Nejprve netestujeme tisíce titulů. Testujeme malý vzorek
-    známých akcií z každé burzy. Cílem je zjistit, zda správně
-    funguje spojení ticker → Yahoo Finance → fundamentální data.
+    Testujeme malý vzorek známých akcií z NASDAQ,
+    NYSE a XETRA. Cílem je zjistit, zda správně
+    funguje spojení ticker → Yahoo Finance →
+    fundamentální data.
     """
 )
 
-sample = create_test_sample(universe)
+sample = create_test_sample()
 
 st.markdown("### Testované tituly")
 
@@ -598,7 +530,6 @@ if st.button(
             (i + 1) / len(sample)
         )
 
-        # malá pauza
         time.sleep(0.2)
 
     results_df = pd.DataFrame(
@@ -611,7 +542,7 @@ if st.button(
 
 
 # ============================================================
-# VÝSLEDEK DIAGNOSTIKY
+# VÝSLEDKY
 # ============================================================
 
 if "diagnostic_results" in st.session_state:
@@ -625,10 +556,6 @@ if "diagnostic_results" in st.session_state:
     st.subheader(
         "📋 Výsledek diagnostického testu"
     )
-
-    # --------------------------------------------------------
-    # Přehled úspěšnosti
-    # --------------------------------------------------------
 
     total = len(results_df)
 
@@ -662,8 +589,9 @@ if "diagnostic_results" in st.session_state:
             f"{success_percent:.1f} %"
         )
 
+
     # --------------------------------------------------------
-    # Podle burzy
+    # Úspěšnost podle burzy
     # --------------------------------------------------------
 
     st.markdown(
@@ -675,8 +603,10 @@ if "diagnostic_results" in st.session_state:
         .groupby("Exchange")
         .agg(
             Testováno=("Ticker", "count"),
-            Úspěšně=("Status", lambda x:
-                     (x == "OK").sum())
+            Úspěšně=(
+                "Status",
+                lambda x: (x == "OK").sum()
+            )
         )
         .reset_index()
     )
@@ -693,8 +623,9 @@ if "diagnostic_results" in st.session_state:
         hide_index=True
     )
 
+
     # --------------------------------------------------------
-    # Kompletní výsledek
+    # Detailní výsledek
     # --------------------------------------------------------
 
     st.markdown(
@@ -707,6 +638,7 @@ if "diagnostic_results" in st.session_state:
         hide_index=True,
         height=600
     )
+
 
     # --------------------------------------------------------
     # Dostupnost jednotlivých parametrů
@@ -758,8 +690,9 @@ if "diagnostic_results" in st.session_state:
         hide_index=True
     )
 
+
     # --------------------------------------------------------
-    # Chyby
+    # CHYBY
     # --------------------------------------------------------
 
     errors = results_df[
@@ -785,9 +718,9 @@ if "diagnostic_results" in st.session_state:
             hide_index=True
         )
 
+
     st.success(
         "Diagnostický test dokončen. "
-        "Podle tohoto výsledku můžeme rozhodnout, "
-        "jakým způsobem postavit hromadný fundamentální screening."
+        "Podle výsledku můžeme rozhodnout, "
+        "jak postavit hromadný fundamentální screening."
     )
-```
