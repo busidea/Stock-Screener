@@ -1,5 +1,6 @@
 streamlit
 pandas
+numpy
 yfinance
 requests
 g4f
