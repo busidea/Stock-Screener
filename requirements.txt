@@ -1,3 +1,6 @@
 streamlit
 pandas
 yfinance
+requests
+g4f
+matplotlib
