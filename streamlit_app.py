@@ -11,7 +11,7 @@ from datetime import datetime
 st.set_page_config(page_title="Stock-Screener", page_icon="🔎", layout="wide")
 
 st.title("🔎 Stock-Screener")
-st.caption("V2 – robustnější univerzum, ticker mapping a fundamentální data")
+st.caption("V2.2 – robustnější univerzum, ticker mapping a fundamentální data")
 
 NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 NYSE_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
@@ -259,6 +259,71 @@ def resolve_xetra_symbol(ticker, name, isin):
     return ticker, "unresolved"
 
 @st.cache_data(ttl=1800, show_spinner=False)
+def yahoo_annual_growth_data(yahoo_ticker):
+    """Fetch annual revenue and net income directly from Yahoo's
+    fundamentals-timeseries endpoint. This is an independent fallback
+    when yfinance's income_stmt is incomplete or its row labels change.
+    Returns newest and previous annual values.
+    """
+    empty = (np.nan, np.nan, np.nan, np.nan)
+    try:
+        end = int(time.time())
+        start = end - 5 * 365 * 24 * 3600
+        url = f"https://query1.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/{yahoo_ticker}"
+        params = {
+            "symbol": yahoo_ticker,
+            "type": "annualTotalRevenue,annualNetIncome",
+            "period1": start,
+            "period2": end,
+        }
+        r = requests.get(
+            url,
+            params=params,
+            timeout=20,
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        r.raise_for_status()
+        data = r.json()
+        result = data.get("timeseries", {}).get("result", [])
+
+        revenue_values = []
+        income_values = []
+        for item in result:
+            for key in ("annualTotalRevenue", "annualNetIncome"):
+                vals = item.get(key, [])
+                for v in vals:
+                    raw = v.get("reportedValue", {}) if isinstance(v, dict) else {}
+                    val = raw.get("raw") if isinstance(raw, dict) else None
+                    if key == "annualTotalRevenue" and val is not None:
+                        revenue_values.append((v.get("asOfDate", ""), safe_float(val)))
+                    elif key == "annualNetIncome" and val is not None:
+                        income_values.append((v.get("asOfDate", ""), safe_float(val)))
+
+        def latest_two(values):
+            clean = [(d, v) for d, v in values if d and not pd.isna(v)]
+            clean.sort(key=lambda x: x[0], reverse=True)
+            # one value per annual date
+            unique = []
+            seen = set()
+            for d, v in clean:
+                if d in seen:
+                    continue
+                seen.add(d)
+                unique.append(v)
+                if len(unique) == 2:
+                    break
+            if len(unique) >= 2:
+                return unique[0], unique[1]
+            return np.nan, np.nan
+
+        rev_cur, rev_prev = latest_two(revenue_values)
+        ni_cur, ni_prev = latest_two(income_values)
+        return rev_cur, rev_prev, ni_cur, ni_prev
+    except Exception:
+        return empty
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
 def fetch_fundamentals(ticker, exchange, name="", isin=""):
     time.sleep(0.20)
     requested_ticker = ticker
@@ -284,18 +349,27 @@ def fetch_fundamentals(ticker, exchange, name="", isin=""):
         except Exception:
             fast = {}
 
+        # V2.2: Growth needs historical annual periods.
+        # Do NOT let a non-empty TTM statement prevent us from loading
+        # the separate annual income statement.
         income = pd.DataFrame()
+        ttm_income = pd.DataFrame()
         balance = pd.DataFrame()
         cashflow = pd.DataFrame()
 
-        for attr in ("ttm_income_stmt", "income_stmt"):
-            try:
-                candidate = getattr(t, attr)
-                if isinstance(candidate, pd.DataFrame) and not candidate.empty:
-                    income = candidate
-                    break
-            except Exception:
-                pass
+        try:
+            candidate = t.income_stmt
+            if isinstance(candidate, pd.DataFrame) and not candidate.empty:
+                income = candidate
+        except Exception:
+            pass
+
+        try:
+            candidate = t.ttm_income_stmt
+            if isinstance(candidate, pd.DataFrame) and not candidate.empty:
+                ttm_income = candidate
+        except Exception:
+            pass
 
         try:
             balance = t.balance_sheet
@@ -317,12 +391,12 @@ def fetch_fundamentals(ticker, exchange, name="", isin=""):
                         return s
             return pd.Series(dtype=float)
 
-        revenue_s = row_series(income, ["Total Revenue", "Operating Revenue"])
-        net_income_s = row_series(income, ["Net Income", "Net Income Common Stockholders"])
-        equity_s = row_series(balance, ["Stockholders Equity", "Common Stock Equity", "Total Equity Gross Minority Interest"])
-        debt_s = row_series(balance, ["Total Debt"])
-        ocf_s = row_series(cashflow, ["Operating Cash Flow", "Total Cash From Operating Activities"])
-        capex_s = row_series(cashflow, ["Capital Expenditure", "Capital Expenditure Reported"])
+        revenue_s = row_series(income, ["TotalRevenue", "OperatingRevenue", "Total Revenue", "Operating Revenue"])
+        net_income_s = row_series(income, ["NetIncome", "NetIncomeCommonStockholders", "Net Income", "Net Income Common Stockholders"])
+        equity_s = row_series(balance, ["StockholdersEquity", "CommonStockEquity", "TotalEquityGrossMinorityInterest", "Stockholders Equity", "Common Stock Equity", "Total Equity Gross Minority Interest"])
+        debt_s = row_series(balance, ["TotalDebt", "Total Debt"])
+        ocf_s = row_series(cashflow, ["OperatingCashFlow", "TotalCashFromOperatingActivities", "Operating Cash Flow", "Total Cash From Operating Activities"])
+        capex_s = row_series(cashflow, ["CapitalExpenditure", "CapitalExpenditureReported", "Capital Expenditure", "Capital Expenditure Reported"])
 
         price = first_valid(info.get("currentPrice"), fast.get("last_price"), info.get("regularMarketPrice"))
         shares = first_valid(info.get("sharesOutstanding"), info.get("impliedSharesOutstanding"))
@@ -364,13 +438,34 @@ def fetch_fundamentals(ticker, exchange, name="", isin=""):
         if pd.isna(roe) and net_income > 0 and equity > 0:
             roe = net_income / equity * 100
 
-        # Revenue growth is meaningful when both revenue observations are positive.
+        # --------------------------------------------------------
+        # Growth V2.2
+        # --------------------------------------------------------
+        # If yfinance's annual income statement did not yield two usable
+        # observations, query Yahoo's fundamentals-timeseries endpoint
+        # directly. This avoids dependence on yfinance row-label changes.
+        api_rev_cur, api_rev_prev, api_ni_cur, api_ni_prev = yahoo_annual_growth_data(yahoo_ticker)
+
+        if not (revenue > 0 and previous_revenue > 0):
+            revenue = api_rev_cur if not pd.isna(api_rev_cur) else revenue
+            previous_revenue = api_rev_prev if not pd.isna(api_rev_prev) else previous_revenue
+
+        if not (net_income > 0 and previous_net_income > 0):
+            net_income = api_ni_cur if not pd.isna(api_ni_cur) else net_income
+            previous_net_income = api_ni_prev if not pd.isna(api_ni_prev) else previous_net_income
+
+        # Revenue growth: both annual revenue periods must be positive.
         revenue_growth = np.nan
         if revenue > 0 and previous_revenue > 0:
             revenue_growth = (revenue / previous_revenue - 1) * 100
+        else:
+            yahoo_rev_growth = first_valid(info.get("revenueGrowth"))
+            if not pd.isna(yahoo_rev_growth):
+                revenue_growth = yahoo_rev_growth * 100
 
-        # Earnings growth: deliberately NOT using Yahoo's potentially misleading
-        # percentage when the base earnings are zero/negative.
+        # Earnings growth: deliberately require positive earnings in both
+        # periods. We do not use Yahoo's generic earningsGrowth because it
+        # can become meaningless when the prior-year base is negative/near 0.
         earnings_growth = np.nan
         if net_income > 0 and previous_net_income > 0:
             earnings_growth = (net_income / previous_net_income - 1) * 100
@@ -408,7 +503,9 @@ def fetch_fundamentals(ticker, exchange, name="", isin=""):
 
         source_parts = ["Yahoo info"]
         if not income.empty:
-            source_parts.append("income")
+            source_parts.append("annual income")
+        if not ttm_income.empty:
+            source_parts.append("TTM income")
         if not balance.empty:
             source_parts.append("balance")
         if not cashflow.empty:
@@ -668,7 +765,7 @@ with st.expander("🧭 Kontrola XETRA mappingu", expanded=False):
         )
 
 st.info(
-    "V2 záměrně nepřevádí chybějící hodnoty na nulu. Earnings Growth se počítá pouze tehdy, "
+    "V2.2 záměrně nepřevádí chybějící hodnoty na nulu. Earnings Growth se počítá pouze tehdy, "
     "když jsou poslední i předchozí zisk kladné; tím se eliminují absurdní hodnoty vznikající "
     "při přechodu zisku přes nulu. Další fáze může přidat samostatné signály pro turnaround "
     "a přechod ze ztráty do zisku."
