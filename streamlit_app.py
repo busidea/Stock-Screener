@@ -11,7 +11,7 @@ from datetime import datetime
 st.set_page_config(page_title="Stock-Screener", page_icon="🔎", layout="wide")
 
 st.title("🔎 Stock-Screener")
-st.caption("V2.2 – robustnější univerzum, ticker mapping a fundamentální data")
+st.caption("V3 – fundamenty → charakter firmy → investiční příběh")
 
 NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 NYSE_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
@@ -260,11 +260,7 @@ def resolve_xetra_symbol(ticker, name, isin):
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def yahoo_annual_growth_data(yahoo_ticker):
-    """Fetch annual revenue and net income directly from Yahoo's
-    fundamentals-timeseries endpoint. This is an independent fallback
-    when yfinance's income_stmt is incomplete or its row labels change.
-    Returns newest and previous annual values.
-    """
+    """Fallback for annual revenue/net income when yfinance statement rows are incomplete."""
     empty = (np.nan, np.nan, np.nan, np.nan)
     try:
         end = int(time.time())
@@ -276,52 +272,34 @@ def yahoo_annual_growth_data(yahoo_ticker):
             "period1": start,
             "period2": end,
         }
-        r = requests.get(
-            url,
-            params=params,
-            timeout=20,
-            headers={"User-Agent": "Mozilla/5.0"},
-        )
+        r = requests.get(url, params=params, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
         r.raise_for_status()
-        data = r.json()
-        result = data.get("timeseries", {}).get("result", [])
-
-        revenue_values = []
-        income_values = []
+        result = r.json().get("timeseries", {}).get("result", [])
+        revenues, incomes = [], []
         for item in result:
-            for key in ("annualTotalRevenue", "annualNetIncome"):
-                vals = item.get(key, [])
-                for v in vals:
+            for key, target in (("annualTotalRevenue", revenues), ("annualNetIncome", incomes)):
+                for v in item.get(key, []) or []:
                     raw = v.get("reportedValue", {}) if isinstance(v, dict) else {}
                     val = raw.get("raw") if isinstance(raw, dict) else None
-                    if key == "annualTotalRevenue" and val is not None:
-                        revenue_values.append((v.get("asOfDate", ""), safe_float(val)))
-                    elif key == "annualNetIncome" and val is not None:
-                        income_values.append((v.get("asOfDate", ""), safe_float(val)))
-
+                    date = v.get("asOfDate", "") if isinstance(v, dict) else ""
+                    if date and val is not None:
+                        target.append((date, safe_float(val)))
         def latest_two(values):
             clean = [(d, v) for d, v in values if d and not pd.isna(v)]
             clean.sort(key=lambda x: x[0], reverse=True)
-            # one value per annual date
-            unique = []
-            seen = set()
+            out, seen = [], set()
             for d, v in clean:
                 if d in seen:
                     continue
-                seen.add(d)
-                unique.append(v)
-                if len(unique) == 2:
+                seen.add(d); out.append(v)
+                if len(out) == 2:
                     break
-            if len(unique) >= 2:
-                return unique[0], unique[1]
-            return np.nan, np.nan
-
-        rev_cur, rev_prev = latest_two(revenue_values)
-        ni_cur, ni_prev = latest_two(income_values)
-        return rev_cur, rev_prev, ni_cur, ni_prev
+            return (out[0], out[1]) if len(out) == 2 else (np.nan, np.nan)
+        rc, rp = latest_two(revenues)
+        ic, ip = latest_two(incomes)
+        return rc, rp, ic, ip
     except Exception:
         return empty
-
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_fundamentals(ticker, exchange, name="", isin=""):
@@ -349,9 +327,6 @@ def fetch_fundamentals(ticker, exchange, name="", isin=""):
         except Exception:
             fast = {}
 
-        # V2.2: Growth needs historical annual periods.
-        # Do NOT let a non-empty TTM statement prevent us from loading
-        # the separate annual income statement.
         income = pd.DataFrame()
         ttm_income = pd.DataFrame()
         balance = pd.DataFrame()
@@ -384,19 +359,29 @@ def fetch_fundamentals(ticker, exchange, name="", isin=""):
         def row_series(df, labels):
             if df is None or df.empty:
                 return pd.Series(dtype=float)
+            idx = {str(x).strip().lower(): x for x in df.index}
             for label in labels:
-                if label in df.index:
-                    s = pd.to_numeric(df.loc[label], errors="coerce").dropna()
+                key = str(label).strip().lower()
+                if key in idx:
+                    s = pd.to_numeric(df.loc[idx[key]], errors="coerce").dropna()
+                    if not s.empty:
+                        return s
+            # Accept yfinance's compact row names as well as spaced variants.
+            compact = {re.sub(r"[^a-z0-9]", "", str(x).lower()): x for x in df.index}
+            for label in labels:
+                key = re.sub(r"[^a-z0-9]", "", str(label).lower())
+                if key in compact:
+                    s = pd.to_numeric(df.loc[compact[key]], errors="coerce").dropna()
                     if not s.empty:
                         return s
             return pd.Series(dtype=float)
 
-        revenue_s = row_series(income, ["TotalRevenue", "OperatingRevenue", "Total Revenue", "Operating Revenue"])
-        net_income_s = row_series(income, ["NetIncome", "NetIncomeCommonStockholders", "Net Income", "Net Income Common Stockholders"])
-        equity_s = row_series(balance, ["StockholdersEquity", "CommonStockEquity", "TotalEquityGrossMinorityInterest", "Stockholders Equity", "Common Stock Equity", "Total Equity Gross Minority Interest"])
-        debt_s = row_series(balance, ["TotalDebt", "Total Debt"])
-        ocf_s = row_series(cashflow, ["OperatingCashFlow", "TotalCashFromOperatingActivities", "Operating Cash Flow", "Total Cash From Operating Activities"])
-        capex_s = row_series(cashflow, ["CapitalExpenditure", "CapitalExpenditureReported", "Capital Expenditure", "Capital Expenditure Reported"])
+        revenue_s = row_series(income, ["Total Revenue", "TotalRevenue", "Operating Revenue", "OperatingRevenue"])
+        net_income_s = row_series(income, ["Net Income", "NetIncome", "Net Income Common Stockholders", "NetIncomeCommonStockholders"])
+        equity_s = row_series(balance, ["Stockholders Equity", "StockholdersEquity", "Common Stock Equity", "CommonStockEquity", "Total Equity Gross Minority Interest"])
+        debt_s = row_series(balance, ["Total Debt", "TotalDebt"])
+        ocf_s = row_series(cashflow, ["Operating Cash Flow", "OperatingCashFlow", "Total Cash From Operating Activities"])
+        capex_s = row_series(cashflow, ["Capital Expenditure", "CapitalExpenditure", "Capital Expenditure Reported"])
 
         price = first_valid(info.get("currentPrice"), fast.get("last_price"), info.get("regularMarketPrice"))
         shares = first_valid(info.get("sharesOutstanding"), info.get("impliedSharesOutstanding"))
@@ -417,6 +402,14 @@ def fetch_fundamentals(ticker, exchange, name="", isin=""):
         previous_revenue = safe_float(revenue_s.iloc[1]) if len(revenue_s) > 1 else np.nan
         net_income = safe_float(net_income_s.iloc[0]) if not net_income_s.empty else np.nan
         previous_net_income = safe_float(net_income_s.iloc[1]) if len(net_income_s) > 1 else np.nan
+
+        api_rev_cur, api_rev_prev, api_ni_cur, api_ni_prev = yahoo_annual_growth_data(yahoo_ticker)
+        if not (revenue > 0 and previous_revenue > 0):
+            revenue = api_rev_cur if not pd.isna(api_rev_cur) else revenue
+            previous_revenue = api_rev_prev if not pd.isna(api_rev_prev) else previous_revenue
+        if not (net_income > 0 and previous_net_income > 0):
+            net_income = api_ni_cur if not pd.isna(api_ni_cur) else net_income
+            previous_net_income = api_ni_prev if not pd.isna(api_ni_prev) else previous_net_income
         equity = safe_float(equity_s.iloc[0]) if not equity_s.empty else np.nan
         debt = safe_float(debt_s.iloc[0]) if not debt_s.empty else np.nan
         ocf = safe_float(ocf_s.iloc[0]) if not ocf_s.empty else np.nan
@@ -438,34 +431,13 @@ def fetch_fundamentals(ticker, exchange, name="", isin=""):
         if pd.isna(roe) and net_income > 0 and equity > 0:
             roe = net_income / equity * 100
 
-        # --------------------------------------------------------
-        # Growth V2.2
-        # --------------------------------------------------------
-        # If yfinance's annual income statement did not yield two usable
-        # observations, query Yahoo's fundamentals-timeseries endpoint
-        # directly. This avoids dependence on yfinance row-label changes.
-        api_rev_cur, api_rev_prev, api_ni_cur, api_ni_prev = yahoo_annual_growth_data(yahoo_ticker)
-
-        if not (revenue > 0 and previous_revenue > 0):
-            revenue = api_rev_cur if not pd.isna(api_rev_cur) else revenue
-            previous_revenue = api_rev_prev if not pd.isna(api_rev_prev) else previous_revenue
-
-        if not (net_income > 0 and previous_net_income > 0):
-            net_income = api_ni_cur if not pd.isna(api_ni_cur) else net_income
-            previous_net_income = api_ni_prev if not pd.isna(api_ni_prev) else previous_net_income
-
-        # Revenue growth: both annual revenue periods must be positive.
+        # Revenue growth is meaningful when both revenue observations are positive.
         revenue_growth = np.nan
         if revenue > 0 and previous_revenue > 0:
             revenue_growth = (revenue / previous_revenue - 1) * 100
-        else:
-            yahoo_rev_growth = first_valid(info.get("revenueGrowth"))
-            if not pd.isna(yahoo_rev_growth):
-                revenue_growth = yahoo_rev_growth * 100
 
-        # Earnings growth: deliberately require positive earnings in both
-        # periods. We do not use Yahoo's generic earningsGrowth because it
-        # can become meaningless when the prior-year base is negative/near 0.
+        # Earnings growth: deliberately NOT using Yahoo's potentially misleading
+        # percentage when the base earnings are zero/negative.
         earnings_growth = np.nan
         if net_income > 0 and previous_net_income > 0:
             earnings_growth = (net_income / previous_net_income - 1) * 100
@@ -556,134 +528,222 @@ def build_candidate_sample(universe, max_candidates):
     result = pd.concat(groups, ignore_index=True) if groups else universe.head(0)
     return result.sample(frac=1, random_state=42).reset_index(drop=True)
 
+# -----------------------------------------------------------------------------
+# V3 – příběhy
+# -----------------------------------------------------------------------------
+
+def band(score):
+    if pd.isna(score):
+        return "⚪ N/A"
+    if score >= 70:
+        return "🟢 Silné"
+    if score >= 50:
+        return "🟡 Střední"
+    return "🔴 Slabé"
+
+def tier_score(v, cuts, reverse=False):
+    """Map a metric to 0–100 using transparent threshold bands."""
+    if pd.isna(v):
+        return np.nan
+    for threshold, score in cuts:
+        if (v <= threshold) if reverse else (v >= threshold):
+            return float(score)
+    return 0.0
+
+def calc_scores(r):
+    # Value: lower valuation is better.
+    value_parts = [
+        tier_score(r["P/E"], [(10,100),(15,85),(20,70),(30,50),(45,25)], reverse=True),
+        tier_score(r["Forward P/E"], [(10,100),(15,85),(20,70),(30,50),(45,25)], reverse=True),
+        tier_score(r["P/S"], [(1,100),(2,85),(3,70),(5,50),(8,25)], reverse=True),
+    ]
+    # Quality: profitability, positive cash generation, and reasonable leverage.
+    quality_parts = [
+        tier_score(r["ROE"], [(25,100),(20,90),(15,75),(10,55),(5,30)], reverse=False),
+        100.0 if (not pd.isna(r["Free Cash Flow"]) and r["Free Cash Flow"] > 0) else (0.0 if not pd.isna(r["Free Cash Flow"]) else np.nan),
+        tier_score(r["Debt/Equity"], [(25,100),(50,85),(100,65),(150,45),(250,20)], reverse=True),
+    ]
+    # Growth: positive revenue and earnings growth are the core signals.
+    growth_parts = [
+        tier_score(r["Revenue Growth"], [(20,100),(10,85),(5,70),(0,50),(-5,25)], reverse=False),
+        tier_score(r["Earnings Growth"], [(25,100),(15,85),(10,75),(5,60),(0,45)], reverse=False),
+    ]
+    def avg_available(parts):
+        vals = [x for x in parts if not pd.isna(x)]
+        return round(sum(vals)/len(vals), 1) if vals else np.nan
+    return avg_available(value_parts), avg_available(quality_parts), avg_available(growth_parts)
+
+def classify_story(r):
+    v, q, g = r["Value Score"], r["Quality Score"], r["Growth Score"]
+    # These are deliberately simple first-generation rules. We will refine them later.
+    if pd.isna(v) or pd.isna(q) or pd.isna(g):
+        return "⚪ Nedostatek dat"
+    if v >= 70 and q < 50 and g < 50:
+        return "🪤 Value Trap – varování"
+    if q >= 70 and g >= 65 and v >= 45:
+        return "🏆 Quality Compounder"
+    if q >= 70 and v >= 60 and g >= 45:
+        return "💎 Kvalita za rozumnou cenu"
+    if g >= 70 and v >= 50 and q >= 50:
+        return "🚀 Růst za rozumnou cenu"
+    if v >= 65 and q >= 50 and g < 50:
+        return "💰 Value / levná firma"
+    # Turnaround signal: revenue can still be weak, but earnings are improving strongly.
+    if q < 60 and r["Earnings Growth"] >= 25 and (pd.isna(r["Revenue Growth"]) or r["Revenue Growth"] < 10):
+        return "🔄 Kandidát na turnaround"
+    if g >= 60 and q < 50 and v < 50:
+        return "🔥 High Growth / dražší příběh"
+    if v < 40 and q < 50 and g < 50:
+        return "⚠️ Slabý fundamentální obraz"
+    return "🔎 Smíšený příběh"
+
+def story_priority(r):
+    story = r["Story"]
+    v, q, g = r["Value Score"], r["Quality Score"], r["Growth Score"]
+    targets = {
+        "🏆 Quality Compounder": (q, g, v),
+        "💎 Kvalita za rozumnou cenu": (q, v, g),
+        "🚀 Růst za rozumnou cenu": (g, q, v),
+        "💰 Value / levná firma": (v, q, g),
+        "🔄 Kandidát na turnaround": (g, v, q),
+        "🔥 High Growth / dražší příběh": (g, q, v),
+        "🪤 Value Trap – varování": (v, q, g),
+        "⚠️ Slabý fundamentální obraz": (100-max(v or 0,0), 100-max(q or 0,0), 100-max(g or 0,0)),
+    }
+    vals = targets.get(story, (v,q,g))
+    vals = [x for x in vals if not pd.isna(x)]
+    return round(sum(vals)/len(vals), 1) if vals else np.nan
+
 # Sidebar
 st.sidebar.header("⚙️ Nastavení")
-selected_exchanges = st.sidebar.multiselect(
-    "Burzy",
-    ["NASDAQ", "NYSE", "XETRA"],
-    default=["NASDAQ", "NYSE", "XETRA"]
-)
-
+selected_exchanges = st.sidebar.multiselect("Burzy", ["NASDAQ", "NYSE", "XETRA"], default=["NASDAQ", "NYSE", "XETRA"])
 min_cap_b = st.sidebar.number_input("Min. Market Cap (mld.)", min_value=0.0, value=1.0, step=0.5)
 max_candidates = st.sidebar.slider("Max. titulů pro načtení", 25, 1000, 150, 25)
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("🔎 Screeningové filtry")
-max_pe = st.sidebar.number_input("Max. P/E", min_value=0.0, value=25.0, step=1.0)
-max_fpe = st.sidebar.number_input("Max. Forward P/E", min_value=0.0, value=20.0, step=1.0)
-min_roe = st.sidebar.number_input("Min. ROE (%)", value=10.0, step=1.0)
-min_rev_growth = st.sidebar.number_input("Min. Revenue Growth (%)", value=0.0, step=1.0)
-min_earn_growth = st.sidebar.number_input("Min. Earnings Growth (%)", value=0.0, step=1.0)
-min_fcf_m = st.sidebar.number_input("Min. FCF (mil.)", value=0.0, step=50.0)
-max_de = st.sidebar.number_input("Max. Debt/Equity (%)", value=150.0, step=25.0)
+st.sidebar.subheader("🎯 Jaký příběh hledám?")
+story_options = [
+    "🏆 Quality Compounder",
+    "💎 Kvalita za rozumnou cenu",
+    "🚀 Růst za rozumnou cenu",
+    "💰 Value / levná firma",
+    "🔄 Kandidát na turnaround",
+    "🔥 High Growth / dražší příběh",
+    "🪤 Value Trap – varování",
+]
+selected_stories = st.sidebar.multiselect("Příběhy", story_options, default=story_options[:6], help="Neatraktivní příběhy nemusíš hledat; Value Trap zde slouží jako výjimka – upozornění na levnou firmu se slabými základy.")
+min_data = st.sidebar.slider("Min. počet dostupných parametrů", 3, len(PARAMS), 7, 1)
+
+with st.sidebar.expander("⚙️ Klasické filtry (volitelné)"):
+    use_classic = st.checkbox("Použít klasické filtry", value=False)
+    max_pe = st.number_input("Max. P/E", min_value=0.0, value=25.0, step=1.0)
+    max_fpe = st.number_input("Max. Forward P/E", min_value=0.0, value=20.0, step=1.0)
+    min_roe = st.number_input("Min. ROE (%)", value=10.0, step=1.0)
+    min_rev_growth = st.number_input("Min. Revenue Growth (%)", value=0.0, step=1.0)
+    min_earn_growth = st.number_input("Min. Earnings Growth (%)", value=0.0, step=1.0)
+    min_fcf_m = st.number_input("Min. FCF (mil.)", value=0.0, step=50.0)
+    max_de = st.number_input("Max. Debt/Equity (%)", value=150.0, step=25.0)
 
 run = st.sidebar.button("🚀 Spustit screening", type="primary")
 clear = st.sidebar.button("🧹 Vyčistit výsledky")
 refresh = st.sidebar.button("🔄 Obnovit zdroje")
 
 if refresh:
-    st.cache_data.clear()
-    st.rerun()
-
+    st.cache_data.clear(); st.rerun()
 if clear:
-    st.session_state.pop("screening_results", None)
-    st.rerun()
-
+    st.session_state.pop("screening_results", None); st.rerun()
 if not selected_exchanges:
-    st.warning("Vyber alespoň jednu burzu.")
-    st.stop()
+    st.warning("Vyber alespoň jednu burzu."); st.stop()
 
 with st.spinner("Načítám aktuální seznam titulů z oficiálních zdrojů…"):
     try:
         universe = load_universe(selected_exchanges)
     except Exception as e:
-        st.error(f"Chyba při načtení univerza: {e}")
-        st.stop()
+        st.error(f"Chyba při načtení univerza: {e}"); st.stop()
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Celkem v univerzu", f"{len(universe):,}".replace(",", " "))
 for i, ex in enumerate(selected_exchanges[:3], start=2):
-    c = [c2, c3, c4][i-2]
-    c.metric(ex, f"{int((universe['Exchange'] == ex).sum()):,}".replace(",", " "))
+    [c2, c3, c4][i-2].metric(ex, f"{int((universe['Exchange'] == ex).sum()):,}".replace(",", " "))
 
 st.markdown("### 🌍 Univerzum")
 st.caption("NASDAQ/NYSE jsou získávány z Nasdaq Trader; XETRA z oficiálního seznamu Deutsche Börse. XETRA je omezeno na Instrument Type = CS (Common Stock / Equity).")
 
 if not run and "screening_results" not in st.session_state:
-    st.info("Nastav filtry a stiskni **🚀 Spustit screening**.")
-    st.stop()
+    st.info("Nastav příběhy a stiskni **🚀 Spustit screening**."); st.stop()
 
 if run:
     candidates = build_candidate_sample(universe, max_candidates)
-    rows = []
-    progress = st.progress(0)
-    status_text = st.empty()
-
+    rows = []; progress = st.progress(0); status_text = st.empty()
     for i, row in candidates.iterrows():
         status_text.write(f"Načítám {i+1}/{len(candidates)}: **{row['Ticker']}**")
-        rows.append(
-            fetch_fundamentals(
-                row["Ticker"],
-                row["Exchange"],
-                row.get("Name", ""),
-                row.get("ISIN", "")
-            )
-        )
-        progress.progress((i + 1) / len(candidates))
-
-    progress.empty()
-    status_text.empty()
+        rows.append(fetch_fundamentals(row["Ticker"], row["Exchange"], row.get("Name", ""), row.get("ISIN", "")))
+        progress.progress((i+1)/len(candidates))
+    progress.empty(); status_text.empty()
     st.session_state["screening_results"] = pd.DataFrame(rows)
 
 results_df = st.session_state.get("screening_results", pd.DataFrame())
 if results_df.empty:
-    st.warning("Pro vybrané nastavení nebyla načtena žádná data.")
-    st.stop()
+    st.warning("Pro vybrané nastavení nebyla načtena žádná data."); st.stop()
 
-# Screening conditions. Missing data NEVER becomes zero.
-def passes(r):
-    cap_ok = not pd.isna(r["Market Cap"]) and r["Market Cap"] >= min_cap_b * 1e9
-    pe_ok = not pd.isna(r["P/E"]) and r["P/E"] > 0 and r["P/E"] <= max_pe
-    fpe_ok = not pd.isna(r["Forward P/E"]) and r["Forward P/E"] > 0 and r["Forward P/E"] <= max_fpe
-    roe_ok = not pd.isna(r["ROE"]) and r["ROE"] >= min_roe
-    rev_ok = not pd.isna(r["Revenue Growth"]) and r["Revenue Growth"] >= min_rev_growth
-    earn_ok = not pd.isna(r["Earnings Growth"]) and r["Earnings Growth"] >= min_earn_growth
-    fcf_ok = not pd.isna(r["Free Cash Flow"]) and r["Free Cash Flow"] >= min_fcf_m * 1e6
-    de_ok = not pd.isna(r["Debt/Equity"]) and r["Debt/Equity"] <= max_de
-    return all([cap_ok, pe_ok, fpe_ok, roe_ok, rev_ok, earn_ok, fcf_ok, de_ok])
+# Scores and stories
+scores = results_df.apply(calc_scores, axis=1, result_type="expand")
+scores.columns = ["Value Score", "Quality Score", "Growth Score"]
+results_df = pd.concat([results_df.reset_index(drop=True), scores.reset_index(drop=True)], axis=1)
+results_df["Story"] = results_df.apply(classify_story, axis=1)
+results_df["Story Priority"] = results_df.apply(story_priority, axis=1)
+results_df["Available Params"] = results_df[PARAMS].notna().sum(axis=1)
 
-results_df["Pass"] = results_df.apply(passes, axis=1)
-results_df = results_df.sort_values(["Pass", "P/E"], ascending=[False, True], na_position="last").reset_index(drop=True)
+# Optional classic filters. Missing data never passes a requested filter.
+def passes_classic(r):
+    checks = [
+        not pd.isna(r["Market Cap"]) and r["Market Cap"] >= min_cap_b * 1e9,
+        not pd.isna(r["P/E"]) and r["P/E"] > 0 and r["P/E"] <= max_pe,
+        not pd.isna(r["Forward P/E"]) and r["Forward P/E"] > 0 and r["Forward P/E"] <= max_fpe,
+        not pd.isna(r["ROE"]) and r["ROE"] >= min_roe,
+        not pd.isna(r["Revenue Growth"]) and r["Revenue Growth"] >= min_rev_growth,
+        not pd.isna(r["Earnings Growth"]) and r["Earnings Growth"] >= min_earn_growth,
+        not pd.isna(r["Free Cash Flow"]) and r["Free Cash Flow"] >= min_fcf_m * 1e6,
+        not pd.isna(r["Debt/Equity"]) and r["Debt/Equity"] <= max_de,
+    ]
+    return all(checks)
+
+results_df["Pass"] = results_df.apply(passes_classic, axis=1) if use_classic else True
+results_df["Story Selected"] = results_df["Story"].isin(selected_stories) if selected_stories else True
+results_df["Eligible"] = (results_df["Available Params"] >= min_data) & results_df["Pass"] & results_df["Story Selected"]
+results_df = results_df.sort_values(["Eligible", "Story Priority"], ascending=[False, False], na_position="last").reset_index(drop=True)
 st.session_state["screening_results"] = results_df
 
 # Summary
 st.markdown("## 📊 Výsledek screeningu")
-a, b, c, d, e = st.columns(5)
+a,b,c,d,e = st.columns(5)
 a.metric("Načteno", len(results_df))
 b.metric("Kompletní data", int((results_df["Status"] == "OK").sum()))
-c.metric("Částečná data", int((results_df["Status"] == "PARTIAL").sum()))
-d.metric("Bez dat", int((results_df["Status"] == "NO DATA").sum()))
-e.metric("Prošlo filtrem", int(results_df["Pass"].sum()))
+c.metric("≥ min. dat", int((results_df["Available Params"] >= min_data).sum()))
+d.metric("Vybraný příběh", int(results_df["Story Selected"].sum()))
+e.metric("Kandidáti", int(results_df["Eligible"].sum()))
 
-# Candidates
+st.markdown("### 🧭 Mapa investičních příběhů")
+st.caption("Skóre není predikce výnosu. Je to první, transparentní způsob, jak převést devět fundamentů do charakteru firmy. Pravidla budeme společně zpřesňovat.")
+
+story_counts = results_df[results_df["Available Params"] >= min_data]["Story"].value_counts().rename_axis("Příběh").reset_index(name="Počet")
+st.dataframe(story_counts, use_container_width=True, hide_index=True)
+
 st.markdown("### 🎯 Kandidáti")
-passed = results_df[results_df["Pass"]].copy()
-
+passed = results_df[results_df["Eligible"]].copy()
 display_cols = [
-    "Ticker", "Name", "Exchange", "Market Cap", "P/E", "Forward P/E",
-    "P/S", "ROE", "Revenue Growth", "Earnings Growth",
-    "Free Cash Flow", "Debt/Equity", "Status"
+    "Ticker","Name","Exchange","Story","Value Score","Quality Score","Growth Score",
+    "Market Cap","P/E","Forward P/E","P/S","ROE","Revenue Growth","Earnings Growth",
+    "Free Cash Flow","Debt/Equity","Status"
 ]
-
 if passed.empty:
-    st.info("Žádný titul nesplnil všechny nastavené podmínky.")
+    st.info("Pro zvolený příběh a nastavení dat nebyl nalezen žádný kandidát.")
 else:
-    st.dataframe(
-        passed[display_cols],
-        use_container_width=True,
-        hide_index=True,
-        height=500,
+    st.dataframe(passed[display_cols], use_container_width=True, hide_index=True, height=650,
         column_config={
+            "Value Score": st.column_config.NumberColumn("Hodnota", format="%.0f"),
+            "Quality Score": st.column_config.NumberColumn("Kvalita", format="%.0f"),
+            "Growth Score": st.column_config.NumberColumn("Růst", format="%.0f"),
             "Market Cap": st.column_config.NumberColumn("Market Cap", format="%.0f"),
             "P/E": st.column_config.NumberColumn("P/E", format="%.1f"),
             "Forward P/E": st.column_config.NumberColumn("Forward P/E", format="%.1f"),
@@ -693,8 +753,7 @@ else:
             "Earnings Growth": st.column_config.NumberColumn("Earnings Growth %", format="%.1f"),
             "Free Cash Flow": st.column_config.NumberColumn("FCF", format="%.0f"),
             "Debt/Equity": st.column_config.NumberColumn("D/E %", format="%.1f"),
-        }
-    )
+        })
 
 # Availability
 st.markdown("### 📊 Dostupnost fundamentálních parametrů")
@@ -732,7 +791,7 @@ st.dataframe(pd.DataFrame(exchange_rows), use_container_width=True, hide_index=T
 with st.expander("🔍 Detail všech načtených titulů", expanded=False):
     detail_cols = [
         "Ticker", "Yahoo Ticker", "Name", "Exchange",
-        *PARAMS, "Status", "Mapping", "Data Source", "Error"
+        *PARAMS, "Value Score", "Quality Score", "Growth Score", "Story", "Available Params", "Status", "Mapping", "Data Source", "Error"
     ]
     st.dataframe(
         results_df[detail_cols],
@@ -765,10 +824,9 @@ with st.expander("🧭 Kontrola XETRA mappingu", expanded=False):
         )
 
 st.info(
-    "V2.2 záměrně nepřevádí chybějící hodnoty na nulu. Earnings Growth se počítá pouze tehdy, "
-    "když jsou poslední i předchozí zisk kladné; tím se eliminují absurdní hodnoty vznikající "
-    "při přechodu zisku přes nulu. Další fáze může přidat samostatné signály pro turnaround "
-    "a přechod ze ztráty do zisku."
+    "V3 záměrně odděluje surové fundamenty od interpretace. Hodnota, Kvalita a Růst jsou "
+    "první transparentní skóre; z jejich kombinace vzniká investiční příběh. Chybějící hodnoty "
+    "se nepřevádějí na nulu. Earnings Growth se počítá pouze při kladném zisku v obou letech."
 )
 
 st.caption("Zdroje: Nasdaq Trader, Deutsche Börse Xetra a Yahoo Finance/yfinance. Data jsou získávána při screeningu a mohou být zpožděná či nedostupná.")
