@@ -5,13 +5,14 @@ import yfinance as yf
 import requests
 import re
 import time
+from html import unescape
 from io import StringIO
 from datetime import datetime
 
 st.set_page_config(page_title="Stock-Screener", page_icon="🔎", layout="wide")
 
 st.title("🔎 Stock-Screener")
-st.caption("V4 – charakter firmy → trend → investiční příběh")
+st.caption("V5 – fundament → charakter → trend → investiční příběh → textové důkazy")
 
 NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 NYSE_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
@@ -579,11 +580,308 @@ def story_priority(r):
              "🏢 Real-estate value":(v,q,g),"🔥 High Growth / dražší příběh":(g,q,v),"🪤 Value Trap – varování":(v,100-(q or 0),100-(g or 0))}
     vals=[x for x in targets.get(s,(v,q,g)) if not pd.isna(x)]
     return round(sum(vals)/len(vals),1) if vals else np.nan
+
+# -----------------------------------------------------------------------------
+# V5 – Text Evidence Engine
+# Druhá fáze: pouze pro úzký výběr kandidátů. Nepoužívá se pro celé univerzum.
+# -----------------------------------------------------------------------------
+
+TEXT_RULES = {
+    "🔄 Operating turnaround": {
+        "positive": {
+            "turnaround": 3, "recovery": 2, "restructuring": 2,
+            "cost reduction": 2, "cost savings": 2, "margin recovery": 3,
+            "return to profitability": 3, "operational improvement": 2,
+            "operating improvement": 2, "deleveraging": 2, "new management": 1,
+            "strategic review": 1, "transformation": 1, "profitability improved": 2,
+            "cash flow improved": 2
+        },
+        "negative": {
+            "continued decline": 3, "deterioration": 2, "liquidity pressure": 3,
+            "covenant breach": 3, "going concern": 3, "cash burn": 2,
+            "declining demand": 2, "margin pressure": 2, "failed turnaround": 3,
+            "turnaround efforts have not": 3, "restructuring costs": 2
+        }
+    },
+    "🏗️ Asset / financial recovery": {
+        "positive": {
+            "net asset value": 3, "nav per share": 3, "discount to nav": 3,
+            "portfolio value": 2, "fair value": 2, "monetization": 2,
+            "realization": 2, "asset value": 2, "recovery": 2,
+            "investment gains": 2, "portfolio gains": 2, "deleveraging": 2
+        },
+        "negative": {
+            "impairment": 2, "write-down": 3, "liquidity pressure": 3,
+            "discount widened": 3, "portfolio loss": 2, "realization risk": 2
+        }
+    },
+    "🏢 Real-estate value": {
+        "positive": {
+            "net asset value": 3, "nav": 2, "occupancy": 2, "rent growth": 2,
+            "same-store noi": 3, "noi growth": 3, "leasing spread": 2,
+            "development pipeline": 1, "asset value": 2, "discount to nav": 3
+        },
+        "negative": {
+            "vacancy": 2, "occupancy decline": 3, "rent decline": 2,
+            "impairment": 2, "refinancing risk": 3, "higher interest expense": 2
+        }
+    },
+    "🚀 Růst za rozumnou cenu": {
+        "positive": {
+            "organic growth": 3, "accelerating growth": 3, "market share": 2,
+            "capacity expansion": 2, "backlog": 2, "bookings growth": 2,
+            "demand growth": 2, "new markets": 2, "international expansion": 2,
+            "pipeline": 1, "pricing power": 2
+        },
+        "negative": {
+            "slowing growth": 3, "declining demand": 2, "market share loss": 3,
+            "competitive pressure": 2, "guidance cut": 3, "weak bookings": 2
+        }
+    },
+    "🏆 Quality Compounder": {
+        "positive": {
+            "recurring revenue": 3, "recurring cash flow": 3, "pricing power": 3,
+            "competitive advantage": 3, "market leadership": 2, "high margins": 2,
+            "free cash flow": 1, "long-term growth": 2, "capital allocation": 2,
+            "customer retention": 2, "strong balance sheet": 2
+        },
+        "negative": {
+            "customer churn": 3, "margin pressure": 2, "competitive pressure": 2,
+            "market share loss": 3, "cash burn": 3, "weak balance sheet": 3
+        }
+    },
+    "💎 Kvalita za rozumnou cenu": {
+        "positive": {
+            "undervalued": 3, "attractive valuation": 3, "discount to peers": 2,
+            "free cash flow": 2, "pricing power": 2, "competitive advantage": 2,
+            "capital return": 2, "share buyback": 2, "strong balance sheet": 2
+        },
+        "negative": {
+            "overvalued": 3, "valuation premium": 2, "margin pressure": 2,
+            "competitive pressure": 2, "declining demand": 2
+        }
+    },
+    "💰 Value / levná firma": {
+        "positive": {
+            "undervalued": 3, "intrinsic value": 3, "discount to peers": 2,
+            "asset value": 2, "sum of the parts": 3, "share buyback": 2,
+            "capital return": 2, "non-core assets": 1, "monetization": 2
+        },
+        "negative": {
+            "structural decline": 3, "secular decline": 3, "excess capacity": 2,
+            "debt burden": 3, "liquidity pressure": 3, "cash burn": 3,
+            "declining market share": 3, "impairment": 2
+        }
+    },
+    "🔥 High Growth / dražší příběh": {
+        "positive": {
+            "accelerating growth": 3, "organic growth": 2, "market share": 2,
+            "expansion": 1, "backlog": 2, "pipeline": 1, "new markets": 2
+        },
+        "negative": {
+            "overvalued": 3, "valuation premium": 2, "cash burn": 3,
+            "dilution": 2, "slowing growth": 3
+        }
+    },
+    "🪤 Value Trap – varování": {
+        "positive": {
+            "structural decline": 3, "secular decline": 3, "declining market share": 3,
+            "excess capacity": 2, "debt burden": 3, "cash burn": 3,
+            "competitive pressure": 2, "liquidity pressure": 3, "impairment": 2
+        },
+        "negative": {
+            "turnaround": 2, "recovery": 2, "margin recovery": 2,
+            "return to profitability": 3, "strong balance sheet": 2
+        }
+    }
+}
+
+NEGATION_WORDS = {"not", "no", "without", "unlikely", "failed", "fails", "fail", "never", "neither"}
+
+
+def text_clean(x):
+    s = unescape(clean_text(x)).lower()
+    s = re.sub(r"<[^>]+>", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def sentence_chunks(text):
+    text = text_clean(text)
+    if not text:
+        return []
+    return [x.strip() for x in re.split(r"(?<=[.!?])\s+", text) if x.strip()]
+
+
+def keyword_context(sentence, phrase):
+    """Return (negated, short human-readable context)."""
+    pos = sentence.find(phrase)
+    if pos < 0:
+        return False, sentence[:240]
+    before = sentence[max(0, pos - 80):pos]
+    words = re.findall(r"[a-z]+", before)
+    negated = any(w in NEGATION_WORDS for w in words[-7:])
+    start = max(0, pos - 65)
+    end = min(len(sentence), pos + len(phrase) + 95)
+    snippet = sentence[start:end]
+    if start > 0:
+        snippet = "…" + snippet
+    if end < len(sentence):
+        snippet += "…"
+    return negated, snippet
+
+
+def score_text_evidence(text, story):
+    rules = TEXT_RULES.get(story)
+    if not rules:
+        return np.nan, "⚪ Bez textové vrstvy", 0, 0, [], []
+    chunks = sentence_chunks(text)
+    joined = " ".join(chunks)
+    positive_score = 0
+    negative_score = 0
+    support = []
+    warnings = []
+    seen = set()
+
+    def scan(bucket, is_positive):
+        nonlocal positive_score, negative_score
+        for phrase, weight in bucket.items():
+            # Count at most twice per phrase: repeated boilerplate should not dominate.
+            count = min(2, len(re.findall(r"(?<![a-z])" + re.escape(phrase) + r"(?![a-z])", joined)))
+            if count == 0:
+                continue
+            for sent in chunks:
+                if phrase not in sent:
+                    continue
+                negated, snippet = keyword_context(sent, phrase)
+                key = (phrase, snippet[:160])
+                if key in seen:
+                    continue
+                seen.add(key)
+                effective_positive = is_positive and not negated
+                effective_negative = (not is_positive) or negated
+                if effective_positive:
+                    positive_score += weight
+                    support.append(f"+ {phrase}: {snippet}")
+                elif effective_negative:
+                    negative_score += weight
+                    warnings.append(f"− {phrase}: {snippet}")
+                if len(support) >= 8 and len(warnings) >= 8:
+                    return
+
+    scan(rules["positive"], True)
+    scan(rules["negative"], False)
+
+    raw = 50 + positive_score * 7 - negative_score * 9
+    score = float(max(0, min(100, raw)))
+    total = positive_score + negative_score
+    if total == 0:
+        label = "⚪ Bez textového důkazu"
+    elif score >= 70 and positive_score > negative_score:
+        label = "🟢 Text podporuje příběh"
+    elif score >= 55 and positive_score >= negative_score:
+        label = "🟡 Text spíše podporuje"
+    elif score <= 30 and negative_score > positive_score:
+        label = "🔴 Text příběh zpochybňuje"
+    else:
+        label = "🟠 Text je smíšený"
+    return score, label, positive_score, negative_score, support[:8], warnings[:8]
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_text_evidence(yahoo_ticker, story):
+    """Fetch only lightweight public text for shortlisted names.
+
+    Sources: Yahoo Finance business summary + recent Yahoo Finance news.
+    This is evidence, not an LLM verdict. Missing text is treated as neutral.
+    """
+    try:
+        t = yf.Ticker(yahoo_ticker)
+        parts = []
+        try:
+            info = t.info or {}
+            for key in ("longBusinessSummary", "sector", "industry"):
+                val = info.get(key)
+                if val:
+                    parts.append(clean_text(val))
+        except Exception:
+            pass
+        try:
+            news = t.news or []
+            for item in news[:12]:
+                content = item.get("content", item) if isinstance(item, dict) else {}
+                title = content.get("title") if isinstance(content, dict) else None
+                summary = content.get("summary") if isinstance(content, dict) else None
+                if title:
+                    parts.append(clean_text(title))
+                if summary:
+                    parts.append(clean_text(summary))
+        except Exception:
+            pass
+        text = " ".join(parts)
+        score, label, pos, neg, support, warnings = score_text_evidence(text, story)
+        return {
+            "Text Score": score,
+            "Text Evidence": label,
+            "Text Positive": pos,
+            "Text Negative": neg,
+            "Text Support": "\n".join(support),
+            "Text Warnings": "\n".join(warnings),
+            "Text Sources": "Yahoo Finance business summary + recent news" if text else ""
+        }
+    except Exception as e:
+        return {
+            "Text Score": np.nan, "Text Evidence": "⚪ Text nedostupný",
+            "Text Positive": 0, "Text Negative": 0, "Text Support": "",
+            "Text Warnings": "", "Text Sources": str(e)[:180]
+        }
+
+
+def add_text_evidence(df, max_text_candidates):
+    """Run the expensive text layer only on the highest-priority candidates."""
+    if df.empty or max_text_candidates <= 0:
+        return df
+    out = df.copy()
+    for c, default in {
+        "Text Score": np.nan, "Text Evidence": "⚪ Nehodnoceno",
+        "Text Positive": 0, "Text Negative": 0, "Text Support": "",
+        "Text Warnings": "", "Text Sources": ""
+    }.items():
+        out[c] = default
+
+    eligible = out[out["Eligible"]].copy() if "Eligible" in out.columns else out.copy()
+    if eligible.empty:
+        return out
+    todo = eligible.sort_values("Story Priority", ascending=False).head(max_text_candidates)
+    progress = st.progress(0)
+    status = st.empty()
+    for i, (idx, row) in enumerate(todo.iterrows(), start=1):
+        status.write(f"Textová fáze {i}/{len(todo)}: **{row['Ticker']}**")
+        ev = fetch_text_evidence(row["Yahoo Ticker"], row["Story"])
+        for k, v in ev.items():
+            out.at[idx, k] = v
+        progress.progress(i / len(todo))
+    progress.empty(); status.empty()
+    return out
+
+
+def final_story_confidence(r):
+    """Combine quantitative story priority with text evidence when available."""
+    q = safe_float(r.get("Story Priority"))
+    t = safe_float(r.get("Text Score"))
+    if pd.isna(q):
+        return t
+    if pd.isna(t):
+        return q
+    # Quant 65 %, text 35 %. Text cannot completely override fundamentals.
+    return round(0.65 * q + 0.35 * t, 1)
+
 # Sidebar
 st.sidebar.header("⚙️ Nastavení")
 selected_exchanges = st.sidebar.multiselect("Burzy", ["NASDAQ", "NYSE", "XETRA"], default=["NASDAQ", "NYSE", "XETRA"])
 min_cap_b = st.sidebar.number_input("Min. Market Cap (mld.)", min_value=0.0, value=1.0, step=0.5)
 max_candidates = st.sidebar.slider("Max. titulů pro hlubší analýzu", 25, 1000, 250, 25)
+max_text_candidates = st.sidebar.slider("Max. titulů pro textovou fázi", 0, 50, 30, 5)
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("🎯 Jaký příběh hledám?")
@@ -683,6 +981,22 @@ results_df["Pass"] = results_df.apply(passes_classic, axis=1) if use_classic els
 results_df["Story Selected"] = results_df["Story"].isin(selected_stories) if selected_stories else True
 results_df["Eligible"] = (results_df["Available Params"] >= min_data) & results_df["Pass"] & results_df["Story Selected"]
 results_df = results_df.sort_values(["Eligible", "Story Priority"], ascending=[False, False], na_position="last").reset_index(drop=True)
+
+# V5: druhá fáze – textové důkazy pouze pro nejlepší kvantitativní kandidáty.
+if run and max_text_candidates > 0:
+    results_df = add_text_evidence(results_df, max_text_candidates)
+    results_df["Final Confidence"] = results_df.apply(final_story_confidence, axis=1)
+else:
+    results_df["Text Score"] = np.nan
+    results_df["Text Evidence"] = "⚪ Nehodnoceno"
+    results_df["Text Positive"] = 0
+    results_df["Text Negative"] = 0
+    results_df["Text Support"] = ""
+    results_df["Text Warnings"] = ""
+    results_df["Text Sources"] = ""
+    results_df["Final Confidence"] = results_df.apply(final_story_confidence, axis=1)
+
+results_df = results_df.sort_values(["Eligible", "Final Confidence", "Story Priority"], ascending=[False, False, False], na_position="last").reset_index(drop=True)
 st.session_state["screening_results"] = results_df
 
 # Summary
@@ -705,7 +1019,7 @@ passed = results_df[results_df["Eligible"]].copy()
 display_cols = [
     "Ticker","Name","Exchange","Company Type","Story","Story Priority","Value Score","Quality Score","Growth Score","Turnaround Score",
     "Market Cap","P/E","Forward P/E","P/S","ROE","Revenue Growth","Earnings Growth",
-    "Free Cash Flow","Debt/Equity","Revenue CAGR 3Y","Net Income CAGR 3Y","Net Margin","Margin Change 3Y","Revenue Prior YoY","Net Income Prior YoY","Turnaround Evidence","Status"
+    "Free Cash Flow","Debt/Equity","Revenue CAGR 3Y","Net Income CAGR 3Y","Net Margin","Margin Change 3Y","Revenue Prior YoY","Net Income Prior YoY","Turnaround Evidence","Text Score","Text Evidence","Final Confidence","Status"
 ]
 if passed.empty:
     st.info("Pro zvolený příběh a nastavení dat nebyl nalezen žádný kandidát.")
@@ -724,7 +1038,19 @@ else:
             "Earnings Growth": st.column_config.NumberColumn("Earnings Growth %", format="%.1f"),
             "Free Cash Flow": st.column_config.NumberColumn("FCF", format="%.0f"),
             "Debt/Equity": st.column_config.NumberColumn("D/E %", format="%.1f"),
+            "Text Score": st.column_config.NumberColumn("Text důkaz", format="%.0f"),
+            "Final Confidence": st.column_config.NumberColumn("Důvěra", format="%.0f"),
         })
+
+# Text evidence detail
+with st.expander("📰 Textové důkazy k příběhu", expanded=False):
+    text_cols = ["Ticker", "Name", "Story", "Story Priority", "Text Score", "Text Evidence", "Final Confidence", "Text Support", "Text Warnings", "Text Sources"]
+    if "Text Score" in results_df.columns:
+        text_view = results_df[(results_df["Text Evidence"] != "⚪ Nehodnoceno") & results_df["Text Score"].notna()].copy()
+        if text_view.empty:
+            st.info("Textová fáze zatím nebyla provedena nebo pro kandidáty nebyl dostupný text.")
+        else:
+            st.dataframe(text_view[text_cols], use_container_width=True, hide_index=True, height=700)
 
 # Availability
 st.markdown("### 📊 Dostupnost fundamentálních parametrů")
@@ -762,7 +1088,7 @@ st.dataframe(pd.DataFrame(exchange_rows), use_container_width=True, hide_index=T
 with st.expander("🔍 Detail všech načtených titulů", expanded=False):
     detail_cols = [
         "Ticker", "Yahoo Ticker", "Name", "Exchange",
-        *PARAMS, "Revenue CAGR 3Y", "Net Income CAGR 3Y", "Net Margin", "Margin Change 3Y", "Revenue Prior YoY", "Net Income Prior YoY", "Value Score", "Quality Score", "Growth Score", "Turnaround Score", "Company Type", "Story", "Turnaround Evidence", "Available Params", "Status", "Mapping", "Data Source", "Error"
+        *PARAMS, "Revenue CAGR 3Y", "Net Income CAGR 3Y", "Net Margin", "Margin Change 3Y", "Revenue Prior YoY", "Net Income Prior YoY", "Value Score", "Quality Score", "Growth Score", "Turnaround Score", "Company Type", "Story", "Turnaround Evidence", "Text Score", "Text Evidence", "Final Confidence", "Available Params", "Status", "Mapping", "Data Source", "Error"
     ]
     st.dataframe(
         results_df[detail_cols],
@@ -795,8 +1121,8 @@ with st.expander("🧭 Kontrola XETRA mappingu", expanded=False):
         )
 
 st.info(
-    "V4 odděluje tři vrstvy: (1) surové fundamenty, (2) charakter firmy a trend, (3) investiční příběh. "
-    "Turnaround již není jen vysoký růst zisku; vyžaduje několik nezávislých známek zlepšení. "
+    "V5 pracuje ve dvou fázích: (1) kvantitativní screening, (2) textové ověření jen u nejlepších kandidátů. "
+    "Textová vrstva příběh nepotvrzuje automaticky; hledá podpůrné i varovné signály a může výsledný příběh zpochybnit. "
     "Příběhy finančních/investičních společností a REIT jsou posuzovány odděleně, aby se na ně "
     "mechanicky nepřenášela logika běžné provozní firmy. Chybějící hodnoty se nepřevádějí na nulu."
 )
