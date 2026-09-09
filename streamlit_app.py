@@ -837,6 +837,119 @@ def fetch_text_evidence(yahoo_ticker, story):
         }
 
 
+# -----------------------------------------------------------------------------
+# V5.2 – Price Recovery Engine
+# -----------------------------------------------------------------------------
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_price_history(yahoo_ticker):
+    """Load up to five years of daily prices for shortlisted names."""
+    try:
+        hist = yf.Ticker(yahoo_ticker).history(period="5y", interval="1d", auto_adjust=True)
+        if hist is None or hist.empty or "Close" not in hist.columns:
+            return pd.DataFrame()
+        out = hist[["Close"]].copy().dropna()
+        out.index = pd.to_datetime(out.index)
+        return out
+    except Exception:
+        return pd.DataFrame()
+
+
+def calc_price_pattern(yahoo_ticker):
+    """Describe price shape; price alone never defines a turnaround."""
+    empty = {"Price Score": np.nan, "Price View": "⚪ Cena nedostupná",
+             "Drawdown 3Y": np.nan, "Drawdown 5Y": np.nan,
+             "Recovery from 3Y Low": np.nan, "Recovery from 5Y Low": np.nan,
+             "6M Return": np.nan, "12M Return": np.nan,
+             "Days Since 3Y Low": np.nan, "MA50 vs MA200": np.nan,
+             "Price Trend": "", "Price Evidence": ""}
+    hist = fetch_price_history(yahoo_ticker)
+    if hist.empty: return empty
+    s = hist["Close"].astype(float).dropna()
+    if len(s) < 60: return empty
+    now, current = s.index[-1], float(s.iloc[-1])
+    result = empty.copy()
+    def window(days): return s[s.index >= now - pd.Timedelta(days=days)]
+    s3, s5 = window(365*3), window(365*5)
+    low3, high3 = float(s3.min()), float(s3.max())
+    low5, high5 = float(s5.min()), float(s5.max())
+    result["Drawdown 3Y"] = (current/high3-1)*100 if high3 > 0 else np.nan
+    result["Drawdown 5Y"] = (current/high5-1)*100 if high5 > 0 else np.nan
+    result["Recovery from 3Y Low"] = (current/low3-1)*100 if low3 > 0 else np.nan
+    result["Recovery from 5Y Low"] = (current/low5-1)*100 if low5 > 0 else np.nan
+    for label, days in (("6M Return",183),("12M Return",365)):
+        w=window(days)
+        if len(w)>=2 and float(w.iloc[0])>0: result[label]=(current/float(w.iloc[0])-1)*100
+    low_date=s3.idxmin(); result["Days Since 3Y Low"] = max(0,(now-low_date).days)
+    ma50=float(s.tail(50).mean()); ma200=float(s.tail(200).mean()) if len(s)>=200 else np.nan
+    result["MA50 vs MA200"]=(ma50/ma200-1)*100 if ma200>0 else np.nan
+    w6=window(183); slope_pct=np.nan
+    if len(w6)>=40:
+        y=w6.values; x=np.arange(len(y)); slope=np.polyfit(x,y,1)[0]
+        slope_pct=slope*len(y)/max(float(y.mean()),1e-9)*100
+    score=50.0; positive=negative=0; evidence=[]
+    dd=result["Drawdown 3Y"]
+    if not pd.isna(dd):
+        if dd<=-60: score+=12; positive+=1; evidence.append("velký 3Y propad")
+        elif dd<=-35: score+=8; positive+=1; evidence.append("výrazný 3Y propad")
+        elif dd<=-20: score+=4; evidence.append("mírnější 3Y propad")
+        elif dd>-10: score-=4; negative+=1; evidence.append("cena blízko 3Y maxima")
+    rec=result["Recovery from 3Y Low"]
+    if not pd.isna(rec):
+        if 20<=rec<=100: score+=8; positive+=1; evidence.append("zotavení od 3Y minima")
+        elif rec>100: score+=5; evidence.append("výrazné zotavení od minima")
+        elif rec<5: score-=6; negative+=1; evidence.append("cena u 3Y minima")
+    r12=result["12M Return"]
+    if not pd.isna(r12):
+        if r12>=20: score+=10; positive+=1; evidence.append("silný růst za 12M")
+        elif r12>=5: score+=5; evidence.append("kladný vývoj za 12M")
+        elif r12<=-25: score-=10; negative+=1; evidence.append("silný pokles za 12M")
+        elif r12<0: score-=4; negative+=1; evidence.append("pokles za 12M")
+    ma=result["MA50 vs MA200"]
+    if not pd.isna(ma):
+        if ma>=5: score+=8; positive+=1; evidence.append("50D průměr nad 200D")
+        elif ma<-10: score-=7; negative+=1; evidence.append("50D průměr pod 200D")
+    if not pd.isna(slope_pct):
+        if slope_pct>=8: score+=7; positive+=1
+        elif slope_pct<=-8: score-=7; negative+=1
+    result["Price Score"]=round(max(0,min(100,score)),1)
+    if positive>=3 and negative==0: view,trend="🟢 Obrat / rostoucí trend","obrat"
+    elif positive>=2 and negative<=1: view,trend="🟡 Stabilizace / první recovery","stabilizace"
+    elif negative>=2 and positive==0: view,trend="🔴 Stále klesá","pokles"
+    elif not pd.isna(r12) and r12>=25 and not pd.isna(dd) and dd>-25: view,trend="🔵 Trh už příběh zřejmě anticipuje","anticipace"
+    else: view,trend="⚪ Smíšený cenový obraz","smíšený"
+    result["Price View"],result["Price Trend"]=view,trend
+    result["Price Evidence"]="; ".join(evidence[:7])
+    return result
+
+
+def add_price_analysis(df,max_price_candidates):
+    if df.empty or max_price_candidates<=0: return df
+    out=df.copy()
+    defaults={"Price Score":np.nan,"Price View":"⚪ Nehodnoceno","Drawdown 3Y":np.nan,"Drawdown 5Y":np.nan,
+              "Recovery from 3Y Low":np.nan,"Recovery from 5Y Low":np.nan,"6M Return":np.nan,"12M Return":np.nan,
+              "Days Since 3Y Low":np.nan,"MA50 vs MA200":np.nan,"Price Trend":"","Price Evidence":""}
+    for c,v in defaults.items(): out[c]=v
+    todo=out[out["Eligible"]].sort_values("Story Priority",ascending=False).head(max_price_candidates)
+    if todo.empty: return out
+    progress=st.progress(0); status=st.empty()
+    for i,(idx,row) in enumerate(todo.iterrows(),1):
+        status.write(f"Cenová fáze {i}/{len(todo)}: **{row['Ticker']}**")
+        ev=calc_price_pattern(row["Yahoo Ticker"])
+        for k,v in ev.items(): out.at[idx,k]=v
+        progress.progress(i/len(todo))
+    progress.empty(); status.empty(); return out
+
+
+def market_fundamental_view(row):
+    ts,ps=safe_float(row.get("Turnaround Score")),safe_float(row.get("Price Score"))
+    if pd.isna(ts) or pd.isna(ps): return "⚪ Nedostatek dat"
+    if ts>=65 and ps<40: return "🟢 Fundamenty se zlepšují, cena zaostává"
+    if ts>=65 and ps>=70: return "🔵 Fundamenty i cena potvrzují obrat"
+    if ts<40 and ps>=70: return "🟠 Cena předbíhá fundamenty"
+    if ts<40 and ps<40: return "🔴 Fundamenty ani cena obrat nepotvrzují"
+    return "🟡 Smíšený signál"
+
+
 def compact_verdict(row):
     ts = safe_float(row.get("Turnaround Score"))
     text = clean_text(row.get("Text Evidence"))
@@ -917,6 +1030,7 @@ selected_exchanges = st.sidebar.multiselect("Burzy", ["NASDAQ", "NYSE", "XETRA"]
 min_cap_b = st.sidebar.number_input("Min. Market Cap (mld.)", min_value=0.0, value=1.0, step=0.5)
 max_candidates = st.sidebar.slider("Max. titulů pro hlubší analýzu", 25, 1000, 250, 25)
 max_text_candidates = st.sidebar.slider("Max. titulů pro textovou fázi", 0, 50, 30, 5)
+max_price_candidates = st.sidebar.slider("Max. titulů pro cenovou fázi", 0, 50, 30, 5)
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("🎯 Jaký příběh hledám?")
@@ -1017,21 +1131,23 @@ results_df["Story Selected"] = results_df["Story"].isin(selected_stories) if sel
 results_df["Eligible"] = (results_df["Available Params"] >= min_data) & results_df["Pass"] & results_df["Story Selected"]
 results_df = results_df.sort_values(["Eligible", "Story Priority"], ascending=[False, False], na_position="last").reset_index(drop=True)
 
-# V5: druhá fáze – textové důkazy pouze pro nejlepší kvantitativní kandidáty.
-if run and max_text_candidates > 0:
-    results_df = add_text_evidence(results_df, max_text_candidates)
-    results_df["Final Confidence"] = results_df.apply(final_story_confidence, axis=1)
-else:
-    results_df["Text Score"] = np.nan
-    results_df["Text Evidence"] = "⚪ Nehodnoceno"
-    results_df["Text Positive"] = 0
-    results_df["Text Negative"] = 0
-    results_df["Text Support"] = ""
-    results_df["Text Warnings"] = ""
-    results_df["Text Sources"] = ""
-    results_df["Final Confidence"] = results_df.apply(final_story_confidence, axis=1)
-
-results_df = results_df.sort_values(["Eligible", "Final Confidence", "Story Priority"], ascending=[False, False, False], na_position="last").reset_index(drop=True)
+# V5.2: text + price evidence are second-stage layers. Existing results survive UI reruns.
+if run:
+    if max_text_candidates > 0:
+        results_df = add_text_evidence(results_df, max_text_candidates)
+    else:
+        for c, default in {"Text Score":np.nan,"Text Evidence":"⚪ Nehodnoceno","Text Positive":0,"Text Negative":0,"Text Support":"","Text Warnings":"","Text Sources":""}.items(): results_df[c]=default
+    if max_price_candidates > 0:
+        results_df = add_price_analysis(results_df, max_price_candidates)
+    else:
+        for c, default in {"Price Score":np.nan,"Price View":"⚪ Nehodnoceno","Drawdown 3Y":np.nan,"Drawdown 5Y":np.nan,"Recovery from 3Y Low":np.nan,"Recovery from 5Y Low":np.nan,"6M Return":np.nan,"12M Return":np.nan,"Days Since 3Y Low":np.nan,"MA50 vs MA200":np.nan,"Price Trend":"","Price Evidence":""}.items(): results_df[c]=default
+if "Text Score" not in results_df.columns:
+    results_df["Text Score"]=np.nan; results_df["Text Evidence"]="⚪ Nehodnoceno"; results_df["Text Positive"]=0; results_df["Text Negative"]=0; results_df["Text Support"]=""; results_df["Text Warnings"]=""; results_df["Text Sources"]=""
+if "Price Score" not in results_df.columns:
+    results_df["Price Score"]=np.nan; results_df["Price View"]="⚪ Nehodnoceno"; results_df["Drawdown 3Y"]=np.nan; results_df["Drawdown 5Y"]=np.nan; results_df["Recovery from 3Y Low"]=np.nan; results_df["Recovery from 5Y Low"]=np.nan; results_df["6M Return"]=np.nan; results_df["12M Return"]=np.nan; results_df["Days Since 3Y Low"]=np.nan; results_df["MA50 vs MA200"]=np.nan; results_df["Price Trend"]=""; results_df["Price Evidence"]=""
+results_df["Final Confidence"] = results_df.apply(final_story_confidence, axis=1)
+results_df["Market / Fundamental View"] = results_df.apply(market_fundamental_view, axis=1)
+results_df = results_df.sort_values(["Eligible","Final Confidence","Story Priority"], ascending=[False,False,False], na_position="last").reset_index(drop=True)
 st.session_state["screening_results"] = results_df
 
 # Summary
@@ -1061,9 +1177,10 @@ else:
     compact["Varování"] = compact.apply(compact_warning, axis=1)
     compact = compact[[
         "Ticker", "Name", "Story", "Final Confidence", "Verdikt", "Trend",
-        "Text Evidence", "Value Score", "Quality Score", "Growth Score", "Varování"
+        "Price View", "Market / Fundamental View", "Text Evidence", "Value Score", "Quality Score", "Growth Score", "Varování"
     ]].rename(columns={
         "Name": "Firma", "Story": "Příběh", "Final Confidence": "Síla příběhu",
+        "Price View": "Cenový obraz", "Market / Fundamental View": "Fundamenty vs. cena",
         "Text Evidence": "Textové signály", "Value Score": "Value",
         "Quality Score": "Quality", "Growth Score": "Growth"
     })
@@ -1132,6 +1249,16 @@ else:
             "Margin Change 3Y %": r["Margin Change 3Y"], "Revenue Prior YoY %": r["Revenue Prior YoY"],
             "Net Income Prior YoY %": r["Net Income Prior YoY"]
         }]), use_container_width=True, hide_index=True)
+    with st.expander("📉 Chování ceny", expanded=False):
+        pc1, pc2, pc3, pc4 = st.columns(4)
+        ps = safe_float(r.get("Price Score")); dd = safe_float(r.get("Drawdown 3Y")); r12 = safe_float(r.get("12M Return")); ma = safe_float(r.get("MA50 vs MA200"))
+        pc1.metric("Price Score", f"{ps:.0f}" if not pd.isna(ps) else "—")
+        pc2.metric("3Y propad", f"{dd:.1f}%" if not pd.isna(dd) else "—")
+        pc3.metric("12M výnos", f"{r12:.1f}%" if not pd.isna(r12) else "—")
+        pc4.metric("MA50 vs MA200", f"{ma:.1f}%" if not pd.isna(ma) else "—")
+        st.write(f"**Cenový obraz:** {r.get('Price View', '—')}")
+        st.write(f"**Fundamenty vs. cena:** {r.get('Market / Fundamental View', '—')}")
+        st.write(f"**Evidence:** {r.get('Price Evidence', '') or '—'}")
     with st.expander("📰 Textové signály a varování", expanded=False):
         if clean_text(r.get("Text Support")):
             st.markdown("**Podpůrné signály**")
@@ -1199,7 +1326,7 @@ st.dataframe(pd.DataFrame(exchange_rows), use_container_width=True, hide_index=T
 with st.expander("🔍 Detail všech načtených titulů", expanded=False):
     detail_cols = [
         "Ticker", "Yahoo Ticker", "Name", "Exchange",
-        *PARAMS, "Revenue CAGR 3Y", "Net Income CAGR 3Y", "Net Margin", "Margin Change 3Y", "Revenue Prior YoY", "Net Income Prior YoY", "Value Score", "Quality Score", "Growth Score", "Turnaround Score", "Company Type", "Story", "Turnaround Evidence", "Text Score", "Text Evidence", "Final Confidence", "Available Params", "Status", "Mapping", "Data Source", "Error"
+        *PARAMS, "Revenue CAGR 3Y", "Net Income CAGR 3Y", "Net Margin", "Margin Change 3Y", "Revenue Prior YoY", "Net Income Prior YoY", "Value Score", "Quality Score", "Growth Score", "Turnaround Score", "Company Type", "Story", "Turnaround Evidence", "Text Score", "Text Evidence", "Price Score", "Price View", "Drawdown 3Y", "Recovery from 3Y Low", "6M Return", "12M Return", "MA50 vs MA200", "Market / Fundamental View", "Final Confidence", "Available Params", "Status", "Mapping", "Data Source", "Error"
     ]
     st.dataframe(
         results_df[detail_cols],
@@ -1232,7 +1359,7 @@ with st.expander("🧭 Kontrola XETRA mappingu", expanded=False):
         )
 
 st.info(
-    "V5.1 pracuje ve dvou fázích: (1) kvantitativní screening, (2) textové ověření jen u nejlepších kandidátů. "
+    "V5.2 pracuje ve třech vrstvách: (1) kvantitativní screening, (2) textové signály, (3) chování ceny jen u nejlepších kandidátů. "
     "Textová vrstva příběh nepotvrzuje automaticky; hledá podpůrné i varovné signály a může výsledný příběh zpochybnit. "
     "Příběhy finančních/investičních společností a REIT jsou posuzovány odděleně, aby se na ně "
     "mechanicky nepřenášela logika běžné provozní firmy. Chybějící hodnoty se nepřevádějí na nulu."
