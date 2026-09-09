@@ -12,7 +12,7 @@ from datetime import datetime
 st.set_page_config(page_title="Stock-Screener", page_icon="🔎", layout="wide")
 
 st.title("🔎 Stock-Screener")
-st.caption("V5 – fundament → charakter → trend → investiční příběh → textové důkazy")
+st.caption("V5.1 – fundament → charakter → trend → investiční příběh → textové signály")
 
 NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 NYSE_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
@@ -837,6 +837,41 @@ def fetch_text_evidence(yahoo_ticker, story):
         }
 
 
+def compact_verdict(row):
+    ts = safe_float(row.get("Turnaround Score"))
+    text = clean_text(row.get("Text Evidence"))
+    conf = safe_float(row.get("Final Confidence"))
+    if "zpochybňuje" in text or (not pd.isna(ts) and ts >= 80 and text.startswith("🔴")):
+        return "🔴 Zpochybněno"
+    if "smíšený" in text and not pd.isna(conf) and conf < 65:
+        return "🟠 Smíšený / rizikový"
+    if not pd.isna(ts) and ts >= 85 and not pd.isna(conf) and conf >= 70:
+        return "🟢 Silný adept"
+    if not pd.isna(ts) and ts >= 65:
+        return "🟡 Turnaround kandidát"
+    return "⚪ Spíše zlepšení"
+
+def compact_trend(row):
+    ev = clean_text(row.get("Turnaround Evidence"))
+    ts = safe_float(row.get("Turnaround Score"))
+    if "změny směru" in ev or (not pd.isna(ts) and ts < 40):
+        return "➡️ Bez jasného obratu"
+    if "recovery" in ev.lower() or "sign" in ev.lower() or "návrat" in ev.lower():
+        return "🔄 Obrat / recovery"
+    if not pd.isna(ts) and ts >= 65:
+        return "🔄 Známky obratu"
+    return "🟡 Částečné zlepšení"
+
+def compact_warning(row):
+    txt = clean_text(row.get("Text Evidence"))
+    warnings = clean_text(row.get("Text Warnings"))
+    if "zpochybňuje" in txt:
+        return "🔴 Text varuje"
+    if "smíšený" in txt or warnings:
+        return "🟠 Rizika / smíšené"
+    return "🟢 Bez výrazného varování"
+
+
 def add_text_evidence(df, max_text_candidates):
     """Run the expensive text layer only on the highest-priority candidates."""
     if df.empty or max_text_candidates <= 0:
@@ -1016,31 +1051,107 @@ st.dataframe(story_counts, use_container_width=True, hide_index=True)
 
 st.markdown("### 🎯 Kandidáti")
 passed = results_df[results_df["Eligible"]].copy()
-display_cols = [
-    "Ticker","Name","Exchange","Company Type","Story","Story Priority","Value Score","Quality Score","Growth Score","Turnaround Score",
-    "Market Cap","P/E","Forward P/E","P/S","ROE","Revenue Growth","Earnings Growth",
-    "Free Cash Flow","Debt/Equity","Revenue CAGR 3Y","Net Income CAGR 3Y","Net Margin","Margin Change 3Y","Revenue Prior YoY","Net Income Prior YoY","Turnaround Evidence","Text Score","Text Evidence","Final Confidence","Status"
-]
 if passed.empty:
     st.info("Pro zvolený příběh a nastavení dat nebyl nalezen žádný kandidát.")
 else:
-    st.dataframe(passed[display_cols], use_container_width=True, hide_index=True, height=650,
+    # V5.1: hlavní tabulka je záměrně kompaktní. Ekonomické detaily jsou níže.
+    compact = passed.copy()
+    compact["Verdikt"] = compact.apply(compact_verdict, axis=1)
+    compact["Trend"] = compact.apply(compact_trend, axis=1)
+    compact["Varování"] = compact.apply(compact_warning, axis=1)
+    compact = compact[[
+        "Ticker", "Name", "Story", "Final Confidence", "Verdikt", "Trend",
+        "Text Evidence", "Value Score", "Quality Score", "Growth Score", "Varování"
+    ]].rename(columns={
+        "Name": "Firma", "Story": "Příběh", "Final Confidence": "Síla příběhu",
+        "Text Evidence": "Textové signály", "Value Score": "Value",
+        "Quality Score": "Quality", "Growth Score": "Growth"
+    })
+    st.dataframe(
+        compact, use_container_width=True, hide_index=True, height=560,
         column_config={
-            "Value Score": st.column_config.NumberColumn("Hodnota", format="%.0f"),
-            "Quality Score": st.column_config.NumberColumn("Kvalita", format="%.0f"),
-            "Growth Score": st.column_config.NumberColumn("Růst", format="%.0f"),
+            "Síla příběhu": st.column_config.NumberColumn("Síla příběhu", format="%.0f"),
+            "Value": st.column_config.NumberColumn("Value", format="%.0f"),
+            "Quality": st.column_config.NumberColumn("Quality", format="%.0f"),
+            "Growth": st.column_config.NumberColumn("Growth", format="%.0f"),
+            "Firma": st.column_config.TextColumn("Firma", width="large"),
+            "Příběh": st.column_config.TextColumn("Příběh", width="medium"),
+            "Verdikt": st.column_config.TextColumn("Verdikt", width="medium"),
+            "Trend": st.column_config.TextColumn("Trend", width="medium"),
+            "Textové signály": st.column_config.TextColumn("Textové signály", width="medium"),
+            "Varování": st.column_config.TextColumn("Varování", width="medium"),
+        })
+
+    st.markdown("#### 🔎 Detail vybraného kandidáta")
+    options = [f"{r['Ticker']} — {r['Name']}" for _, r in passed.iterrows()]
+    selected_label = st.selectbox("Vyber titul", options, label_visibility="collapsed")
+    selected_ticker = selected_label.split(" — ", 1)[0]
+    r = passed[passed["Ticker"] == selected_ticker].iloc[0]
+
+    verdict = compact_verdict(r)
+    trend = compact_trend(r)
+    warning = compact_warning(r)
+    st.markdown(f"### {r['Ticker']} — {r['Name']}")
+    m1,m2,m3,m4 = st.columns(4)
+    m1.metric("Příběh", r["Story"])
+    m2.metric("Síla příběhu", f"{safe_float(r['Final Confidence']):.0f}/100" if not pd.isna(safe_float(r['Final Confidence'])) else "—")
+    m3.metric("Trend", trend)
+    m4.metric("Verdikt", verdict)
+
+    st.caption(f"Textové signály: {clean_text(r.get('Text Evidence')) or 'nehodnoceno'} · {warning}")
+    if clean_text(r.get("Turnaround Evidence")):
+        st.info("**Proč se titul dostal mezi kandidáty:** " + clean_text(r.get("Turnaround Evidence")))
+
+    q1,q2,q3 = st.columns(3)
+    q1.metric("Value", f"{safe_float(r['Value Score']):.0f}" if not pd.isna(safe_float(r['Value Score'])) else "—")
+    q2.metric("Quality", f"{safe_float(r['Quality Score']):.0f}" if not pd.isna(safe_float(r['Quality Score'])) else "—")
+    q3.metric("Growth", f"{safe_float(r['Growth Score']):.0f}" if not pd.isna(safe_float(r['Growth Score'])) else "—")
+
+    with st.expander("💰 Valuace", expanded=False):
+        st.dataframe(pd.DataFrame([{
+            "Market Cap": r["Market Cap"], "P/E": r["P/E"], "Forward P/E": r["Forward P/E"], "P/S": r["P/S"]
+        }]), use_container_width=True, hide_index=True, column_config={
             "Market Cap": st.column_config.NumberColumn("Market Cap", format="%.0f"),
             "P/E": st.column_config.NumberColumn("P/E", format="%.1f"),
             "Forward P/E": st.column_config.NumberColumn("Forward P/E", format="%.1f"),
-            "P/S": st.column_config.NumberColumn("P/S", format="%.1f"),
-            "ROE": st.column_config.NumberColumn("ROE %", format="%.1f"),
-            "Revenue Growth": st.column_config.NumberColumn("Revenue Growth %", format="%.1f"),
-            "Earnings Growth": st.column_config.NumberColumn("Earnings Growth %", format="%.1f"),
-            "Free Cash Flow": st.column_config.NumberColumn("FCF", format="%.0f"),
-            "Debt/Equity": st.column_config.NumberColumn("D/E %", format="%.1f"),
-            "Text Score": st.column_config.NumberColumn("Text důkaz", format="%.0f"),
-            "Final Confidence": st.column_config.NumberColumn("Důvěra", format="%.0f"),
+            "P/S": st.column_config.NumberColumn("P/S", format="%.2f")
         })
+    with st.expander("🏭 Kvalita a finanční zdraví", expanded=False):
+        st.dataframe(pd.DataFrame([{
+            "ROE %": r["ROE"], "FCF": r["Free Cash Flow"], "D/E %": r["Debt/Equity"], "Net Margin %": r["Net Margin"]
+        }]), use_container_width=True, hide_index=True, column_config={
+            "ROE %": st.column_config.NumberColumn("ROE %", format="%.1f"),
+            "FCF": st.column_config.NumberColumn("FCF", format="%.0f"),
+            "D/E %": st.column_config.NumberColumn("D/E %", format="%.1f"),
+            "Net Margin %": st.column_config.NumberColumn("Net Margin %", format="%.1f")
+        })
+    with st.expander("📈 Růst a obrat trendu", expanded=False):
+        st.dataframe(pd.DataFrame([{
+            "Revenue Growth %": r["Revenue Growth"], "Earnings Growth %": r["Earnings Growth"],
+            "Revenue CAGR 3Y %": r["Revenue CAGR 3Y"], "Net Income CAGR 3Y %": r["Net Income CAGR 3Y"],
+            "Margin Change 3Y %": r["Margin Change 3Y"], "Revenue Prior YoY %": r["Revenue Prior YoY"],
+            "Net Income Prior YoY %": r["Net Income Prior YoY"]
+        }]), use_container_width=True, hide_index=True)
+    with st.expander("📰 Textové signály a varování", expanded=False):
+        if clean_text(r.get("Text Support")):
+            st.markdown("**Podpůrné signály**")
+            st.write(r["Text Support"])
+        if clean_text(r.get("Text Warnings")):
+            st.markdown("**Varovné signály**")
+            st.write(r["Text Warnings"])
+        if clean_text(r.get("Text Sources")):
+            st.caption("Zdroj textu: " + r["Text Sources"])
+
+    with st.expander("🔬 Kompletní technický záznam", expanded=False):
+        detail_cols = [
+            "Ticker","Yahoo Ticker","Name","Exchange","Company Type","Sector","Industry",
+            *PARAMS,"Revenue CAGR 3Y","Net Income CAGR 3Y","Net Margin","Margin Change 3Y",
+            "Revenue Prior YoY","Net Income Prior YoY","Turnaround Score","Turnaround Evidence",
+            "Story Priority","Text Score","Final Confidence","Status","Mapping","Data Source","Error"
+        ]
+        detail_cols = [c for c in detail_cols if c in r.index]
+        st.dataframe(pd.DataFrame([r[detail_cols].to_dict()]), use_container_width=True, hide_index=True)
+
 
 # Text evidence detail
 with st.expander("📰 Textové důkazy k příběhu", expanded=False):
@@ -1121,7 +1232,7 @@ with st.expander("🧭 Kontrola XETRA mappingu", expanded=False):
         )
 
 st.info(
-    "V5 pracuje ve dvou fázích: (1) kvantitativní screening, (2) textové ověření jen u nejlepších kandidátů. "
+    "V5.1 pracuje ve dvou fázích: (1) kvantitativní screening, (2) textové ověření jen u nejlepších kandidátů. "
     "Textová vrstva příběh nepotvrzuje automaticky; hledá podpůrné i varovné signály a může výsledný příběh zpochybnit. "
     "Příběhy finančních/investičních společností a REIT jsou posuzovány odděleně, aby se na ně "
     "mechanicky nepřenášela logika běžné provozní firmy. Chybějící hodnoty se nepřevádějí na nulu."
