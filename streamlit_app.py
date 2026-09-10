@@ -1202,6 +1202,26 @@ if results_df.empty:
     st.warning("Pro vybrané nastavení nebyla načtena žádná data."); st.stop()
 
 # Scores and stories
+# Keep raw screening data separate from derived/evidence layers. Streamlit reruns
+# (for example when changing the selected candidate) must not re-append columns.
+raw_results = st.session_state.get("screening_raw_results")
+if raw_results is None or raw_results.empty:
+    raw_results = results_df.copy()
+
+derived_cols = [
+    "Value Score", "Quality Score", "Growth Score", "Company Archetype", "Company Type",
+    "Fundamental Direction", "Fundamental Trend Score", "Fundamental Evidence",
+    "Turnaround Score", "Turnaround Evidence", "Story", "Story Priority",
+    "Available Params", "Pass", "Story Selected", "Eligible",
+    "Text Score", "Text Evidence", "Text Positive", "Text Negative", "Text Support",
+    "Text Warnings", "Text Sources", "Price Score", "Price View", "Drawdown 3Y",
+    "Drawdown 5Y", "Recovery from 3Y Low", "Recovery from 5Y Low", "6M Return",
+    "12M Return", "Days Since 3Y Low", "MA50 vs MA200", "Higher Low", "Higher High",
+    "Price Trend", "Price Evidence", "Final Confidence", "Market / Fundamental View"
+]
+raw_results = raw_results.drop(columns=[c for c in derived_cols if c in raw_results.columns], errors="ignore").copy()
+results_df = raw_results.copy()
+
 scores = results_df.apply(calc_scores, axis=1, result_type="expand")
 scores.columns = ["Value Score", "Quality Score", "Growth Score"]
 results_df = pd.concat([results_df.reset_index(drop=True), scores.reset_index(drop=True)], axis=1)
@@ -1236,24 +1256,64 @@ results_df["Story Selected"] = results_df["Story"].isin(selected_stories) if sel
 results_df["Eligible"] = (results_df["Available Params"] >= min_data) & results_df["Pass"] & results_df["Story Selected"]
 results_df = results_df.sort_values(["Eligible", "Story Priority"], ascending=[False, False], na_position="last").reset_index(drop=True)
 
-# V5.3: text + price evidence are second-stage layers. Existing results survive UI reruns.
+def empty_evidence_columns(df):
+    out = df.copy()
+    for c, default in {
+        "Text Score": np.nan, "Text Evidence": "⚪ Nehodnoceno", "Text Positive": 0, "Text Negative": 0,
+        "Text Support": "", "Text Warnings": "", "Text Sources": "",
+        "Price Score": np.nan, "Price View": "⚪ Nehodnoceno", "Drawdown 3Y": np.nan, "Drawdown 5Y": np.nan,
+        "Recovery from 3Y Low": np.nan, "Recovery from 5Y Low": np.nan, "6M Return": np.nan, "12M Return": np.nan,
+        "Days Since 3Y Low": np.nan, "MA50 vs MA200": np.nan, "Higher Low": "", "Higher High": "",
+        "Price Trend": "", "Price Evidence": ""
+    }.items():
+        if c not in out.columns:
+            out[c] = default
+    return out
+
+# Evidence is kept separately, keyed by ticker. This survives UI-only reruns.
 if run:
     if max_text_candidates > 0:
         results_df = add_text_evidence(results_df, max_text_candidates)
     else:
-        for c, default in {"Text Score":np.nan,"Text Evidence":"⚪ Nehodnoceno","Text Positive":0,"Text Negative":0,"Text Support":"","Text Warnings":"","Text Sources":""}.items(): results_df[c]=default
+        results_df = empty_evidence_columns(results_df)
     if max_price_candidates > 0:
         results_df = add_price_analysis(results_df, max_price_candidates)
     else:
-        for c, default in {"Price Score":np.nan,"Price View":"⚪ Nehodnoceno","Drawdown 3Y":np.nan,"Drawdown 5Y":np.nan,"Recovery from 3Y Low":np.nan,"Recovery from 5Y Low":np.nan,"6M Return":np.nan,"12M Return":np.nan,"Days Since 3Y Low":np.nan,"MA50 vs MA200":np.nan,"Higher Low":"","Higher High":"","Price Trend":"","Price Evidence":""}.items(): results_df[c]=default
-if "Text Score" not in results_df.columns:
-    results_df["Text Score"]=np.nan; results_df["Text Evidence"]="⚪ Nehodnoceno"; results_df["Text Positive"]=0; results_df["Text Negative"]=0; results_df["Text Support"]=""; results_df["Text Warnings"]=""; results_df["Text Sources"]=""
-if "Price Score" not in results_df.columns:
-    results_df["Price Score"]=np.nan; results_df["Price View"]="⚪ Nehodnoceno"; results_df["Drawdown 3Y"]=np.nan; results_df["Drawdown 5Y"]=np.nan; results_df["Recovery from 3Y Low"]=np.nan; results_df["Recovery from 5Y Low"]=np.nan; results_df["6M Return"]=np.nan; results_df["12M Return"]=np.nan; results_df["Days Since 3Y Low"]=np.nan; results_df["MA50 vs MA200"]=np.nan; results_df["Price Trend"]=""; results_df["Price Evidence"]=""
+        results_df = empty_evidence_columns(results_df)
+
+    evidence_cols = [c for c in [
+        "Ticker", "Text Score", "Text Evidence", "Text Positive", "Text Negative", "Text Support", "Text Warnings", "Text Sources",
+        "Price Score", "Price View", "Drawdown 3Y", "Drawdown 5Y", "Recovery from 3Y Low", "Recovery from 5Y Low",
+        "6M Return", "12M Return", "Days Since 3Y Low", "MA50 vs MA200", "Higher Low", "Higher High", "Price Trend", "Price Evidence"
+    ] if c in results_df.columns]
+    st.session_state["screening_evidence"] = results_df[evidence_cols].drop_duplicates("Ticker").copy()
+else:
+    results_df = empty_evidence_columns(results_df)
+    cached_evidence = st.session_state.get("screening_evidence")
+    if isinstance(cached_evidence, pd.DataFrame) and not cached_evidence.empty and "Ticker" in cached_evidence.columns:
+        merge_cols = [c for c in cached_evidence.columns if c != "Ticker"]
+        results_df = results_df.drop(columns=[c for c in merge_cols if c in results_df.columns], errors="ignore")
+        results_df = results_df.merge(cached_evidence, on="Ticker", how="left", suffixes=("", "_cached"))
+        for c in merge_cols:
+            cc = f"{c}_cached"
+            if cc in results_df.columns:
+                results_df[c] = results_df[cc].where(results_df[cc].notna(), results_df[c])
+                results_df = results_df.drop(columns=[cc])
+
+for c, default in {
+    "Text Score": np.nan, "Text Evidence": "⚪ Nehodnoceno", "Text Positive": 0, "Text Negative": 0, "Text Support": "", "Text Warnings": "", "Text Sources": "",
+    "Price Score": np.nan, "Price View": "⚪ Nehodnoceno", "Drawdown 3Y": np.nan, "Drawdown 5Y": np.nan, "Recovery from 3Y Low": np.nan, "Recovery from 5Y Low": np.nan,
+    "6M Return": np.nan, "12M Return": np.nan, "Days Since 3Y Low": np.nan, "MA50 vs MA200": np.nan, "Higher Low": "", "Higher High": "", "Price Trend": "", "Price Evidence": ""
+}.items():
+    if c not in results_df.columns:
+        results_df[c] = default
 results_df["Final Confidence"] = results_df.apply(final_story_confidence, axis=1)
 results_df["Market / Fundamental View"] = results_df.apply(market_fundamental_view, axis=1)
-results_df = results_df.sort_values(["Eligible","Final Confidence","Story Priority"], ascending=[False,False,False], na_position="last").reset_index(drop=True)
-st.session_state["screening_results"] = results_df
+results_df = results_df.sort_values(["Eligible", "Final Confidence", "Story Priority"], ascending=[False, False, False], na_position="last").reset_index(drop=True)
+
+# Raw data and evidence remain separate; this dataframe is only the current display state.
+st.session_state["screening_raw_results"] = raw_results.copy()
+st.session_state["screening_results"] = results_df.copy()
 
 # Summary
 st.markdown("## 📊 Výsledek screeningu")
