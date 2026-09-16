@@ -5,6 +5,7 @@ import yfinance as yf
 import requests
 import re
 import time
+import hashlib
 from html import unescape
 from io import StringIO
 from datetime import datetime
@@ -12,7 +13,7 @@ from datetime import datetime
 st.set_page_config(page_title="Stock-Screener", page_icon="🔎", layout="wide")
 
 st.title("🔎 Stock-Screener")
-st.caption("V5.3 – fundament → charakter → směr → příběh → text → cena")
+st.caption("V6 – univerzum → fundament → charakter → recovery test → mechanismus → text → cena → investiční příběh")
 
 NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 NYSE_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
@@ -458,23 +459,126 @@ def fetch_fundamentals(ticker, exchange, name="", isin=""):
                 "Net Income Prior YoY": np.nan, "Net Income Sign Recovery": False, "Revenue Trend": "", "Net Income Trend": "",
                 "Sector": "", "Industry": "", "Quote Type": "", "Status": "ERROR", "Data Source": "Yahoo", "Mapping": resolution, "Error": str(e)[:300]}
 
-def build_candidate_sample(universe, max_candidates):
-    if universe.empty:
-        return universe
-    groups = []
-    exchanges = list(universe["Exchange"].dropna().unique())
-    n = len(exchanges)
-    base = max_candidates // n
-    remainder = max_candidates % n
 
-    for i, ex in enumerate(exchanges):
-        part = universe[universe["Exchange"] == ex].copy()
-        quota = base + (1 if i < remainder else 0)
-        quota = min(quota, len(part))
-        if quota:
-            groups.append(part.sample(n=quota, random_state=42))
-    result = pd.concat(groups, ignore_index=True) if groups else universe.head(0)
-    return result.sample(frac=1, random_state=42).reset_index(drop=True)
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def prefilter_by_market_data(universe, target):
+    """Stage 0/1: use batched one-year prices for the whole universe.
+    This is deliberately not a valuation filter: it keeps both beaten-down and
+    recovering names so turnaround and value stories are not systematically removed.
+    """
+    if universe.empty or target >= len(universe):
+        return universe.copy()
+    tickers = universe["Ticker"].dropna().astype(str).unique().tolist()
+    rows=[]
+    chunk_size=80
+    for i in range(0,len(tickers),chunk_size):
+        chunk=tickers[i:i+chunk_size]
+        try:
+            data=yf.download(chunk, period="1y", interval="1d", auto_adjust=True,
+                             progress=False, threads=True, group_by="column")
+            close=data["Close"] if isinstance(data,pd.DataFrame) and "Close" in data else pd.DataFrame()
+            if isinstance(close,pd.Series):
+                close=close.to_frame()
+                close.columns=[chunk[0]]
+            if close.empty: continue
+            for t in close.columns:
+                s=pd.to_numeric(close[t],errors="coerce").dropna()
+                if len(s)<30: continue
+                ret=(float(s.iloc[-1])/float(s.iloc[0])-1)*100 if s.iloc[0]>0 else 0
+                vol=float(s.pct_change().std()*100) if len(s)>20 else 0
+                rows.append((t,ret,vol,len(s)))
+        except Exception:
+            continue
+    md=pd.DataFrame(rows,columns=["Ticker","1Y Return","Volatility","Price Days"])
+    if md.empty:
+        return build_stage1_candidates(universe,target) if 'build_stage1_candidates' in globals() else universe.head(target).copy()
+    out=universe.merge(md,on="Ticker",how="inner")
+    # Stratified coverage: equal attention to recovery/momentum, beaten-down names,
+    # and ordinary/stable names. This is not a momentum ranking.
+    out["Bucket"]=pd.cut(out["1Y Return"],[-np.inf,-30,-10,10,30,np.inf],labels=False)
+    selected=[]
+    per=max(1,target//5)
+    for b in range(5):
+        part=out[out["Bucket"]==b].sort_values(["Volatility","Ticker"],ascending=[True,True])
+        selected.append(part.head(per))
+    chosen=pd.concat(selected,ignore_index=True).drop_duplicates("Ticker")
+    if len(chosen)<target:
+        rest=out[~out["Ticker"].isin(chosen["Ticker"])].sort_values(["Ticker"])
+        chosen=pd.concat([chosen,rest.head(target-len(chosen))],ignore_index=True)
+    return chosen.drop(columns=["Bucket"],errors="ignore").head(target).reset_index(drop=True)
+
+def build_stage1_candidates(universe, max_stage1):
+    """Stage 1: deterministic, broad candidate pool from the full official universe.
+    We avoid random sampling: larger exchanges contribute proportionally, with a
+    hard cap only to keep Yahoo calls technically manageable.
+    """
+    if universe.empty:
+        return universe.copy()
+    if max_stage1 >= len(universe):
+        return universe.copy().reset_index(drop=True)
+
+    # Prefer liquid-looking ordinary equities by name/instrument hygiene already
+    # enforced upstream, then use a stable hash of ticker for deterministic coverage.
+    out = universe.copy()
+    out["_stable_key"] = out["Ticker"].map(lambda x: int(hashlib.md5(str(x).encode("utf-8")).hexdigest()[:8], 16))
+    out = out.sort_values(["Exchange", "_stable_key"]).reset_index(drop=True)
+
+    # Proportional allocation prevents XETRA/NASDAQ/NYSE from being dominated by
+    # the largest venue while remaining deterministic.
+    groups = []
+    total = len(out)
+    exchanges = list(out["Exchange"].dropna().unique())
+    raw_quota = {ex: max(1, round(max_stage1 * (len(out[out["Exchange"] == ex]) / total))) for ex in exchanges}
+    while sum(raw_quota.values()) > max_stage1:
+        ex = max(raw_quota, key=lambda k: raw_quota[k])
+        if raw_quota[ex] > 1:
+            raw_quota[ex] -= 1
+        else:
+            break
+    while sum(raw_quota.values()) < max_stage1:
+        ex = max(exchanges, key=lambda k: len(out[out["Exchange"] == k]) - raw_quota[k])
+        raw_quota[ex] += 1
+
+    for ex in exchanges:
+        part = out[out["Exchange"] == ex]
+        groups.append(part.head(min(raw_quota[ex], len(part))))
+    result = pd.concat(groups, ignore_index=True) if groups else out.head(max_stage1)
+    return result.drop(columns=["_stable_key"], errors="ignore").reset_index(drop=True)
+
+
+def rank_stage2_candidates(df, stage2_limit):
+    """Stage 2: select names where the available fundamentals suggest a change,
+    quality/value asymmetry or recovery. This ranking is deliberately broad.
+    """
+    if df.empty:
+        return df.copy()
+    out = df.copy()
+    def n(x): return safe_float(x)
+
+    def rank_row(r):
+        v = q = g = 0.0
+        # Cheap/value asymmetry
+        pe = n(r.get("P/E")); fpe = n(r.get("Forward P/E")); ps = n(r.get("P/S"))
+        if not pd.isna(pe) and pe > 0: v += max(0, min(25, (25-pe)))
+        if not pd.isna(fpe) and fpe > 0: v += max(0, min(20, (25-fpe)))
+        if not pd.isna(ps) and ps > 0: v += max(0, min(15, (8-ps)*2))
+        # Quality
+        roe = n(r.get("ROE")); fcf = n(r.get("Free Cash Flow")); de = n(r.get("Debt/Equity"))
+        if not pd.isna(roe) and roe > 10: q += min(20, roe/2)
+        if not pd.isna(fcf) and fcf > 0: q += 10
+        if not pd.isna(de) and de < 150: q += 10
+        # Change / recovery signals
+        for key, weight in [("Revenue Prior YoY", 0.8), ("Net Income Prior YoY", 1.2)]:
+            x = n(r.get(key))
+            if not pd.isna(x) and x < 0: g += min(18, abs(x)*weight)
+        for key, weight in [("Revenue Growth", 0.8), ("Earnings Growth", 1.0), ("Margin Change 3Y", 2.0)]:
+            x = n(r.get(key))
+            if not pd.isna(x) and x > 0: g += min(18, x*weight)
+        return min(100, v+q+g)
+
+    out["Stage 2 Priority"] = out.apply(rank_row, axis=1)
+    return out.sort_values("Stage 2 Priority", ascending=False).head(stage2_limit).reset_index(drop=True)
 
 # -----------------------------------------------------------------------------
 # V4 – charakter firmy → trend → investiční příběh
@@ -610,6 +714,73 @@ def fundamental_direction(r):
     return "⚪ Nejasný směr", 0.0, "; ".join(evidence) or "nedostatek trendových signálů"
 
 
+
+def recovery_gates(r):
+    """Strict evidence gates. Score is a diagnostic, not a probability."""
+    direction = clean_text(r.get("Fundamental Direction"))
+    archetype = clean_text(r.get("Company Archetype"))
+    prior_eg = safe_float(r.get("Net Income Prior YoY"))
+    prior_rg = safe_float(r.get("Revenue Prior YoY"))
+    ni_cagr = safe_float(r.get("Net Income CAGR 3Y"))
+    rev_cagr = safe_float(r.get("Revenue CAGR 3Y"))
+    mc = safe_float(r.get("Margin Change 3Y"))
+    eg = safe_float(r.get("Earnings Growth"))
+    rg = safe_float(r.get("Revenue Growth"))
+    fcf = safe_float(r.get("Free Cash Flow"))
+    sign = bool(r.get("Net Income Sign Recovery", False))
+
+    problem = (
+        (not pd.isna(prior_eg) and prior_eg < -5) or
+        (not pd.isna(prior_rg) and prior_rg < -5) or
+        sign or
+        (not pd.isna(ni_cagr) and ni_cagr < -5)
+    )
+    bottom = (
+        sign or
+        (not pd.isna(prior_eg) and prior_eg < 0 and not pd.isna(eg) and eg > 0) or
+        (not pd.isna(prior_rg) and prior_rg < 0 and not pd.isna(rg) and rg >= 0) or
+        (not pd.isna(mc) and mc >= 3)
+    )
+    improvement = (
+        (not pd.isna(eg) and eg > 5) or
+        (not pd.isna(rg) and rg > 3) or
+        (not pd.isna(mc) and mc >= 2) or
+        (not pd.isna(fcf) and fcf > 0 and sign)
+    )
+    persistence = (
+        (not pd.isna(mc) and mc >= 2) and
+        ((not pd.isna(eg) and eg > 0) or (not pd.isna(rg) and rg >= 0))
+    )
+    # Commodity/resource recovery is intentionally not called operating turnaround.
+    cyclical = archetype == "Commodity / resource"
+    # High-growth technology is handled as growth/recovery, not classic turnaround.
+    tech = archetype == "Technology / high growth"
+
+    gates = {
+        "Prior Problem": bool(problem),
+        "Bottom / Stabilization": bool(bottom),
+        "Current Improvement": bool(improvement),
+        "Persistence": bool(persistence),
+        "Cyclical": bool(cyclical),
+        "Technology": bool(tech),
+    }
+    score = sum([30 if problem else 0, 20 if bottom else 0, 25 if improvement else 0, 15 if persistence else 0])
+    if cyclical: score -= 15
+    if tech: score -= 15
+    score = max(0, min(100, score))
+
+    if problem and bottom and improvement and persistence and not cyclical and not tech:
+        label = "🟢 Strong turnaround structure"
+    elif problem and improvement and not cyclical:
+        label = "🟡 Recovery structure, needs mechanism"
+    elif cyclical and improvement:
+        label = "🔵 Cyclical recovery"
+    elif tech and improvement:
+        label = "🟣 Growth/recovery, not classic turnaround"
+    else:
+        label = "⚪ Insufficient turnaround evidence"
+    return label, float(score), gates
+
 def turnaround_score(r):
     """Strict turnaround score: prior deterioration + current improvement are both required."""
     direction, score, evidence = fundamental_direction(r)
@@ -620,29 +791,33 @@ def turnaround_score(r):
 
 def classify_story(r):
     v,q,g = r["Value Score"],r["Quality Score"],r["Growth Score"]
-    archetype = r["Company Archetype"]; direction = r["Fundamental Direction"]; ts = r["Turnaround Score"]
+    archetype = r["Company Archetype"]
+    direction = r["Fundamental Direction"]
+    ts = r["Turnaround Score"]
+    gate_label = clean_text(r.get("Recovery Gate"))
 
-    # Asset-based businesses get their own logic.
     if archetype == "Investment holding":
-        if ts >= 65:
-            return "🏗️ Asset / financial recovery"
-        if not pd.isna(v) and v >= 55:
+        if ts >= 55 or (not pd.isna(v) and v >= 55):
             return "🏗️ Asset / financial recovery"
     if archetype in ("Asset manager / capital markets", "Financial institution"):
-        if ts >= 65:
+        if ts >= 60:
             return "🏗️ Asset / financial recovery"
     if archetype == "REIT / real estate" and q >= 60 and v >= 55:
         return "🏢 Real-estate value"
-
-    # True operating turnaround is gated by the direction engine.
-    if ts >= 65 and direction == "🔄 Recovery / obrat" and archetype not in ("Technology / high growth",):
+    if archetype == "Commodity / resource" and direction == "🔄 Recovery / obrat":
+        return "🌐 Cyclical / commodity recovery"
+    if archetype == "Technology / high growth" and direction == "🔄 Recovery / obrat":
+        if g >= 60:
+            return "🚀 Growth / recovery"
+        return "🛠️ Operational improvement"
+    if ts >= 75 and gate_label == "🟢 Strong turnaround structure":
         return "🔄 Operating turnaround"
-
+    if direction == "🔄 Recovery / obrat" and ts >= 55:
+        return "🔄 Recovery candidate"
     if direction == "🛠️ Operational improvement":
         if q >= 65 and g >= 45:
             return "🏆 Quality Compounder" if g >= 65 else "💎 Kvalita za rozumnou cenu"
         return "🛠️ Operational improvement"
-
     if not pd.isna(v) and not pd.isna(q) and not pd.isna(g):
         if v >= 70 and q < 50 and g < 50: return "🪤 Value Trap – varování"
         if q >= 70 and g >= 65 and v >= 45: return "🏆 Quality Compounder"
@@ -657,7 +832,7 @@ def story_priority(r):
     s=r["Story"]; v,q,g=r["Value Score"],r["Quality Score"],r["Growth Score"]; ts=r["Turnaround Score"]
     targets={"🏆 Quality Compounder":(q,g,v),"💎 Kvalita za rozumnou cenu":(q,v,g),"🚀 Růst za rozumnou cenu":(g,q,v),
              "💰 Value / levná firma":(v,q,g),"🔄 Operating turnaround":(ts,q,g),"🏗️ Asset / financial recovery":(ts,q,v),"🛠️ Operational improvement":(q,g,v),
-             "🏢 Real-estate value":(v,q,g),"🔥 High Growth / dražší příběh":(g,q,v),"🪤 Value Trap – varování":(v,100-(q or 0),100-(g or 0))}
+             "🏢 Real-estate value":(v,q,g),"🌐 Cyclical / commodity recovery":(g,v,q),"🚀 Growth / recovery":(g,q,v),"🔄 Recovery candidate":(ts,q,g),"🔥 High Growth / dražší příběh":(g,q,v),"🪤 Value Trap – varování":(v,100-(q or 0),100-(g or 0))}
     vals=[x for x in targets.get(s,(v,q,g)) if not pd.isna(x)]
     return round(sum(vals)/len(vals),1) if vals else np.nan
 
@@ -668,253 +843,193 @@ def story_priority(r):
 
 TEXT_RULES = {
     "🔄 Operating turnaround": {
-        "positive": {
-            "turnaround": 3, "recovery": 2, "restructuring": 2,
-            "cost reduction": 2, "cost savings": 2, "margin recovery": 3,
-            "return to profitability": 3, "operational improvement": 2,
-            "operating improvement": 2, "deleveraging": 2, "new management": 1,
-            "strategic review": 1, "transformation": 1, "profitability improved": 2,
-            "cash flow improved": 2
-        },
-        "negative": {
-            "continued decline": 3, "deterioration": 2, "liquidity pressure": 3,
-            "covenant breach": 3, "going concern": 3, "cash burn": 2,
-            "declining demand": 2, "margin pressure": 2, "failed turnaround": 3,
-            "turnaround efforts have not": 3, "restructuring costs": 2
-        }
+        "positive": {"turnaround":3,"recovery":2,"restructuring":3,"cost reduction":2,"cost savings":2,"margin recovery":3,"return to profitability":3,"operational improvement":2,"deleveraging":2,"new management":2,"strategic review":1,"transformation":1,"profitability improved":2,"cash flow improved":2,"debt reduction":2},
+        "negative": {"continued decline":3,"deterioration":3,"liquidity pressure":3,"covenant breach":3,"going concern":3,"cash burn":2,"declining demand":2,"margin pressure":2,"failed turnaround":3,"restructuring costs":2}
+    },
+    "🔄 Recovery candidate": {
+        "positive": {"recovery":2,"turnaround":2,"restructuring":3,"cost reduction":2,"margin recovery":3,"return to profitability":3,"operational improvement":2,"deleveraging":2,"new management":2,"profitability improved":2,"cash flow improved":2,"debt reduction":2},
+        "negative": {"continued decline":3,"deterioration":3,"liquidity pressure":3,"going concern":3,"cash burn":2,"declining demand":2,"margin pressure":2}
+    },
+    "🌐 Cyclical / commodity recovery": {
+        "positive": {"commodity prices":3,"pricing":2,"demand recovery":2,"cycle":2,"cyclical recovery":3,"margins":2,"utilization":2,"production growth":2},
+        "negative": {"oversupply":3,"weak pricing":3,"lower commodity prices":3,"demand destruction":3}
+    },
+    "🚀 Growth / recovery": {
+        "positive": {"recovery":2,"accelerating growth":3,"organic growth":2,"market share":2,"new products":2,"pricing power":2,"return to growth":3,"profitability improved":2},
+        "negative": {"slowing growth":3,"declining demand":2,"guidance cut":3,"cash burn":3,"dilution":2}
     },
     "🏗️ Asset / financial recovery": {
-        "positive": {
-            "net asset value": 3, "nav per share": 3, "discount to nav": 3,
-            "portfolio value": 2, "fair value": 2, "monetization": 2,
-            "realization": 2, "asset value": 2, "recovery": 2,
-            "investment gains": 2, "portfolio gains": 2, "deleveraging": 2
-        },
-        "negative": {
-            "impairment": 2, "write-down": 3, "liquidity pressure": 3,
-            "discount widened": 3, "portfolio loss": 2, "realization risk": 2
-        }
+        "positive": {"net asset value":3,"nav per share":3,"discount to nav":3,"portfolio value":2,"fair value":2,"monetization":2,"realization":2,"asset value":2,"recovery":2,"investment gains":2,"portfolio gains":2,"deleveraging":2},
+        "negative": {"impairment":2,"write-down":3,"liquidity pressure":3,"discount widened":3,"portfolio loss":2,"realization risk":2}
     },
     "🏢 Real-estate value": {
-        "positive": {
-            "net asset value": 3, "nav": 2, "occupancy": 2, "rent growth": 2,
-            "same-store noi": 3, "noi growth": 3, "leasing spread": 2,
-            "development pipeline": 1, "asset value": 2, "discount to nav": 3
-        },
-        "negative": {
-            "vacancy": 2, "occupancy decline": 3, "rent decline": 2,
-            "impairment": 2, "refinancing risk": 3, "higher interest expense": 2
-        }
+        "positive": {"net asset value":3,"nav":2,"occupancy":2,"rent growth":2,"same-store noi":3,"noi growth":3,"leasing spread":2,"asset value":2,"discount to nav":3},
+        "negative": {"vacancy":2,"occupancy decline":3,"rent decline":2,"impairment":2,"refinancing risk":3,"higher interest expense":2}
     },
     "🚀 Růst za rozumnou cenu": {
-        "positive": {
-            "organic growth": 3, "accelerating growth": 3, "market share": 2,
-            "capacity expansion": 2, "backlog": 2, "bookings growth": 2,
-            "demand growth": 2, "new markets": 2, "international expansion": 2,
-            "pipeline": 1, "pricing power": 2
-        },
-        "negative": {
-            "slowing growth": 3, "declining demand": 2, "market share loss": 3,
-            "competitive pressure": 2, "guidance cut": 3, "weak bookings": 2
-        }
+        "positive": {"organic growth":3,"accelerating growth":3,"market share":2,"capacity expansion":2,"backlog":2,"bookings growth":2,"demand growth":2,"new markets":2,"international expansion":2,"pricing power":2},
+        "negative": {"slowing growth":3,"declining demand":2,"market share loss":3,"competitive pressure":2,"guidance cut":3,"weak bookings":2}
     },
     "🏆 Quality Compounder": {
-        "positive": {
-            "recurring revenue": 3, "recurring cash flow": 3, "pricing power": 3,
-            "competitive advantage": 3, "market leadership": 2, "high margins": 2,
-            "free cash flow": 1, "long-term growth": 2, "capital allocation": 2,
-            "customer retention": 2, "strong balance sheet": 2
-        },
-        "negative": {
-            "customer churn": 3, "margin pressure": 2, "competitive pressure": 2,
-            "market share loss": 3, "cash burn": 3, "weak balance sheet": 3
-        }
+        "positive": {"recurring revenue":3,"recurring cash flow":3,"pricing power":3,"competitive advantage":3,"market leadership":2,"high margins":2,"free cash flow":1,"long-term growth":2,"capital allocation":2,"customer retention":2,"strong balance sheet":2},
+        "negative": {"customer churn":3,"margin pressure":2,"competitive pressure":2,"market share loss":3,"cash burn":3,"weak balance sheet":3}
     },
     "💎 Kvalita za rozumnou cenu": {
-        "positive": {
-            "undervalued": 3, "attractive valuation": 3, "discount to peers": 2,
-            "free cash flow": 2, "pricing power": 2, "competitive advantage": 2,
-            "capital return": 2, "share buyback": 2, "strong balance sheet": 2
-        },
-        "negative": {
-            "overvalued": 3, "valuation premium": 2, "margin pressure": 2,
-            "competitive pressure": 2, "declining demand": 2
-        }
+        "positive": {"undervalued":3,"attractive valuation":3,"discount to peers":2,"free cash flow":2,"pricing power":2,"competitive advantage":2,"capital return":2,"share buyback":2,"strong balance sheet":2},
+        "negative": {"overvalued":3,"valuation premium":2,"margin pressure":2,"competitive pressure":2,"declining demand":2}
     },
     "💰 Value / levná firma": {
-        "positive": {
-            "undervalued": 3, "intrinsic value": 3, "discount to peers": 2,
-            "asset value": 2, "sum of the parts": 3, "share buyback": 2,
-            "capital return": 2, "non-core assets": 1, "monetization": 2
-        },
-        "negative": {
-            "structural decline": 3, "secular decline": 3, "excess capacity": 2,
-            "debt burden": 3, "liquidity pressure": 3, "cash burn": 3,
-            "declining market share": 3, "impairment": 2
-        }
+        "positive": {"undervalued":3,"intrinsic value":3,"discount to peers":2,"asset value":2,"sum of the parts":3,"share buyback":2,"capital return":2,"non-core assets":1,"monetization":2},
+        "negative": {"structural decline":3,"secular decline":3,"excess capacity":2,"debt burden":3,"liquidity pressure":3,"cash burn":3,"declining market share":3,"impairment":2}
     },
     "🔥 High Growth / dražší příběh": {
-        "positive": {
-            "accelerating growth": 3, "organic growth": 2, "market share": 2,
-            "expansion": 1, "backlog": 2, "pipeline": 1, "new markets": 2
-        },
-        "negative": {
-            "overvalued": 3, "valuation premium": 2, "cash burn": 3,
-            "dilution": 2, "slowing growth": 3
-        }
+        "positive": {"accelerating growth":3,"organic growth":2,"market share":2,"expansion":1,"backlog":2,"pipeline":1,"new markets":2},
+        "negative": {"overvalued":3,"valuation premium":2,"cash burn":3,"dilution":2,"slowing growth":3}
     },
     "🪤 Value Trap – varování": {
-        "positive": {
-            "structural decline": 3, "secular decline": 3, "declining market share": 3,
-            "excess capacity": 2, "debt burden": 3, "cash burn": 3,
-            "competitive pressure": 2, "liquidity pressure": 3, "impairment": 2
-        },
-        "negative": {
-            "turnaround": 2, "recovery": 2, "margin recovery": 2,
-            "return to profitability": 3, "strong balance sheet": 2
-        }
+        "positive": {"structural decline":3,"secular decline":3,"declining market share":3,"excess capacity":2,"debt burden":3,"cash burn":3,"competitive pressure":2,"liquidity pressure":3,"impairment":2},
+        "negative": {"turnaround":2,"recovery":2,"margin recovery":2,"return to profitability":3,"strong balance sheet":2}
     }
 }
-
-NEGATION_WORDS = {"not", "no", "without", "unlikely", "failed", "fails", "fail", "never", "neither"}
-
+NEGATION_WORDS = {"not","no","without","unlikely","failed","fails","fail","never","neither"}
 
 def text_clean(x):
     s = unescape(clean_text(x)).lower()
     s = re.sub(r"<[^>]+>", " ", s)
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
-
+    return re.sub(r"\s+", " ", s).strip()
 
 def sentence_chunks(text):
     text = text_clean(text)
-    if not text:
-        return []
+    if not text: return []
     return [x.strip() for x in re.split(r"(?<=[.!?])\s+", text) if x.strip()]
 
-
 def keyword_context(sentence, phrase):
-    """Return (negated, short human-readable context)."""
     pos = sentence.find(phrase)
-    if pos < 0:
-        return False, sentence[:240]
-    before = sentence[max(0, pos - 80):pos]
+    if pos < 0: return False, sentence[:240]
+    before = sentence[max(0,pos-100):pos]
     words = re.findall(r"[a-z]+", before)
-    negated = any(w in NEGATION_WORDS for w in words[-7:])
-    start = max(0, pos - 65)
-    end = min(len(sentence), pos + len(phrase) + 95)
-    snippet = sentence[start:end]
-    if start > 0:
-        snippet = "…" + snippet
-    if end < len(sentence):
-        snippet += "…"
-    return negated, snippet
+    negated = any(w in NEGATION_WORDS for w in words[-8:])
+    start=max(0,pos-70); end=min(len(sentence),pos+len(phrase)+110)
+    snippet=sentence[start:end]
+    if start>0: snippet="…"+snippet
+    if end<len(sentence): snippet+="…"
+    return negated,snippet
 
+def company_identity_terms(name, ticker):
+    words = [w for w in re.findall(r"[a-z0-9]+", text_clean(name)) if len(w) >= 3]
+    stop={"inc","corp","corporation","company","plc","limited","ltd","ag","ordinary","shares","common","holdings","class","the"}
+    words=[w for w in words if w not in stop]
+    return words[:4], text_clean(ticker).replace(".de","")
+
+def sentence_is_company_relevant(sentence, name, ticker):
+    words, tick = company_identity_terms(name, ticker)
+    s=text_clean(sentence)
+    if tick and re.search(r"(?<![a-z0-9])"+re.escape(tick)+r"(?![a-z0-9])",s):
+        return True
+    if not words: return True
+    # A single distinctive name word is sufficient for news headlines; for generic
+    # names require two words.
+    hits=sum(1 for w in words if re.search(r"(?<![a-z0-9])"+re.escape(w)+r"(?![a-z0-9])",s))
+    return hits >= (2 if len(words)>=2 else 1)
 
 def score_text_evidence(text, story):
-    rules = TEXT_RULES.get(story)
-    if not rules:
-        return np.nan, "⚪ Bez textové vrstvy", 0, 0, [], []
-    chunks = sentence_chunks(text)
-    joined = " ".join(chunks)
-    positive_score = 0
-    negative_score = 0
-    support = []
-    warnings = []
-    seen = set()
-
-    def scan(bucket, is_positive):
-        nonlocal positive_score, negative_score
-        for phrase, weight in bucket.items():
-            # Count at most twice per phrase: repeated boilerplate should not dominate.
-            count = min(2, len(re.findall(r"(?<![a-z])" + re.escape(phrase) + r"(?![a-z])", joined)))
-            if count == 0:
-                continue
+    rules=TEXT_RULES.get(story)
+    if not rules: return np.nan,"⚪ Bez textové vrstvy",0,0,[],[]
+    chunks=sentence_chunks(text)
+    positive_score=negative_score=0; support=[]; warnings=[]; seen=set()
+    def scan(bucket,is_positive):
+        nonlocal positive_score,negative_score
+        for phrase,weight in bucket.items():
             for sent in chunks:
-                if phrase not in sent:
-                    continue
-                negated, snippet = keyword_context(sent, phrase)
-                key = (phrase, snippet[:160])
-                if key in seen:
-                    continue
+                if phrase not in sent: continue
+                negated,snippet=keyword_context(sent,phrase)
+                key=(phrase,snippet[:180])
+                if key in seen: continue
                 seen.add(key)
-                effective_positive = is_positive and not negated
-                effective_negative = (not is_positive) or negated
-                if effective_positive:
-                    positive_score += weight
-                    support.append(f"+ {phrase}: {snippet}")
-                elif effective_negative:
-                    negative_score += weight
-                    warnings.append(f"− {phrase}: {snippet}")
-                if len(support) >= 8 and len(warnings) >= 8:
-                    return
-
-    scan(rules["positive"], True)
-    scan(rules["negative"], False)
-
-    raw = 50 + positive_score * 7 - negative_score * 9
-    score = float(max(0, min(100, raw)))
-    total = positive_score + negative_score
-    if total == 0:
-        label = "⚪ Bez textového důkazu"
-    elif score >= 70 and positive_score > negative_score:
-        label = "🟢 Text podporuje příběh"
-    elif score >= 55 and positive_score >= negative_score:
-        label = "🟡 Text spíše podporuje"
-    elif score <= 30 and negative_score > positive_score:
-        label = "🔴 Text příběh zpochybňuje"
-    else:
-        label = "🟠 Text je smíšený"
-    return score, label, positive_score, negative_score, support[:8], warnings[:8]
-
+                if is_positive and not negated:
+                    positive_score+=weight; support.append(f"+ {phrase}: {snippet}")
+                else:
+                    negative_score+=weight; warnings.append(f"− {phrase}: {snippet}")
+                if len(support)>=8 and len(warnings)>=8: return
+    scan(rules["positive"],True); scan(rules["negative"],False)
+    raw=50+positive_score*7-negative_score*9
+    score=float(max(0,min(100,raw)))
+    total=positive_score+negative_score
+    if total==0: label="⚪ Bez textového důkazu"
+    elif score>=70 and positive_score>negative_score: label="🟢 Text podporuje příběh"
+    elif score>=55 and positive_score>=negative_score: label="🟡 Text spíše podporuje"
+    elif score<=30 and negative_score>positive_score: label="🔴 Text příběh zpochybňuje"
+    else: label="🟠 Text je smíšený"
+    return score,label,positive_score,negative_score,support[:8],warnings[:8]
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def fetch_text_evidence(yahoo_ticker, story):
-    """Fetch only lightweight public text for shortlisted names.
+def fetch_google_news(company_name, ticker):
+    """Company-focused RSS search. Titles are filtered again for identity."""
+    queries=[
+        f'"{company_name}" turnaround recovery restructuring profitability margin',
+        f'"{company_name}" cost cutting demand outlook earnings',
+    ]
+    parts=[]
+    for q in queries:
+        try:
+            url="https://news.google.com/rss/search"
+            r=requests.get(url,params={"q":q,"hl":"en-US","gl":"US","ceid":"US:en"},timeout=12,
+                           headers={"User-Agent":"Mozilla/5.0"})
+            r.raise_for_status()
+            xml=r.text
+            items=re.findall(r"<item>(.*?)</item>",xml,re.S|re.I)
+            for item in items[:10]:
+                title=re.search(r"<title>(.*?)</title>",item,re.S|re.I)
+                pub=re.search(r"<pubDate>(.*?)</pubDate>",item,re.S|re.I)
+                if title:
+                    t=unescape(re.sub(r"<[^>]+>"," ",title.group(1)))
+                    if sentence_is_company_relevant(t,company_name,ticker):
+                        parts.append(t + (f" ({pub.group(1)})" if pub else ""))
+        except Exception:
+            continue
+    return " ".join(parts[:20])
 
-    Sources: Yahoo Finance business summary + recent Yahoo Finance news.
-    This is evidence, not an LLM verdict. Missing text is treated as neutral.
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_text_evidence(yahoo_ticker, story, company_name="", ticker=""):
+    """Evidence layer: company-specific business summary + identity-filtered news.
+    Google News is used to find analyst/news labels; Yahoo news is retained only
+    when the sentence/title is demonstrably about the company.
     """
     try:
-        t = yf.Ticker(yahoo_ticker)
-        parts = []
+        parts=[]
         try:
-            info = t.info or {}
-            for key in ("longBusinessSummary", "sector", "industry"):
-                val = info.get(key)
-                if val:
-                    parts.append(clean_text(val))
+            info=yf.Ticker(yahoo_ticker).info or {}
+            summary=info.get("longBusinessSummary")
+            if summary: parts.append(clean_text(summary))
+            sector=info.get("sector"); industry=info.get("industry")
+            if sector: parts.append(clean_text(sector))
+            if industry: parts.append(clean_text(industry))
         except Exception:
             pass
+
         try:
-            news = t.news or []
-            for item in news[:12]:
-                content = item.get("content", item) if isinstance(item, dict) else {}
-                title = content.get("title") if isinstance(content, dict) else None
-                summary = content.get("summary") if isinstance(content, dict) else None
-                if title:
-                    parts.append(clean_text(title))
-                if summary:
-                    parts.append(clean_text(summary))
+            news=yf.Ticker(yahoo_ticker).news or []
+            for item in news[:15]:
+                content=item.get("content",item) if isinstance(item,dict) else {}
+                title=content.get("title") if isinstance(content,dict) else None
+                summary=content.get("summary") if isinstance(content,dict) else None
+                for val in (title,summary):
+                    if val and sentence_is_company_relevant(val,company_name,ticker):
+                        parts.append(clean_text(val))
         except Exception:
             pass
-        text = " ".join(parts)
-        score, label, pos, neg, support, warnings = score_text_evidence(text, story)
-        return {
-            "Text Score": score,
-            "Text Evidence": label,
-            "Text Positive": pos,
-            "Text Negative": neg,
-            "Text Support": "\n".join(support),
-            "Text Warnings": "\n".join(warnings),
-            "Text Sources": "Yahoo Finance business summary + recent news" if text else ""
-        }
+
+        google=fetch_google_news(company_name,ticker) if company_name else ""
+        if google: parts.append(google)
+        text=" ".join(parts)
+        score,label,pos,neg,support,warnings=score_text_evidence(text,story)
+        return {"Text Score":score,"Text Evidence":label,"Text Positive":pos,"Text Negative":neg,
+                "Text Support":"\n".join(support),"Text Warnings":"\n".join(warnings),
+                "Text Sources":"Yahoo Finance business summary + identity-filtered Yahoo news + Google News RSS" if text else ""}
     except Exception as e:
-        return {
-            "Text Score": np.nan, "Text Evidence": "⚪ Text nedostupný",
-            "Text Positive": 0, "Text Negative": 0, "Text Support": "",
-            "Text Warnings": "", "Text Sources": str(e)[:180]
-        }
+        return {"Text Score":np.nan,"Text Evidence":"⚪ Text nedostupný","Text Positive":0,"Text Negative":0,
+                "Text Support":"","Text Warnings":"","Text Sources":str(e)[:180]}
+
 
 
 # -----------------------------------------------------------------------------
@@ -1056,7 +1171,7 @@ def compact_verdict(row):
     story = clean_text(row.get("Story")); ts = safe_float(row.get("Turnaround Score"))
     text = clean_text(row.get("Text Evidence")); conf = safe_float(row.get("Final Confidence"))
     if "zpochybňuje" in text: return "🔴 Zpochybněno"
-    if story == "🔄 Operating turnaround":
+    if story in ("🔄 Operating turnaround","🔄 Recovery candidate"):
         if not pd.isna(ts) and ts >= 80 and not pd.isna(conf) and conf >= 70: return "🟢 Silný adept"
         if not pd.isna(ts) and ts >= 65: return "🟡 Turnaround kandidát"
     if story == "🛠️ Operational improvement": return "⚪ Spíše zlepšení"
@@ -1105,7 +1220,7 @@ def add_text_evidence(df, max_text_candidates):
     status = st.empty()
     for i, (idx, row) in enumerate(todo.iterrows(), start=1):
         status.write(f"Textová fáze {i}/{len(todo)}: **{row['Ticker']}**")
-        ev = fetch_text_evidence(row["Yahoo Ticker"], row["Story"])
+        ev = fetch_text_evidence(row["Yahoo Ticker"], row["Story"], row.get("Name",""), row.get("Ticker",""))
         for k, v in ev.items():
             out.at[idx, k] = v
         progress.progress(i / len(todo))
@@ -1114,23 +1229,28 @@ def add_text_evidence(df, max_text_candidates):
 
 
 def final_story_confidence(r):
-    """Combine quantitative story priority with text evidence when available."""
-    q = safe_float(r.get("Story Priority"))
-    t = safe_float(r.get("Text Score"))
-    if pd.isna(q):
-        return t
-    if pd.isna(t):
-        return q
-    # Quant 65 %, text 35 %. Text cannot completely override fundamentals.
-    return round(0.65 * q + 0.35 * t, 1)
+    """Story strength is quantitative. Text is evidence quality, not a weighted vote."""
+    q=safe_float(r.get("Story Priority"))
+    return q
+
+def evidence_quality(r):
+    score=safe_float(r.get("Text Score"))
+    pos=safe_float(r.get("Text Positive")) or 0
+    neg=safe_float(r.get("Text Negative")) or 0
+    if pd.isna(score): return "⚪ Nehodnoceno"
+    if pos+neg == 0: return "⚪ Bez důkazu"
+    if neg > pos: return "🟠 Rozporuplné"
+    if pos >= 4: return "🟢 Silnější evidence"
+    return "🟡 Slabší evidence"
 
 # Sidebar
 st.sidebar.header("⚙️ Nastavení")
 selected_exchanges = st.sidebar.multiselect("Burzy", ["NASDAQ", "NYSE", "XETRA"], default=["NASDAQ", "NYSE", "XETRA"])
 min_cap_b = st.sidebar.number_input("Min. Market Cap (mld.)", min_value=0.0, value=1.0, step=0.5)
-max_candidates = st.sidebar.slider("Max. titulů pro hlubší analýzu", 25, 1000, 250, 25)
-max_text_candidates = st.sidebar.slider("Max. titulů pro textovou fázi", 0, 50, 30, 5)
-max_price_candidates = st.sidebar.slider("Max. titulů pro cenovou fázi", 0, 50, 30, 5)
+max_candidates = st.sidebar.slider("Max. titulů pro fundamentální fázi", 100, 600, 350, 50)
+max_text_candidates = st.sidebar.slider("Max. titulů pro textovou fázi", 0, 60, 40, 5)
+max_price_candidates = st.sidebar.slider("Max. titulů pro cenovou fázi", 0, 60, 40, 5)
+max_stage1 = st.sidebar.slider("Max. titulů z celého univerza do předvýběru", 200, 1500, 800, 100)
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("🎯 Jaký příběh hledám?")
@@ -1188,7 +1308,8 @@ if not run and "screening_results" not in st.session_state:
     st.info("Nastav příběhy a stiskni **🚀 Spustit screening**."); st.stop()
 
 if run:
-    candidates = build_candidate_sample(universe, max_candidates)
+    stage1 = prefilter_by_market_data(universe, max_stage1)
+    candidates = build_stage1_candidates(stage1, max_candidates)
     rows = []; progress = st.progress(0); status_text = st.empty()
     for i, row in candidates.iterrows():
         status_text.write(f"Načítám {i+1}/{len(candidates)}: **{row['Ticker']}**")
@@ -1230,6 +1351,9 @@ results_df["Company Type"] = results_df["Company Archetype"]
 dirs = results_df.apply(fundamental_direction, axis=1, result_type="expand")
 dirs.columns = ["Fundamental Direction", "Fundamental Trend Score", "Fundamental Evidence"]
 results_df = pd.concat([results_df, dirs], axis=1)
+gates = results_df.apply(recovery_gates, axis=1, result_type="expand")
+gates.columns = ["Recovery Gate", "Recovery Gate Score", "Recovery Gates"]
+results_df = pd.concat([results_df, gates], axis=1)
 turns = results_df.apply(turnaround_score, axis=1, result_type="expand")
 turns.columns = ["Turnaround Score", "Turnaround Evidence"]
 results_df = pd.concat([results_df, turns], axis=1)
@@ -1282,7 +1406,7 @@ if run:
         results_df = empty_evidence_columns(results_df)
 
     evidence_cols = [c for c in [
-        "Ticker", "Text Score", "Text Evidence", "Text Positive", "Text Negative", "Text Support", "Text Warnings", "Text Sources",
+        "Ticker", "Recovery Gate", "Recovery Gate Score", "Recovery Gates", "Text Score", "Text Evidence", "Text Positive", "Text Negative", "Text Support", "Text Warnings", "Text Sources",
         "Price Score", "Price View", "Drawdown 3Y", "Drawdown 5Y", "Recovery from 3Y Low", "Recovery from 5Y Low",
         "6M Return", "12M Return", "Days Since 3Y Low", "MA50 vs MA200", "Higher Low", "Higher High", "Price Trend", "Price Evidence"
     ] if c in results_df.columns]
@@ -1342,10 +1466,10 @@ else:
     compact["Varování"] = compact.apply(compact_warning, axis=1)
     compact = compact[[
         "Ticker", "Name", "Story", "Company Archetype", "Final Confidence", "Verdikt", "Trend",
-        "Price View", "Market / Fundamental View", "Text Evidence", "Value Score", "Quality Score", "Growth Score", "Varování"
+        "Price View", "Market / Fundamental View", "Recovery Gate", "Text Evidence", "Value Score", "Quality Score", "Growth Score", "Varování"
     ]].rename(columns={
         "Name": "Firma", "Story": "Příběh", "Company Archetype": "Charakter", "Final Confidence": "Síla příběhu",
-        "Price View": "Cenový obraz", "Market / Fundamental View": "Fundamenty vs. cena",
+        "Price View": "Cenový obraz", "Market / Fundamental View": "Fundamenty vs. cena", "Recovery Gate": "Recovery test",
         "Text Evidence": "Textové signály", "Value Score": "Value",
         "Quality Score": "Quality", "Growth Score": "Growth"
     })
@@ -1381,7 +1505,7 @@ else:
     m3.metric("Trend", trend)
     m4.metric("Verdikt", verdict)
 
-    st.caption(f"Textové signály: {clean_text(r.get('Text Evidence')) or 'nehodnoceno'} · {warning}")
+    st.caption(f"Recovery test: {clean_text(r.get('Recovery Gate')) or 'nehodnoceno'} · Textové signály: {clean_text(r.get('Text Evidence')) or 'nehodnoceno'} · {warning}")
     if clean_text(r.get("Turnaround Evidence")):
         st.info("**Proč se titul dostal mezi kandidáty:** " + clean_text(r.get("Fundamental Evidence")) + "\n\n**Turnaround signály:** " + clean_text(r.get("Turnaround Evidence")))
 
@@ -1409,6 +1533,8 @@ else:
             "Net Margin %": st.column_config.NumberColumn("Net Margin %", format="%.1f")
         })
     with st.expander("📈 Růst a obrat trendu", expanded=False):
+        st.write(f"**Recovery test:** {r.get("Recovery Gate","—")} · skóre {safe_float(r.get("Recovery Gate Score")):.0f}/100" if not pd.isna(safe_float(r.get("Recovery Gate Score"))) else "**Recovery test:** —")
+        st.write(f"**Brány:** {r.get("Recovery Gates","—")}")
         st.dataframe(pd.DataFrame([{
             "Směr fundamentů": r["Fundamental Direction"], "Fundamentální trend score": r["Fundamental Trend Score"],
             "Revenue Growth %": r["Revenue Growth"], "Earnings Growth %": r["Earnings Growth"],
@@ -1441,7 +1567,7 @@ else:
         detail_cols = [
             "Ticker","Yahoo Ticker","Name","Exchange","Company Archetype","Company Type","Sector","Industry",
             *PARAMS,"Revenue CAGR 3Y","Net Income CAGR 3Y","Net Margin","Margin Change 3Y",
-            "Revenue Prior YoY","Net Income Prior YoY","Fundamental Direction","Fundamental Trend Score","Fundamental Evidence","Turnaround Score","Turnaround Evidence",
+            "Revenue Prior YoY","Net Income Prior YoY","Fundamental Direction","Fundamental Trend Score","Fundamental Evidence","Recovery Gate","Recovery Gate Score","Recovery Gates","Turnaround Score","Turnaround Evidence",
             "Story Priority","Text Score","Final Confidence","Status","Mapping","Data Source","Error"
         ]
         detail_cols = [c for c in detail_cols if c in r.index]
@@ -1527,8 +1653,8 @@ with st.expander("🧭 Kontrola XETRA mappingu", expanded=False):
         )
 
 st.info(
-    "V5.3 pracuje v navazujících vrstvách: (1) fundamentální screening, (2) charakter firmy, (3) směr fundamentů, (4) investiční příběh, (5) textové signály, (6) chování ceny. True turnaround vyžaduje předchozí problém i současné zlepšení. "
-    "Textová vrstva příběh nepotvrzuje automaticky; hledá podpůrné i varovné signály a může výsledný příběh zpochybnit. "
+    "V6 pracuje v navazujících vrstvách: (1) cenový předvýběr celého univerza v dávkách, (2) fundamentální fáze, (3) charakter firmy, (4) směr fundamentů, (5) recovery gates, (6) textová evidence, (7) chování ceny, (8) investiční příběh. True turnaround vyžaduje předchozí problém i současné zlepšení. "
+    "Textová vrstva příběh nepotvrzuje automaticky; je to evidence mechanismus. Yahoo/Google text je nejprve filtrován na relevanci ke konkrétní firmě a teprve potom se hledají podpůrné a varovné signály. "
     "Charakter firmy a asset-based společnosti jsou posuzovány odděleně, aby se na ně "
     "mechanicky nepřenášela logika běžné provozní firmy. Chybějící hodnoty se nepřevádějí na nulu."
 )
