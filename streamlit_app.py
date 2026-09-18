@@ -828,13 +828,94 @@ def classify_story(r):
         if v < 40 and q < 50 and g < 50: return "⚠️ Slabý fundamentální obraz"
     return "🔎 Smíšený příběh"
 
-def story_priority(r):
-    s=r["Story"]; v,q,g=r["Value Score"],r["Quality Score"],r["Growth Score"]; ts=r["Turnaround Score"]
-    targets={"🏆 Quality Compounder":(q,g,v),"💎 Kvalita za rozumnou cenu":(q,v,g),"🚀 Růst za rozumnou cenu":(g,q,v),
-             "💰 Value / levná firma":(v,q,g),"🔄 Operating turnaround":(ts,q,g),"🏗️ Asset / financial recovery":(ts,q,v),"🛠️ Operational improvement":(q,g,v),
-             "🏢 Real-estate value":(v,q,g),"🌐 Cyclical / commodity recovery":(g,v,q),"🚀 Growth / recovery":(g,q,v),"🔄 Recovery candidate":(ts,q,g),"🔥 High Growth / dražší příběh":(g,q,v),"🪤 Value Trap – varování":(v,100-(q or 0),100-(g or 0))}
-    vals=[x for x in targets.get(s,(v,q,g)) if not pd.isna(x)]
-    return round(sum(vals)/len(vals),1) if vals else np.nan
+def investment_attractiveness(r):
+    """Obecná investiční atraktivita: valuation + quality + growth.
+    Není to doporučení ani odhad budoucího výnosu; slouží jen k pořadí kandidátů.
+    """
+    v = safe_float(r.get("Value Score")); q = safe_float(r.get("Quality Score")); g = safe_float(r.get("Growth Score"))
+    vals = [x for x in (v, q, g) if not pd.isna(x)]
+    if not vals:
+        return np.nan
+    # Value gets slightly higher weight because the purpose is to prioritize
+    # candidates worth opening at today's price, not simply the fastest growers.
+    weights = [(v, 0.40), (q, 0.35), (g, 0.25)]
+    num = sum(x*w for x,w in weights if not pd.isna(x)); den = sum(w for x,w in weights if not pd.isna(x))
+    return round(num/den, 1) if den else np.nan
+
+
+def story_fit(r, selected_story):
+    """How closely the company matches the story currently being searched.
+    Turnaround 1.0 is deliberately stricter than the old categorical Story label.
+    """
+    if not selected_story:
+        return np.nan
+    v,q,g = safe_float(r.get("Value Score")), safe_float(r.get("Quality Score")), safe_float(r.get("Growth Score"))
+    ts = safe_float(r.get("Turnaround Score")); gate = clean_text(r.get("Recovery Gate"))
+    direction = clean_text(r.get("Fundamental Direction")); archetype = clean_text(r.get("Company Archetype"))
+    price = safe_float(r.get("Price Score"))
+
+    if selected_story == "🔄 Operating turnaround":
+        # 35 prior problem, 20 stabilization, 25 current improvement, 20 persistence.
+        gates = r.get("Recovery Gates", {})
+        if isinstance(gates, dict):
+            problem = bool(gates.get("Prior Problem")); bottom = bool(gates.get("Bottom / Stabilization"))
+            improvement = bool(gates.get("Current Improvement")); persistence = bool(gates.get("Persistence"))
+        else:
+            problem = bottom = improvement = persistence = False
+        score = 0
+        score += 35 if problem else 0
+        score += 20 if bottom else 0
+        score += 25 if improvement else 0
+        score += 20 if persistence else 0
+        if archetype in ("Commodity / resource", "Technology / high growth"):
+            score -= 20
+        if direction != "🔄 Recovery / obrat":
+            score -= 20
+        if not pd.isna(ts):
+            score = 0.70*score + 0.30*ts
+        return round(max(0, min(100, score)), 1)
+
+    if selected_story == "🌐 Cyclical / commodity recovery":
+        base = 0
+        base += 35 if archetype == "Commodity / resource" else 20 if "Cyclical" in archetype else 0
+        base += 30 if direction == "🔄 Recovery / obrat" else 15 if direction == "➡️ Stabilizace" else 0
+        base += 20 if (not pd.isna(g) and g >= 50) else 10 if not pd.isna(g) else 0
+        base += 15 if (not pd.isna(price) and price >= 50) else 0
+        return float(min(100, base))
+
+    mapping = {
+        "🏆 Quality Compounder": (q, g, v),
+        "💎 Kvalita za rozumnou cenu": (q, v, g),
+        "🚀 Růst za rozumnou cenu": (g, q, v),
+        "💰 Value / levná firma": (v, q, g),
+        "🏗️ Asset / financial recovery": (ts, q, v),
+        "🏢 Real-estate value": (v, q, g),
+        "🛠️ Operational improvement": (q, g, v),
+        "🔥 High Growth / dražší příběh": (g, q, v),
+        "🪤 Value Trap – varování": (v, 100-(q or 0), 100-(g or 0)),
+    }
+    vals = mapping.get(selected_story)
+    if not vals:
+        # For the remaining recovery stories use the fundamental direction first.
+        if selected_story in ("🔄 Recovery candidate", "🚀 Growth / recovery"):
+            base = ts if selected_story == "🔄 Recovery candidate" else g
+            if pd.isna(base): return np.nan
+            return round(float(base), 1)
+        return np.nan
+    clean = [x for x in vals if not pd.isna(x)]
+    return round(sum(clean)/len(clean), 1) if clean else np.nan
+
+
+def story_priority(r, selected_story=None):
+    """Pořadí kandidátů = 60 % shoda s příběhem + 40 % investiční atraktivita."""
+    fit = story_fit(r, selected_story) if selected_story else np.nan
+    attr = investment_attractiveness(r)
+    vals = []
+    if not pd.isna(fit): vals.append((fit, 0.60))
+    if not pd.isna(attr): vals.append((attr, 0.40))
+    if not vals:
+        return np.nan
+    return round(sum(v*w for v,w in vals) / sum(w for v,w in vals), 1)
 
 # -----------------------------------------------------------------------------
 # V5 – Text Evidence Engine
@@ -1332,7 +1413,7 @@ if raw_results is None or raw_results.empty:
 derived_cols = [
     "Value Score", "Quality Score", "Growth Score", "Company Archetype", "Company Type",
     "Fundamental Direction", "Fundamental Trend Score", "Fundamental Evidence",
-    "Turnaround Score", "Turnaround Evidence", "Story", "Story Priority",
+    "Turnaround Score", "Turnaround Evidence", "Story", "Shoda s příběhem", "Investiční atraktivita", "Story Priority",
     "Available Params", "Pass", "Story Selected", "Eligible",
     "Text Score", "Text Evidence", "Text Positive", "Text Negative", "Text Support",
     "Text Warnings", "Text Sources", "Price Score", "Price View", "Drawdown 3Y",
@@ -1358,7 +1439,19 @@ turns = results_df.apply(turnaround_score, axis=1, result_type="expand")
 turns.columns = ["Turnaround Score", "Turnaround Evidence"]
 results_df = pd.concat([results_df, turns], axis=1)
 results_df["Story"] = results_df.apply(classify_story, axis=1)
-results_df["Story Priority"] = results_df.apply(story_priority, axis=1)
+results_df["Investiční atraktivita"] = results_df.apply(investment_attractiveness, axis=1)
+def best_selected_story_fit(r):
+    if not selected_stories:
+        return np.nan
+    fits = [story_fit(r, s) for s in selected_stories]
+    fits = [x for x in fits if not pd.isna(x)]
+    return round(max(fits), 1) if fits else np.nan
+
+results_df["Shoda s příběhem"] = results_df.apply(best_selected_story_fit, axis=1)
+results_df["Story Priority"] = results_df.apply(
+    lambda r: story_priority(r, None) if pd.isna(safe_float(r.get("Shoda s příběhem"))) else round(
+        0.60 * safe_float(r.get("Shoda s příběhem")) + 0.40 * safe_float(r.get("Investiční atraktivita")), 1
+        ) if not pd.isna(safe_float(r.get("Investiční atraktivita"))) else safe_float(r.get("Shoda s příběhem")), axis=1)
 results_df["Available Params"] = results_df[PARAMS].notna().sum(axis=1)
 
 # Optional classic filters. Missing data never passes a requested filter.
@@ -1449,7 +1542,7 @@ d.metric("Vybraný příběh", int(results_df["Story Selected"].sum()))
 e.metric("Kandidáti", int(results_df["Eligible"].sum()))
 
 st.markdown("### 🧭 Mapa investičních příběhů")
-st.caption("Skóre není predikce výnosu. Je to první, transparentní způsob, jak převést devět fundamentů do charakteru firmy. Pravidla budeme společně zpřesňovat.")
+st.caption("Skóre není predikce výnosu ani doporučení. Shoda s příběhem říká, jak moc titul odpovídá právě hledanému příběhu; Investiční atraktivita pomáhá určit pořadí kandidátů. Priorita = 60 % shoda + 40 % atraktivita. Při více zvolených příbězích se priorita zatím řadí podle klasifikovaného příběhu.")
 
 story_counts = results_df[results_df["Available Params"] >= min_data]["Story"].value_counts().rename_axis("Příběh").reset_index(name="Počet")
 st.dataframe(story_counts, use_container_width=True, hide_index=True)
@@ -1465,10 +1558,10 @@ else:
     compact["Trend"] = compact.apply(compact_trend, axis=1)
     compact["Varování"] = compact.apply(compact_warning, axis=1)
     compact = compact[[
-        "Ticker", "Name", "Story", "Company Archetype", "Final Confidence", "Verdikt", "Trend",
+        "Ticker", "Name", "Story", "Company Archetype", "Shoda s příběhem", "Investiční atraktivita", "Story Priority", "Verdikt", "Trend",
         "Price View", "Market / Fundamental View", "Recovery Gate", "Text Evidence", "Value Score", "Quality Score", "Growth Score", "Varování"
     ]].rename(columns={
-        "Name": "Firma", "Story": "Příběh", "Company Archetype": "Charakter", "Final Confidence": "Síla příběhu",
+        "Name": "Firma", "Story": "Příběh", "Company Archetype": "Charakter", "Shoda s příběhem": "Shoda s příběhem", "Investiční atraktivita": "Investiční atraktivita", "Story Priority": "Priorita",
         "Price View": "Cenový obraz", "Market / Fundamental View": "Fundamenty vs. cena", "Recovery Gate": "Recovery test",
         "Text Evidence": "Textové signály", "Value Score": "Value",
         "Quality Score": "Quality", "Growth Score": "Growth"
@@ -1476,7 +1569,9 @@ else:
     st.dataframe(
         compact, use_container_width=True, hide_index=True, height=560,
         column_config={
-            "Síla příběhu": st.column_config.NumberColumn("Síla příběhu", format="%.0f"),
+            "Shoda s příběhem": st.column_config.NumberColumn("Shoda s příběhem", format="%.0f"),
+            "Investiční atraktivita": st.column_config.NumberColumn("Investiční atraktivita", format="%.0f"),
+            "Priorita": st.column_config.NumberColumn("Priorita", format="%.0f"),
             "Value": st.column_config.NumberColumn("Value", format="%.0f"),
             "Quality": st.column_config.NumberColumn("Quality", format="%.0f"),
             "Growth": st.column_config.NumberColumn("Growth", format="%.0f"),
@@ -1501,11 +1596,11 @@ else:
     st.markdown(f"### {r['Ticker']} — {r['Name']}")
     m1,m2,m3,m4 = st.columns(4)
     m1.metric("Příběh", r["Story"])
-    m2.metric("Síla příběhu", f"{safe_float(r['Final Confidence']):.0f}/100" if not pd.isna(safe_float(r['Final Confidence'])) else "—")
+    m2.metric("Shoda s příběhem", f"{safe_float(r['Shoda s příběhem']):.0f}/100" if not pd.isna(safe_float(r['Shoda s příběhem'])) else "—")
     m3.metric("Trend", trend)
-    m4.metric("Verdikt", verdict)
+    m4.metric("Priorita", f"{safe_float(r['Story Priority']):.0f}/100" if not pd.isna(safe_float(r['Story Priority'])) else "—")
 
-    st.caption(f"Recovery test: {clean_text(r.get('Recovery Gate')) or 'nehodnoceno'} · Textové signály: {clean_text(r.get('Text Evidence')) or 'nehodnoceno'} · {warning}")
+    st.caption(f"Investiční atraktivita: {safe_float(r.get('Investiční atraktivita')):.0f}/100 · Recovery test: {clean_text(r.get('Recovery Gate')) or 'nehodnoceno'} · Textové signály: {clean_text(r.get('Text Evidence')) or 'nehodnoceno'} · {warning}")
     if clean_text(r.get("Turnaround Evidence")):
         st.info("**Proč se titul dostal mezi kandidáty:** " + clean_text(r.get("Fundamental Evidence")) + "\n\n**Turnaround signály:** " + clean_text(r.get("Turnaround Evidence")))
 
