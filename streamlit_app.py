@@ -1055,7 +1055,9 @@ GENERAL_TEXT_RULES = {
 
 
 def _scan_general_signals(chunks, name, ticker):
-    buckets={k:[] for k in GENERAL_TEXT_RULES}
+    # Keep the result grouped by label so the downstream formatter can
+    # distinguish e.g. "margin pressure" from "demand weakness".
+    buckets={k:{label:[] for label in groups} for k, groups in GENERAL_TEXT_RULES.items()}
     for sent in chunks:
         # Business summary is already company-specific; news/RSS sentences must pass identity.
         for bucket, groups in GENERAL_TEXT_RULES.items():
@@ -1068,8 +1070,8 @@ def _scan_general_signals(chunks, name, ticker):
                         if bucket in ("change","mechanism") and negated:
                             continue
                         item=f"{label}: {snippet}"
-                        if item not in buckets[bucket]:
-                            buckets[bucket].append(item)
+                        if item not in buckets[bucket][label]:
+                            buckets[bucket][label].append(item)
                         break
     return buckets
 
