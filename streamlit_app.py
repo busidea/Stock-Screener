@@ -753,7 +753,7 @@ def recovery_gates(r):
 
 def turnaround_score(r):
     direction, score, evidence = fundamental_direction(r)
-    archetype = clean_text(r.get("Company Archetype")); gate = clean_text(r.get("Recovery Gate"))
+    archetype = clean_text(r.get("Company Archetype")); gate = clean_text(r.get("Posouzení zotavení"))
     excluded = ("Commodity / resource", "Cyclical industrial", "REIT / real estate", "Investment holding", "Asset manager / capital markets", "Financial institution", "Technology / high growth")
     if direction != "🔄 Recovery / obrat": return 0.0, evidence or "bez prokázaného obratu"
     if archetype in excluded: return 0.0, evidence or "zotavení jiného typu než klasický provozní turnaround"
@@ -763,7 +763,7 @@ def turnaround_score(r):
 def classify_story(r):
     v,q,g = r["Value Score"],r["Quality Score"],r["Growth Score"]
     archetype = r["Company Archetype"]; direction = r["Fundamental Direction"]; ts = r["Turnaround Score"]
-    gate_label = clean_text(r.get("Recovery Gate"))
+    gate_label = clean_text(r.get("Posouzení zotavení"))
     if archetype in ("Investment holding", "Asset manager / capital markets", "Financial institution", "REIT / real estate"):
         if direction == "🔄 Recovery / obrat": return "🏗️ Asset / financial recovery"
         if archetype == "REIT / real estate" and q >= 60 and v >= 55: return "🏢 Real-estate value"
@@ -806,13 +806,13 @@ def story_fit(r, selected_story):
     if not selected_story:
         return np.nan
     v,q,g = safe_float(r.get("Value Score")), safe_float(r.get("Quality Score")), safe_float(r.get("Growth Score"))
-    ts = safe_float(r.get("Turnaround Score")); gate = clean_text(r.get("Recovery Gate"))
+    ts = safe_float(r.get("Turnaround Score")); gate = clean_text(r.get("Posouzení zotavení"))
     direction = clean_text(r.get("Fundamental Direction")); archetype = clean_text(r.get("Company Archetype"))
-    price = safe_float(r.get("Price Score"))
+    price = safe_float(r.get("Skóre ceny"))
 
     if selected_story == "🔄 Operating turnaround":
         # 35 prior problem, 20 stabilization, 25 current improvement, 20 persistence.
-        gates = r.get("Recovery Gates", {})
+        gates = r.get("Posouzení zotavenís", {})
         if isinstance(gates, dict):
             problem = bool(gates.get("Prior Problem")); bottom = bool(gates.get("Bottom / Stabilization"))
             improvement = bool(gates.get("Current Improvement")); persistence = bool(gates.get("Persistence"))
@@ -935,13 +935,41 @@ TEXT_RULES = {
 }
 NEGATION_WORDS = {"not","no","without","unlikely","failed","fails","fail","never","neither"}
 
+def _known_text_phrases():
+    phrases=[]
+    for groups in GENERAL_TEXT_RULES.values():
+        for vals in groups.values():
+            phrases.extend(vals)
+    for rules in TEXT_RULES.values():
+        for bucket in ("positive", "negative"):
+            phrases.extend(rules.get(bucket, {}).keys())
+    phrases += [
+        "is bce stock worth buying", "execution risk", "bce stock",
+        "return to profitability", "free cash flow", "cash flow",
+        "strong balance sheet", "higher financing costs", "ai and fiber",
+        "asset sales", "rental growth", "funds from operations"
+    ]
+    return sorted(set(p.lower() for p in phrases if p), key=len, reverse=True)
+
+
+def repair_known_spaced_phrases(s):
+    # Some feeds occasionally return every character separated by spaces, e.g.
+    # "e x e c u t i o n r i s k".  Repair only phrases from our known vocabulary,
+    # rather than trying to guess arbitrary English word boundaries.
+    for phrase in _known_text_phrases():
+        compact = re.sub(r"[^a-z0-9]", "", phrase)
+        if len(compact) < 3:
+            continue
+        pattern = r"\s*".join(re.escape(ch) for ch in compact)
+        s = re.sub(pattern, phrase, s, flags=re.I)
+    return s
+
+
 def text_clean(x):
-    s = unescape(clean_text(x)).lower()
+    s = unescape(clean_text(x))
     s = re.sub(r"<[^>]+>", " ", s)
-    # Some feeds return spaced-out text such as "e x e c u t i o n r i s k".
-    s = re.sub(r"(?<![A-Za-z])(?:[A-Za-z]\s+){2,}[A-Za-z](?![A-Za-z])",
-               lambda m: re.sub(r"\s+", "", m.group(0)), s)
-    return re.sub(r"\s+", " ", s).strip()
+    s = repair_known_spaced_phrases(s)
+    return re.sub(r"\s+", " ", s).strip().lower()
 
 def sentence_chunks(text):
     text = text_clean(text)
@@ -1198,7 +1226,7 @@ def fetch_price_history(yahoo_ticker):
 
 def calc_price_pattern(yahoo_ticker):
     """Describe price structure; price is evidence, never the definition of a turnaround."""
-    empty = {"Price Score": np.nan, "Price View": "⚪ Cena nedostupná",
+    empty = {"Skóre ceny": np.nan, "Price View": "⚪ Cena nedostupná",
              "Drawdown 3Y": np.nan, "Drawdown 5Y": np.nan,
              "Recovery from 3Y Low": np.nan, "Recovery from 5Y Low": np.nan,
              "6M Return": np.nan, "12M Return": np.nan,
@@ -1262,7 +1290,7 @@ def calc_price_pattern(yahoo_ticker):
         if ma>=5: score+=6; positive+=1; evidence.append("50D průměr nad 200D")
         elif ma<-10: score-=6; negative+=1; evidence.append("50D průměr pod 200D")
 
-    result["Price Score"]=round(max(0,min(100,score)),1)
+    result["Skóre ceny"]=round(max(0,min(100,score)),1)
     if higher_low and higher_high and not pd.isna(r12) and r12>0:
         view,trend="🟢 Trh potvrzuje zlepšení","rostoucí struktura"
     elif higher_low and not lower_low:
@@ -1281,7 +1309,7 @@ def calc_price_pattern(yahoo_ticker):
 def add_price_analysis(df,max_price_candidates):
     if df.empty or max_price_candidates<=0: return df
     out=df.copy()
-    defaults={"Price Score":np.nan,"Price View":"⚪ Nehodnoceno","Drawdown 3Y":np.nan,"Drawdown 5Y":np.nan,
+    defaults={"Skóre ceny":np.nan,"Price View":"⚪ Nehodnoceno","Drawdown 3Y":np.nan,"Drawdown 5Y":np.nan,
               "Recovery from 3Y Low":np.nan,"Recovery from 5Y Low":np.nan,"6M Return":np.nan,"12M Return":np.nan,
               "Days Since 3Y Low":np.nan,"MA50 vs MA200":np.nan,"Higher Low":"","Higher High":"","Price Trend":"","Price Evidence":""}
     for c,v in defaults.items(): out[c]=v
@@ -1298,7 +1326,7 @@ def add_price_analysis(df,max_price_candidates):
 
 def market_fundamental_view(row):
     direction = clean_text(row.get("Fundamental Direction"))
-    ps = safe_float(row.get("Price Score"))
+    ps = safe_float(row.get("Skóre ceny"))
     if not direction or pd.isna(ps): return "⚪ Nedostatek dat"
     if direction == "🔄 Recovery / obrat":
         if ps < 40: return "🟢 Fundamenty předbíhají cenu"
@@ -1494,7 +1522,7 @@ derived_cols = [
     "Turnaround Score", "Turnaround Evidence", "Story", "Shoda s příběhem", "Investiční atraktivita", "Story Priority",
     "Available Params", "Pass", "Story Selected", "Eligible",
     "Text Score", "Text Evidence", "Text Positive", "Text Negative", "Text Support",
-    "Text Warnings", "Text Sources", "Price Score", "Price View", "Drawdown 3Y",
+    "Text Warnings", "Text Sources", "Skóre ceny", "Price View", "Drawdown 3Y",
     "Drawdown 5Y", "Recovery from 3Y Low", "Recovery from 5Y Low", "6M Return",
     "12M Return", "Days Since 3Y Low", "MA50 vs MA200", "Higher Low", "Higher High",
     "Price Trend", "Price Evidence", "Final Confidence", "Market / Fundamental View"
@@ -1511,7 +1539,7 @@ dirs = results_df.apply(fundamental_direction, axis=1, result_type="expand")
 dirs.columns = ["Fundamental Direction", "Fundamental Trend Score", "Fundamental Evidence"]
 results_df = pd.concat([results_df, dirs], axis=1)
 gates = results_df.apply(recovery_gates, axis=1, result_type="expand")
-gates.columns = ["Recovery Gate", "Recovery Gate Score", "Recovery Gates"]
+gates.columns = ["Posouzení zotavení", "Skóre zotavení", "Posouzení zotavenís"]
 results_df = pd.concat([results_df, gates], axis=1)
 turns = results_df.apply(turnaround_score, axis=1, result_type="expand")
 turns.columns = ["Turnaround Score", "Turnaround Evidence"]
@@ -1562,7 +1590,7 @@ def empty_evidence_columns(df):
     for c, default in {
         "Text Score": np.nan, "Text Evidence": "⚪ Nehodnoceno", "Text Positive": 0, "Text Negative": 0,
         "Text Support": "", "Text Warnings": "", "Text Sources": "",
-        "Price Score": np.nan, "Price View": "⚪ Nehodnoceno", "Drawdown 3Y": np.nan, "Drawdown 5Y": np.nan,
+        "Skóre ceny": np.nan, "Price View": "⚪ Nehodnoceno", "Drawdown 3Y": np.nan, "Drawdown 5Y": np.nan,
         "Recovery from 3Y Low": np.nan, "Recovery from 5Y Low": np.nan, "6M Return": np.nan, "12M Return": np.nan,
         "Days Since 3Y Low": np.nan, "MA50 vs MA200": np.nan, "Higher Low": "", "Higher High": "",
         "Price Trend": "", "Price Evidence": ""
@@ -1583,8 +1611,8 @@ if run:
         results_df = empty_evidence_columns(results_df)
 
     evidence_cols = [c for c in [
-        "Ticker", "Recovery Gate", "Recovery Gate Score", "Recovery Gates", "Text Score", "Text Evidence", "Text Positive", "Text Negative", "Text Support", "Text Warnings", "Text Sources",
-        "Price Score", "Price View", "Drawdown 3Y", "Drawdown 5Y", "Recovery from 3Y Low", "Recovery from 5Y Low",
+        "Ticker", "Posouzení zotavení", "Skóre zotavení", "Posouzení zotavenís", "Text Score", "Text Evidence", "Text Positive", "Text Negative", "Text Support", "Text Warnings", "Text Sources",
+        "Skóre ceny", "Price View", "Drawdown 3Y", "Drawdown 5Y", "Recovery from 3Y Low", "Recovery from 5Y Low",
         "6M Return", "12M Return", "Days Since 3Y Low", "MA50 vs MA200", "Higher Low", "Higher High", "Price Trend", "Price Evidence"
     ] if c in results_df.columns]
     st.session_state["screening_evidence"] = results_df[evidence_cols].drop_duplicates("Ticker").copy()
@@ -1603,7 +1631,7 @@ else:
 
 for c, default in {
     "Text Score": np.nan, "Text Evidence": "⚪ Nehodnoceno", "Text Positive": 0, "Text Negative": 0, "Text Support": "", "Text Warnings": "", "Text Sources": "",
-    "Price Score": np.nan, "Price View": "⚪ Nehodnoceno", "Drawdown 3Y": np.nan, "Drawdown 5Y": np.nan, "Recovery from 3Y Low": np.nan, "Recovery from 5Y Low": np.nan,
+    "Skóre ceny": np.nan, "Price View": "⚪ Nehodnoceno", "Drawdown 3Y": np.nan, "Drawdown 5Y": np.nan, "Recovery from 3Y Low": np.nan, "Recovery from 5Y Low": np.nan,
     "6M Return": np.nan, "12M Return": np.nan, "Days Since 3Y Low": np.nan, "MA50 vs MA200": np.nan, "Higher Low": "", "Higher High": "", "Price Trend": "", "Price Evidence": ""
 }.items():
     if c not in results_df.columns:
@@ -1644,11 +1672,11 @@ else:
     compact["Varování"] = compact.apply(compact_warning, axis=1)
     compact = compact[[
         "Ticker", "Name", "Story", "Company Archetype", "Shoda s příběhem", "Investiční atraktivita", "Story Priority", "Verdikt", "Trend",
-        "Price View", "Market / Fundamental View", "Recovery Gate", "Textový signál", "Value Score", "Quality Score", "Growth Score", "Varování"
+        "Price View", "Market / Fundamental View", "Posouzení zotavení", "Textový signál", "Value Score", "Quality Score", "Growth Score", "Varování"
     ]].rename(columns={
         "Name": "Firma", "Story": "Příběh", "Company Archetype": "Charakter", "Shoda s příběhem": "Shoda s příběhem", "Investiční atraktivita": "Investiční atraktivita", "Story Priority": "Priorita",
-        "Price View": "Cenový obraz", "Market / Fundamental View": "Fundamenty vs. cena", "Recovery Gate": "Recovery test",
-        "Textový signál": "Textové signály", "Value Score": "Value",
+        "Price View": "Cenový obraz", "Market / Fundamental View": "Fundamenty vs. cena", "Posouzení zotavení": "Posouzení zotavení",
+        "Textový signál": "Textové důkazy", "Value Score": "Value",
         "Quality Score": "Quality", "Growth Score": "Growth"
     })
     st.dataframe(
@@ -1665,7 +1693,7 @@ else:
             "Příběh": st.column_config.TextColumn("Příběh", width="medium"),
             "Verdikt": st.column_config.TextColumn("Verdikt", width="medium"),
             "Trend": st.column_config.TextColumn("Trend", width="medium"),
-            "Textové signály": st.column_config.TextColumn("Textové signály", width="medium"),
+            "Textové důkazy": st.column_config.TextColumn("Textové důkazy", width="medium"),
             "Varování": st.column_config.TextColumn("Varování", width="medium"),
         })
 
@@ -1685,9 +1713,10 @@ else:
     m3.metric("Trend", trend)
     m4.metric("Priorita", f"{safe_float(r['Story Priority']):.0f}/100" if not pd.isna(safe_float(r['Story Priority'])) else "—")
 
-    st.caption(f"Investiční atraktivita: {safe_float(r.get('Investiční atraktivita')):.0f}/100 · Recovery test: {clean_text(r.get('Recovery Gate')) or 'nehodnoceno'} · Textové signály: {clean_text(r.get('Text Evidence')) or 'nehodnoceno'} · {warning}")
+    st.caption(f"Investiční atraktivita: {safe_float(r.get('Investiční atraktivita')):.0f}/100 · Posouzení zotavení: {clean_text(r.get('Posouzení zotavení')) or 'nehodnoceno'} · Textové důkazy: {clean_text(r.get('Text Evidence')) or 'nehodnoceno'} · {warning}")
+    st.caption("Posouzení zotavení = kontrola, zda finanční a provozní údaje vykazují znaky zotavení/obratu. Neznamená to, že je firma zdravá ani že jde automaticky o klasický turnaround.")
     if clean_text(r.get("Turnaround Evidence")):
-        st.info("**Proč se titul dostal mezi kandidáty:** " + clean_text(r.get("Fundamental Evidence")) + "\n\n**Turnaround signály:** " + clean_text(r.get("Turnaround Evidence")))
+        st.info("**Proč se titul dostal mezi kandidáty:** " + clean_text(r.get("Fundamental Evidence")) + "\n\n**Signály zotavení:** " + clean_text(r.get("Turnaround Evidence")))
 
     q1,q2,q3 = st.columns(3)
     q1.metric("Value", f"{safe_float(r['Value Score']):.0f}" if not pd.isna(safe_float(r['Value Score'])) else "—")
@@ -1713,8 +1742,8 @@ else:
             "Net Margin %": st.column_config.NumberColumn("Net Margin %", format="%.1f")
         })
     with st.expander("📈 Růst a obrat trendu", expanded=False):
-        st.write(f"**Recovery test:** {r.get("Recovery Gate","—")} · skóre {safe_float(r.get("Recovery Gate Score")):.0f}/100" if not pd.isna(safe_float(r.get("Recovery Gate Score"))) else "**Recovery test:** —")
-        st.write(f"**Brány:** {r.get("Recovery Gates","—")}")
+        st.write(f"**Posouzení zotavení:** {r.get("Posouzení zotavení","—")} · skóre {safe_float(r.get("Skóre zotavení")):.0f}/100" if not pd.isna(safe_float(r.get("Skóre zotavení"))) else "**Posouzení zotavení:** —")
+        st.write(f"**Brány:** {r.get("Posouzení zotavenís","—")}")
         st.dataframe(pd.DataFrame([{
             "Směr fundamentů": r["Fundamental Direction"], "Fundamentální trend score": r["Fundamental Trend Score"],
             "Revenue Growth %": r["Revenue Growth"], "Earnings Growth %": r["Earnings Growth"],
@@ -1724,16 +1753,16 @@ else:
         }]), use_container_width=True, hide_index=True)
     with st.expander("📉 Chování ceny", expanded=False):
         pc1, pc2, pc3, pc4 = st.columns(4)
-        ps = safe_float(r.get("Price Score")); dd = safe_float(r.get("Drawdown 3Y")); r12 = safe_float(r.get("12M Return")); ma = safe_float(r.get("MA50 vs MA200"))
-        pc1.metric("Price Score", f"{ps:.0f}" if not pd.isna(ps) else "—")
+        ps = safe_float(r.get("Skóre ceny")); dd = safe_float(r.get("Drawdown 3Y")); r12 = safe_float(r.get("12M Return")); ma = safe_float(r.get("MA50 vs MA200"))
+        pc1.metric("Skóre ceny", f"{ps:.0f}" if not pd.isna(ps) else "—")
         pc2.metric("3Y propad", f"{dd:.1f}%" if not pd.isna(dd) else "—")
         pc3.metric("12M výnos", f"{r12:.1f}%" if not pd.isna(r12) else "—")
         pc4.metric("MA50 vs MA200", f"{ma:.1f}%" if not pd.isna(ma) else "—")
         st.write(f"**Struktura ceny:** vyšší minima = {r.get('Higher Low','—')}; vyšší maxima = {r.get('Higher High','—')}" )
         st.write(f"**Cenový obraz:** {r.get('Price View', '—')}")
         st.write(f"**Fundamenty vs. cena:** {r.get('Market / Fundamental View', '—')}")
-        st.write(f"**Evidence:** {r.get('Price Evidence', '') or '—'}")
-    with st.expander("📰 Textové signály a varování", expanded=False):
+        st.write(f"**Co naznačuje cena:** {r.get('Price Evidence', '') or '—'}")
+    with st.expander("📰 📰 Co říká dostupný text", expanded=False):
         if clean_text(r.get("Text Support")):
             st.markdown("**Co text naznačuje**")
             st.markdown(r["Text Support"])
@@ -1749,7 +1778,7 @@ else:
         detail_cols = [
             "Ticker","Yahoo Ticker","Name","Exchange","Company Archetype","Company Type","Sector","Industry",
             *PARAMS,"Revenue CAGR 3Y","Net Income CAGR 3Y","Net Margin","Margin Change 3Y",
-            "Revenue Prior YoY","Net Income Prior YoY","Fundamental Direction","Fundamental Trend Score","Fundamental Evidence","Recovery Gate","Recovery Gate Score","Recovery Gates","Turnaround Score","Turnaround Evidence",
+            "Revenue Prior YoY","Net Income Prior YoY","Fundamental Direction","Fundamental Trend Score","Fundamental Evidence","Posouzení zotavení","Skóre zotavení","Posouzení zotavenís","Turnaround Score","Turnaround Evidence",
             "Story Priority","Text Score","Final Confidence","Status","Mapping","Data Source","Error"
         ]
         detail_cols = [c for c in detail_cols if c in r.index]
@@ -1802,7 +1831,7 @@ st.dataframe(pd.DataFrame(exchange_rows), use_container_width=True, hide_index=T
 with st.expander("🔍 Detail všech načtených titulů", expanded=False):
     detail_cols = [
         "Ticker", "Yahoo Ticker", "Name", "Exchange",
-        *PARAMS, "Revenue CAGR 3Y", "Net Income CAGR 3Y", "Net Margin", "Margin Change 3Y", "Revenue Prior YoY", "Net Income Prior YoY", "Value Score", "Quality Score", "Growth Score", "Turnaround Score", "Company Type", "Story", "Turnaround Evidence", "Text Score", "Text Evidence", "Price Score", "Price View", "Drawdown 3Y", "Recovery from 3Y Low", "6M Return", "12M Return", "MA50 vs MA200", "Higher Low", "Higher High", "Market / Fundamental View", "Final Confidence", "Available Params", "Status", "Mapping", "Data Source", "Error"
+        *PARAMS, "Revenue CAGR 3Y", "Net Income CAGR 3Y", "Net Margin", "Margin Change 3Y", "Revenue Prior YoY", "Net Income Prior YoY", "Value Score", "Quality Score", "Growth Score", "Turnaround Score", "Company Type", "Story", "Turnaround Evidence", "Text Score", "Text Evidence", "Skóre ceny", "Price View", "Drawdown 3Y", "Recovery from 3Y Low", "6M Return", "12M Return", "MA50 vs MA200", "Higher Low", "Higher High", "Market / Fundamental View", "Final Confidence", "Available Params", "Status", "Mapping", "Data Source", "Error"
     ]
     st.dataframe(
         results_df[detail_cols],
