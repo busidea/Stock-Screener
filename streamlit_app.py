@@ -1013,42 +1013,142 @@ def sentence_is_company_relevant(sentence, name, ticker):
     hits=sum(1 for w in words if re.search(r"(?<![a-z0-9])"+re.escape(w)+r"(?![a-z0-9])",s))
     return hits >= (2 if len(words)>=2 else 1)
 
+GENERAL_TEXT_RULES = {
+    "problem": {
+        "demand weakness": ["declining demand", "weak demand", "soft demand", "demand weakness", "lower demand", "demand slowdown"],
+        "margin pressure": ["margin pressure", "margin compression", "compressed margins", "gross margin declined", "operating margin declined"],
+        "cost pressure": ["cost inflation", "higher costs", "cost pressure", "input costs", "labor costs", "freight costs"],
+        "debt/liquidity": ["high debt", "debt burden", "liquidity pressure", "covenant", "refinancing risk", "cash burn", "liquidity concerns"],
+        "restructuring need": ["restructuring", "reorganization", "turnaround plan", "restructuring plan", "cost reduction plan"],
+        "competitive pressure": ["market share loss", "competitive pressure", "pricing pressure", "lost customers", "customer churn"],
+        "cyclical weakness": ["cyclical downturn", "industry downturn", "downcycle", "sector downturn", "weak cycle", "commodity prices"],
+    },
+    "change": {
+        "demand recovery": ["demand recovery", "demand improved", "demand improving", "orders recovered", "order recovery", "return to growth", "returning demand"],
+        "margin recovery": ["margin recovery", "margin expansion", "margins improved", "margin improved", "gross margin improved", "operating margin improved", "profit margin improved"],
+        "cost improvement": ["cost savings", "cost reduction", "cost cutting", "lower costs", "efficiency gains", "operating efficiencies"],
+        "profit recovery": ["return to profitability", "returned to profitability", "profitability improved", "earnings recovery", "earnings improved", "profit improved", "loss narrowed"],
+        "cash-flow improvement": ["free cash flow improved", "cash flow improved", "positive free cash flow", "cash generation improved", "cash flow turned positive"],
+        "balance-sheet improvement": ["deleveraging", "debt reduction", "reduced debt", "balance sheet improved", "liquidity improved"],
+        "pricing improvement": ["pricing power", "pricing improved", "price increases", "better pricing", "pricing actions"],
+    },
+    "mechanism": {
+        "restructuring": ["restructuring plan", "restructuring program", "reorganization plan", "turnaround plan", "transformation plan"],
+        "cost program": ["cost reduction program", "cost savings program", "cost cutting program", "efficiency program", "productivity program"],
+        "management change": ["new ceo", "new chief executive", "new cfo", "new management", "management change", "appointed ceo", "appointed cfo"],
+        "asset/division action": ["divestiture", "divested", "asset sale", "sold non-core", "sale of non-core", "exit from", "exited the business"],
+        "pricing/mix": ["pricing actions", "price increases", "product mix", "favorable mix", "improved mix"],
+        "demand/cycle": ["demand recovery", "volume recovery", "market recovery", "industry recovery", "cycle recovery", "cyclical recovery"],
+        "refinancing": ["refinancing", "refinanced", "debt maturity", "debt restructuring"],
+        "new product/market": ["new product", "product launch", "new market", "market expansion", "capacity expansion"],
+    },
+    "risk": {
+        "structural decline": ["structural decline", "secular decline", "secular pressure", "business model risk", "technology disruption"],
+        "demand still weak": ["demand remains weak", "weak demand persists", "demand continued to decline", "declining demand"],
+        "margin risk": ["margin pressure", "margin remains under pressure", "gross margin declined", "pricing pressure"],
+        "cash/debt risk": ["cash burn", "negative free cash flow", "liquidity pressure", "covenant breach", "refinancing risk", "high debt"],
+        "guidance risk": ["guidance cut", "lowered guidance", "reduced outlook", "weak outlook", "outlook deteriorated"],
+        "competitive risk": ["market share loss", "competitive pressure", "customer churn", "lost customers"],
+        "execution risk": ["execution risk", "turnaround risk", "restructuring risk", "plan is not working", "failed turnaround"],
+    }
+}
+
+
+def _scan_general_signals(chunks, name, ticker):
+    buckets={k:[] for k in GENERAL_TEXT_RULES}
+    for sent in chunks:
+        # Business summary is already company-specific; news/RSS sentences must pass identity.
+        for bucket, groups in GENERAL_TEXT_RULES.items():
+            for label, phrases in groups.items():
+                for phrase in phrases:
+                    if phrase in sent:
+                        negated,snippet=keyword_context(sent, phrase)
+                        if bucket in ("problem","risk") and negated:
+                            continue
+                        if bucket in ("change","mechanism") and negated:
+                            continue
+                        item=f"{label}: {snippet}"
+                        if item not in buckets[bucket]:
+                            buckets[bucket].append(item)
+                        break
+    return buckets
+
+
 def score_text_evidence(text, story):
     rules=TEXT_RULES.get(story)
-    if not rules: return np.nan,"⚪ Bez textové vrstvy",0,0,[],[]
     chunks=sentence_chunks(text)
+    general=_scan_general_signals(chunks, "", "")
     positive_score=negative_score=0; support=[]; warnings=[]; seen=set()
-    def scan(bucket,is_positive):
-        nonlocal positive_score,negative_score
-        for phrase,weight in bucket.items():
+
+    # Story-specific phrases remain useful, but no longer dominate the interpretation.
+    if rules:
+        for phrase,weight in rules.get("positive",{}).items():
             for sent in chunks:
                 if phrase not in sent: continue
                 negated,snippet=keyword_context(sent,phrase)
-                key=(phrase,snippet[:180])
-                if key in seen: continue
-                seen.add(key)
-                if is_positive and not negated:
-                    positive_score+=weight; support.append(f"+ {phrase}: {snippet}")
-                else:
-                    negative_score+=weight; warnings.append(f"− {phrase}: {snippet}")
-                if len(support)>=8 and len(warnings)>=8: return
-    scan(rules["positive"],True); scan(rules["negative"],False)
-    raw=50+positive_score*7-negative_score*9
-    score=float(max(0,min(100,raw)))
-    total=positive_score+negative_score
-    if total==0: label="⚪ Bez textového důkazu"
-    elif score>=70 and positive_score>negative_score: label="🟢 Text podporuje příběh"
-    elif score>=55 and positive_score>=negative_score: label="🟡 Text spíše podporuje"
-    elif score<=30 and negative_score>positive_score: label="🔴 Text příběh zpochybňuje"
-    else: label="🟠 Text je smíšený"
-    return score,label,positive_score,negative_score,support[:8],warnings[:8]
+                key=("+",phrase,snippet[:160])
+                if not negated and key not in seen:
+                    seen.add(key); positive_score += weight; support.append(f"{phrase}: {snippet}")
+        for phrase,weight in rules.get("negative",{}).items():
+            for sent in chunks:
+                if phrase not in sent: continue
+                negated,snippet=keyword_context(sent,phrase)
+                key=("-",phrase,snippet[:160])
+                if not negated and key not in seen:
+                    seen.add(key); negative_score += weight; warnings.append(f"{phrase}: {snippet}")
+
+    # General mechanism/change evidence is more valuable than a generic occurrence of 'recovery'.
+    mechanism_hits = sum(len(v) for v in general["mechanism"].values())
+    change_hits = sum(len(v) for v in general["change"].values())
+    problem_hits = sum(len(v) for v in general["problem"].values())
+    risk_hits = sum(len(v) for v in general["risk"].values())
+
+    score = 50 + positive_score*5 + change_hits*5 + mechanism_hits*7 - negative_score*6 - risk_hits*8
+    score=float(max(0,min(100,score)))
+
+    # Human-readable structured evidence. Deduplicate by label/snippet.
+    def flatten(bucket, limit=6):
+        out=[]; seen2=set()
+        for label,items in bucket.items():
+            for item in items:
+                if item not in seen2:
+                    seen2.add(item); out.append(f"• {item}")
+                if len(out)>=limit: return out
+        return out
+
+    problem_lines=flatten(general["problem"],5)
+    change_lines=flatten(general["change"],5)
+    mechanism_lines=flatten(general["mechanism"],5)
+    risk_lines=flatten(general["risk"],5)
+
+    structured=[]
+    if problem_lines: structured.append("**Předchozí problém**\n"+"\n".join(problem_lines))
+    if change_lines: structured.append("**Aktuální změna**\n"+"\n".join(change_lines))
+    if mechanism_lines: structured.append("**Mechanismus změny**\n"+"\n".join(mechanism_lines))
+    support_text="\n\n".join(structured)
+    warning_text="\n".join(risk_lines + [f"• {x}" for x in warnings[:5]])
+
+    if not problem_lines and not change_lines and not mechanism_lines and not warnings and not risk_lines:
+        label="⚪ Bez textového důkazu"
+    elif mechanism_hits>0 and change_hits>0 and risk_hits==0:
+        label="🟢 Text popisuje změnu a její mechanismus"
+    elif change_hits>0 or mechanism_hits>0:
+        label="🟡 Text naznačuje změnu, mechanismus není úplný"
+    elif risk_hits>0:
+        label="🟠 Text přináší hlavně rizika"
+    else:
+        label="🟠 Text je smíšený"
+
+    return score,label,positive_score+change_hits,negative_score+risk_hits,support_text,warning_text
+
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_google_news(company_name, ticker):
     """Company-focused RSS search. Titles are filtered again for identity."""
     queries=[
-        f'"{company_name}" turnaround recovery restructuring profitability margin',
-        f'"{company_name}" cost cutting demand outlook earnings',
+        f'"{company_name}" recovery turnaround restructuring margin',
+        f'"{company_name}" cost cutting demand pricing profitability',
+        f'"{company_name}" debt refinancing cash flow outlook',
     ]
     parts=[]
     for q in queries:
@@ -1271,14 +1371,18 @@ def compact_trend(row):
     if direction == "➡️ Stabilizace": return "➡️ Stabilizace"
     return "⚪ Nejasný směr"
 
+def compact_text_signal(row):
+    ev=clean_text(row.get("Text Evidence"))
+    if "mechanismus" in ev.lower(): return "🟢 Mechanismus nalezen"
+    if "změnu" in ev.lower(): return "🟡 Změna nalezena"
+    if "rizika" in ev.lower(): return "🟠 Převážně rizika"
+    return ev or "⚪ Bez důkazu"
+
 def compact_warning(row):
-    txt = clean_text(row.get("Text Evidence"))
     warnings = clean_text(row.get("Text Warnings"))
-    if "zpochybňuje" in txt:
-        return "🔴 Text varuje"
-    if "smíšený" in txt or warnings:
-        return "🟠 Rizika / smíšené"
-    return "🟢 Bez výrazného varování"
+    if warnings:
+        return "🟠 Rizika nalezena"
+    return "🟢 Bez textového varování"
 
 
 def add_text_evidence(df, max_text_candidates):
@@ -1542,7 +1646,7 @@ d.metric("Vybraný příběh", int(results_df["Story Selected"].sum()))
 e.metric("Kandidáti", int(results_df["Eligible"].sum()))
 
 st.markdown("### 🧭 Mapa investičních příběhů")
-st.caption("Skóre není predikce výnosu ani doporučení. Shoda s příběhem říká, jak moc titul odpovídá právě hledanému příběhu; Investiční atraktivita pomáhá určit pořadí kandidátů. Priorita = 60 % shoda + 40 % atraktivita. Při více zvolených příbězích se priorita zatím řadí podle klasifikovaného příběhu.")
+st.caption("Skóre není predikce výnosu ani doporučení. Shoda s příběhem říká, jak moc titul odpovídá hledanému příběhu; Investiční atraktivita pomáhá určit pořadí kandidátů. Priorita = 60 % shoda + 40 % atraktivita. Textová vrstva má vysvětlovat hlavně problém, aktuální změnu, mechanismus a rizika; do priority se nezapočítává.")
 
 story_counts = results_df[results_df["Available Params"] >= min_data]["Story"].value_counts().rename_axis("Příběh").reset_index(name="Počet")
 st.dataframe(story_counts, use_container_width=True, hide_index=True)
@@ -1556,14 +1660,15 @@ else:
     compact = passed.copy()
     compact["Verdikt"] = compact.apply(compact_verdict, axis=1)
     compact["Trend"] = compact.apply(compact_trend, axis=1)
+    compact["Textový signál"] = compact.apply(compact_text_signal, axis=1)
     compact["Varování"] = compact.apply(compact_warning, axis=1)
     compact = compact[[
         "Ticker", "Name", "Story", "Company Archetype", "Shoda s příběhem", "Investiční atraktivita", "Story Priority", "Verdikt", "Trend",
-        "Price View", "Market / Fundamental View", "Recovery Gate", "Text Evidence", "Value Score", "Quality Score", "Growth Score", "Varování"
+        "Price View", "Market / Fundamental View", "Recovery Gate", "Textový signál", "Value Score", "Quality Score", "Growth Score", "Varování"
     ]].rename(columns={
         "Name": "Firma", "Story": "Příběh", "Company Archetype": "Charakter", "Shoda s příběhem": "Shoda s příběhem", "Investiční atraktivita": "Investiční atraktivita", "Story Priority": "Priorita",
         "Price View": "Cenový obraz", "Market / Fundamental View": "Fundamenty vs. cena", "Recovery Gate": "Recovery test",
-        "Text Evidence": "Textové signály", "Value Score": "Value",
+        "Textový signál": "Textové signály", "Value Score": "Value",
         "Quality Score": "Quality", "Growth Score": "Growth"
     })
     st.dataframe(
@@ -1650,11 +1755,13 @@ else:
         st.write(f"**Evidence:** {r.get('Price Evidence', '') or '—'}")
     with st.expander("📰 Textové signály a varování", expanded=False):
         if clean_text(r.get("Text Support")):
-            st.markdown("**Podpůrné signály**")
-            st.write(r["Text Support"])
+            st.markdown("**Co text naznačuje**")
+            st.markdown(r["Text Support"])
         if clean_text(r.get("Text Warnings")):
-            st.markdown("**Varovné signály**")
-            st.write(r["Text Warnings"])
+            st.markdown("**Co může příběh zpochybnit**")
+            st.markdown(r["Text Warnings"])
+        elif clean_text(r.get("Text Evidence")) == "⚪ Bez textového důkazu":
+            st.info("Textová vrstva zatím nenašla dostatečně konkrétní firemní signál. To není potvrzení ani vyvrácení příběhu.")
         if clean_text(r.get("Text Sources")):
             st.caption("Zdroj textu: " + r["Text Sources"])
 
