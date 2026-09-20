@@ -716,107 +716,63 @@ def fundamental_direction(r):
 
 
 def recovery_gates(r):
-    """Strict evidence gates. Score is a diagnostic, not a probability."""
-    direction = clean_text(r.get("Fundamental Direction"))
-    archetype = clean_text(r.get("Company Archetype"))
-    prior_eg = safe_float(r.get("Net Income Prior YoY"))
-    prior_rg = safe_float(r.get("Revenue Prior YoY"))
-    ni_cagr = safe_float(r.get("Net Income CAGR 3Y"))
-    rev_cagr = safe_float(r.get("Revenue CAGR 3Y"))
-    mc = safe_float(r.get("Margin Change 3Y"))
-    eg = safe_float(r.get("Earnings Growth"))
-    rg = safe_float(r.get("Revenue Growth"))
-    fcf = safe_float(r.get("Free Cash Flow"))
-    sign = bool(r.get("Net Income Sign Recovery", False))
-
-    problem = (
-        (not pd.isna(prior_eg) and prior_eg < -5) or
-        (not pd.isna(prior_rg) and prior_rg < -5) or
-        sign or
-        (not pd.isna(ni_cagr) and ni_cagr < -5)
-    )
-    bottom = (
-        sign or
-        (not pd.isna(prior_eg) and prior_eg < 0 and not pd.isna(eg) and eg > 0) or
-        (not pd.isna(prior_rg) and prior_rg < 0 and not pd.isna(rg) and rg >= 0) or
-        (not pd.isna(mc) and mc >= 3)
-    )
-    improvement = (
-        (not pd.isna(eg) and eg > 5) or
-        (not pd.isna(rg) and rg > 3) or
-        (not pd.isna(mc) and mc >= 2) or
-        (not pd.isna(fcf) and fcf > 0 and sign)
-    )
-    persistence = (
-        (not pd.isna(mc) and mc >= 2) and
-        ((not pd.isna(eg) and eg > 0) or (not pd.isna(rg) and rg >= 0))
-    )
-    # Commodity/resource recovery is intentionally not called operating turnaround.
-    cyclical = archetype == "Commodity / resource"
-    # High-growth technology is handled as growth/recovery, not classic turnaround.
-    tech = archetype == "Technology / high growth"
-
-    gates = {
-        "Prior Problem": bool(problem),
-        "Bottom / Stabilization": bool(bottom),
-        "Current Improvement": bool(improvement),
-        "Persistence": bool(persistence),
-        "Cyclical": bool(cyclical),
-        "Technology": bool(tech),
-    }
-    score = sum([30 if problem else 0, 20 if bottom else 0, 25 if improvement else 0, 15 if persistence else 0])
+    """Separate generic recovery from a genuine operating turnaround."""
+    direction = clean_text(r.get("Fundamental Direction")); archetype = clean_text(r.get("Company Archetype"))
+    prior_eg = safe_float(r.get("Net Income Prior YoY")); prior_rg = safe_float(r.get("Revenue Prior YoY"))
+    ni_cagr = safe_float(r.get("Net Income CAGR 3Y")); rev_cagr = safe_float(r.get("Revenue CAGR 3Y"))
+    mc = safe_float(r.get("Margin Change 3Y")); eg = safe_float(r.get("Earnings Growth")); rg = safe_float(r.get("Revenue Growth"))
+    fcf = safe_float(r.get("Free Cash Flow")); sign = bool(r.get("Net Income Sign Recovery", False))
+    cyclical = archetype in ("Commodity / resource", "Cyclical industrial")
+    asset_recovery = archetype in ("REIT / real estate", "Investment holding", "Asset manager / capital markets", "Financial institution")
+    technology = archetype == "Technology / high growth"
+    problem = ((not pd.isna(prior_eg) and prior_eg < -5) or (not pd.isna(prior_rg) and prior_rg < -5) or sign or (not pd.isna(ni_cagr) and ni_cagr < -5))
+    bottom = (sign or (not pd.isna(prior_eg) and prior_eg < 0 and not pd.isna(eg) and eg > 0) or (not pd.isna(prior_rg) and prior_rg < 0 and not pd.isna(rg) and rg >= 0) or (not pd.isna(mc) and mc >= 3))
+    improvement = ((not pd.isna(eg) and eg > 5) or (not pd.isna(rg) and rg > 3) or (not pd.isna(mc) and mc >= 2) or (not pd.isna(fcf) and fcf > 0 and sign))
+    persistence = ((not pd.isna(mc) and mc >= 2) and ((not pd.isna(eg) and eg > 0) or (not pd.isna(rg) and rg >= 0)))
+    severe_profit = sign or (not pd.isna(ni_cagr) and ni_cagr <= -15)
+    severe_revenue = not pd.isna(rev_cagr) and rev_cagr <= -15
+    severe_margin = not pd.isna(mc) and mc <= -8
+    dd3 = safe_float(r.get("Drawdown 3Y")); severe_price = not pd.isna(dd3) and dd3 <= -50
+    crisis = bool(severe_profit or severe_revenue or severe_margin or severe_price)
+    gates = {"Prior Problem": bool(problem), "Bottom / Stabilization": bool(bottom), "Current Improvement": bool(improvement),
+             "Persistence": bool(persistence), "Cyclical": bool(cyclical), "Asset / financial": bool(asset_recovery),
+             "Technology": bool(technology), "Severity / crisis": bool(crisis)}
+    score = 30*problem + 20*bottom + 25*improvement + 15*persistence
+    if not crisis: score -= 25
     if cyclical: score -= 15
-    if tech: score -= 15
+    if asset_recovery: score -= 20
+    if technology: score -= 15
     score = max(0, min(100, score))
-
-    if problem and bottom and improvement and persistence and not cyclical and not tech:
-        label = "🟢 Strong turnaround structure"
-    elif problem and improvement and not cyclical:
-        label = "🟡 Recovery structure, needs mechanism"
-    elif cyclical and improvement:
-        label = "🔵 Cyclical recovery"
-    elif tech and improvement:
-        label = "🟣 Growth/recovery, not classic turnaround"
-    else:
-        label = "⚪ Insufficient turnaround evidence"
+    if cyclical and improvement: label = "🔵 Cyklické zotavení"
+    elif asset_recovery and improvement: label = "🏢 Aktivové / finanční zotavení"
+    elif technology and improvement: label = "🟣 Růstové zotavení, ne klasický turnaround"
+    elif problem and bottom and improvement and persistence and crisis: label = "🟢 Silná struktura turnaroundu"
+    elif problem and improvement: label = "🟡 Zotavení – chybí závažnost nebo mechanismus"
+    else: label = "⚪ Nedostatek důkazů o turnaroundu"
     return label, float(score), gates
 
 def turnaround_score(r):
-    """Strict turnaround score: prior deterioration + current improvement are both required."""
     direction, score, evidence = fundamental_direction(r)
-    if direction != "🔄 Recovery / obrat":
-        return 0.0, evidence or "bez prokázaného obratu"
+    archetype = clean_text(r.get("Company Archetype")); gate = clean_text(r.get("Recovery Gate"))
+    excluded = ("Commodity / resource", "Cyclical industrial", "REIT / real estate", "Investment holding", "Asset manager / capital markets", "Financial institution", "Technology / high growth")
+    if direction != "🔄 Recovery / obrat": return 0.0, evidence or "bez prokázaného obratu"
+    if archetype in excluded: return 0.0, evidence or "zotavení jiného typu než klasický provozní turnaround"
+    if gate != "🟢 Silná struktura turnaroundu": return 0.0, evidence or "nedostatečná závažnost pro klasický turnaround"
     return min(100.0, score), evidence
-
 
 def classify_story(r):
     v,q,g = r["Value Score"],r["Quality Score"],r["Growth Score"]
-    archetype = r["Company Archetype"]
-    direction = r["Fundamental Direction"]
-    ts = r["Turnaround Score"]
+    archetype = r["Company Archetype"]; direction = r["Fundamental Direction"]; ts = r["Turnaround Score"]
     gate_label = clean_text(r.get("Recovery Gate"))
-
-    if archetype == "Investment holding":
-        if ts >= 55 or (not pd.isna(v) and v >= 55):
-            return "🏗️ Asset / financial recovery"
-    if archetype in ("Asset manager / capital markets", "Financial institution"):
-        if ts >= 60:
-            return "🏗️ Asset / financial recovery"
-    if archetype == "REIT / real estate" and q >= 60 and v >= 55:
-        return "🏢 Real-estate value"
-    if archetype == "Commodity / resource" and direction == "🔄 Recovery / obrat":
-        return "🌐 Cyclical / commodity recovery"
-    if archetype == "Technology / high growth" and direction == "🔄 Recovery / obrat":
-        if g >= 60:
-            return "🚀 Growth / recovery"
-        return "🛠️ Operational improvement"
-    if ts >= 75 and gate_label == "🟢 Strong turnaround structure":
-        return "🔄 Operating turnaround"
-    if direction == "🔄 Recovery / obrat" and ts >= 55:
-        return "🔄 Recovery candidate"
+    if archetype in ("Investment holding", "Asset manager / capital markets", "Financial institution", "REIT / real estate"):
+        if direction == "🔄 Recovery / obrat": return "🏗️ Asset / financial recovery"
+        if archetype == "REIT / real estate" and q >= 60 and v >= 55: return "🏢 Real-estate value"
+    if archetype in ("Commodity / resource", "Cyclical industrial") and direction == "🔄 Recovery / obrat": return "🌐 Cyclical / commodity recovery"
+    if archetype == "Technology / high growth" and direction == "🔄 Recovery / obrat": return "🚀 Growth / recovery" if g >= 60 else "🛠️ Operational improvement"
+    if ts >= 75 and gate_label == "🟢 Silná struktura turnaroundu": return "🔄 Operating turnaround"
+    if direction == "🔄 Recovery / obrat" and ts >= 55: return "🔄 Recovery candidate"
     if direction == "🛠️ Operational improvement":
-        if q >= 65 and g >= 45:
-            return "🏆 Quality Compounder" if g >= 65 else "💎 Kvalita za rozumnou cenu"
+        if q >= 65 and g >= 45: return "🏆 Quality Compounder" if g >= 65 else "💎 Kvalita za rozumnou cenu"
         return "🛠️ Operational improvement"
     if not pd.isna(v) and not pd.isna(q) and not pd.isna(g):
         if v >= 70 and q < 50 and g < 50: return "🪤 Value Trap – varování"
@@ -867,8 +823,10 @@ def story_fit(r, selected_story):
         score += 20 if bottom else 0
         score += 25 if improvement else 0
         score += 20 if persistence else 0
-        if archetype in ("Commodity / resource", "Technology / high growth"):
-            score -= 20
+        if archetype in ("Commodity / resource", "Cyclical industrial", "Technology / high growth",
+                         "REIT / real estate", "Investment holding", "Asset manager / capital markets",
+                         "Financial institution"):
+            score -= 35
         if direction != "🔄 Recovery / obrat":
             score -= 20
         if not pd.isna(ts):
@@ -888,9 +846,12 @@ def story_fit(r, selected_story):
         "💎 Kvalita za rozumnou cenu": (q, v, g),
         "🚀 Růst za rozumnou cenu": (g, q, v),
         "💰 Value / levná firma": (v, q, g),
-        "🏗️ Asset / financial recovery": (ts, q, v),
+        "🔄 Recovery candidate": (ts, q, v),
+        "🌐 Cyclical / commodity recovery": (g, q, v),
+        "🏗️ Asset / financial recovery": (q, v, ts),
         "🏢 Real-estate value": (v, q, g),
         "🛠️ Operational improvement": (q, g, v),
+        "🚀 Growth / recovery": (g, q, v),
         "🔥 High Growth / dražší příběh": (g, q, v),
         "🪤 Value Trap – varování": (v, 100-(q or 0), 100-(g or 0)),
     }
@@ -977,6 +938,9 @@ NEGATION_WORDS = {"not","no","without","unlikely","failed","fails","fail","never
 def text_clean(x):
     s = unescape(clean_text(x)).lower()
     s = re.sub(r"<[^>]+>", " ", s)
+    # Some feeds return spaced-out text such as "e x e c u t i o n r i s k".
+    s = re.sub(r"(?<![A-Za-z])(?:[A-Za-z]\s+){2,}[A-Za-z](?![A-Za-z])",
+               lambda m: re.sub(r"\s+", "", m.group(0)), s)
     return re.sub(r"\s+", " ", s).strip()
 
 def sentence_chunks(text):
@@ -1447,13 +1411,16 @@ story_options = [
     "🚀 Růst za rozumnou cenu",
     "💰 Value / levná firma",
     "🔄 Operating turnaround",
+    "🔄 Recovery candidate",
+    "🌐 Cyclical / commodity recovery",
     "🏗️ Asset / financial recovery",
     "🏢 Real-estate value",
     "🛠️ Operational improvement",
+    "🚀 Growth / recovery",
     "🔥 High Growth / dražší příběh",
     "🪤 Value Trap – varování",
 ]
-selected_stories = st.sidebar.multiselect("Příběhy", story_options, default=story_options[:7], help="Neatraktivní příběhy nemusíš hledat; Value Trap zde slouží jako výjimka – upozornění na levnou firmu se slabými základy.")
+selected_stories = st.sidebar.multiselect("Příběhy", story_options, default=story_options[:9], help="Neatraktivní příběhy nemusíš hledat; Value Trap zde slouží jako výjimka – upozornění na levnou firmu se slabými základy.")
 min_data = st.sidebar.slider("Min. počet dostupných parametrů", 3, len(PARAMS), 7, 1)
 
 with st.sidebar.expander("⚙️ Klasické filtry (volitelné)"):
@@ -1495,7 +1462,11 @@ if not run and "screening_results" not in st.session_state:
     st.info("Nastav příběhy a stiskni **🚀 Spustit screening**."); st.stop()
 
 if run:
+    st.info(f"🔄 **Screening byl spuštěn.** Nejprve probíhá předselekce celého univerza ({len(universe):,} titulů), potom fundamentální, textová a cenová fáze. **První fáze může trvat několik minut – stránku neobnovujte.**")
+    stage1_status = st.empty()
+    stage1_status.write("⏳ **1/4 Předselekce trhu:** zpracovávám celé investiční univerzum…")
     stage1 = prefilter_by_market_data(universe, max_stage1)
+    stage1_status.write(f"✅ **1/4 Předselekce dokončena:** {len(stage1):,} titulů pokračuje do další fáze.")
     candidates = build_stage1_candidates(stage1, max_candidates)
     rows = []; progress = st.progress(0); status_text = st.empty()
     for i, row in candidates.iterrows():
