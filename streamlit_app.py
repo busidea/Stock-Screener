@@ -1422,6 +1422,7 @@ story_options = [
 ]
 selected_stories = st.sidebar.multiselect("Příběhy", story_options, default=story_options[:9], help="Neatraktivní příběhy nemusíš hledat; Value Trap zde slouží jako výjimka – upozornění na levnou firmu se slabými základy.")
 min_data = st.sidebar.slider("Min. počet dostupných parametrů", 3, len(PARAMS), 7, 1)
+min_story_fit = st.sidebar.slider("Min. shoda s příběhem", 0, 100, 60, 5, help="Určuje, jak dobře musí titul odpovídat hledanému příběhu, aby se dostal mezi kandidáty. Nejde o investiční doporučení.")
 
 with st.sidebar.expander("⚙️ Klasické filtry (volitelné)"):
     use_classic = st.checkbox("Použít klasické filtry", value=False)
@@ -1546,7 +1547,13 @@ def passes_classic(r):
     return all(checks)
 
 results_df["Pass"] = results_df.apply(passes_classic, axis=1) if use_classic else True
-results_df["Story Selected"] = results_df["Story"].isin(selected_stories) if selected_stories else True
+# V6.6: kandidáta neurčuje název automaticky přiřazeného příběhu.
+# Rozhodující je Shoda s příběhem, protože cílem screeneru je vytipovat
+# i hraniční firmy, které algoritmus zařadil do jiného, příbuzného příběhu.
+if selected_stories:
+    results_df["Story Selected"] = results_df["Shoda s příběhem"].notna() & (results_df["Shoda s příběhem"] >= min_story_fit)
+else:
+    results_df["Story Selected"] = True
 results_df["Eligible"] = (results_df["Available Params"] >= min_data) & results_df["Pass"] & results_df["Story Selected"]
 results_df = results_df.sort_values(["Eligible", "Story Priority"], ascending=[False, False], na_position="last").reset_index(drop=True)
 
@@ -1619,7 +1626,7 @@ d.metric("Vybraný příběh", int(results_df["Story Selected"].sum()))
 e.metric("Kandidáti", int(results_df["Eligible"].sum()))
 
 st.markdown("### 🧭 Mapa investičních příběhů")
-st.caption("Skóre není predikce výnosu ani doporučení. Shoda s příběhem říká, jak moc titul odpovídá hledanému příběhu; Investiční atraktivita pomáhá určit pořadí kandidátů. Priorita = 60 % shoda + 40 % atraktivita. Textová vrstva má vysvětlovat hlavně problém, aktuální změnu, mechanismus a rizika; do priority se nezapočítává.")
+st.caption("Skóre není predikce výnosu ani doporučení. Shoda s příběhem říká, jak moc titul odpovídá hledanému příběhu; Investiční atraktivita pomáhá určit pořadí kandidátů. Kandidátem je titul s minimální nastavenou shodou, nikoli pouze titul, kterému algoritmus přidělil stejný název příběhu. Priorita = 60 % shoda + 40 % atraktivita. Textová vrstva má vysvětlovat hlavně problém, aktuální změnu, mechanismus a rizika; do priority se nezapočítává.")
 
 story_counts = results_df[results_df["Available Params"] >= min_data]["Story"].value_counts().rename_axis("Příběh").reset_index(name="Počet")
 st.dataframe(story_counts, use_container_width=True, hide_index=True)
