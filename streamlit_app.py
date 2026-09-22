@@ -1508,6 +1508,7 @@ with st.sidebar.expander("⚙️ Klasické filtry (volitelné)"):
 run = st.sidebar.button("🚀 Spustit screening", type="primary")
 clear = st.sidebar.button("🧹 Vyčistit výsledky")
 refresh = st.sidebar.button("🔄 Obnovit zdroje")
+fresh_run = st.sidebar.checkbox("🧪 Čerstvý běh bez cache", value=False, help="Vymaže Streamlit cache před spuštěním. Použij při diagnostice rozdílů mezi běhy.")
 
 if refresh:
     st.cache_data.clear(); st.rerun()
@@ -1534,12 +1535,19 @@ if not run and "screening_results" not in st.session_state:
     st.info("Nastav příběhy a stiskni **🚀 Spustit screening**."); st.stop()
 
 if run:
+    if fresh_run:
+        st.cache_data.clear()
+        st.session_state["screening_fresh_run"] = True
+    else:
+        st.session_state["screening_fresh_run"] = False
     st.info(f"🔄 **Screening byl spuštěn.** Nejprve probíhá předselekce celého univerza ({len(universe):,} titulů), potom fundamentální, textová a cenová fáze. **První fáze může trvat několik minut – stránku neobnovujte.**")
     stage1_status = st.empty()
     stage1_status.write("⏳ **1/4 Předselekce trhu:** zpracovávám celé investiční univerzum…")
     stage1 = prefilter_by_market_data(universe, max_stage1)
     stage1_status.write(f"✅ **1/4 Předselekce dokončena:** {len(stage1):,} titulů pokračuje do další fáze.")
     candidates = build_stage1_candidates(stage1, max_candidates)
+    st.session_state["screening_stage1_tickers"] = stage1["Ticker"].astype(str).tolist() if "Ticker" in stage1.columns else []
+    st.session_state["screening_fundamental_tickers"] = candidates["Ticker"].astype(str).tolist() if "Ticker" in candidates.columns else []
     rows = []; progress = st.progress(0); status_text = st.empty()
     for i, row in candidates.iterrows():
         status_text.write(f"Načítám {i+1}/{len(candidates)}: **{row['Ticker']}**")
@@ -1639,6 +1647,18 @@ results_df["Eligible"] = (results_df["Available Params"] >= min_data) & results_
 pipeline_counts = st.session_state.get("screening_pipeline_counts", {}).copy()
 pipeline_counts["Dostatek dat (min. parametry)"] = int((results_df["Available Params"] >= min_data).sum())
 pipeline_counts["Shoda s příběhem ≥ minimum"] = int(results_df["Story Selected"].sum()) if selected_stories else int(len(results_df))
+# Explicit CLST trace for the turnaround diagnostic. This is diagnostic only.
+clst_stage1 = "CLST" in set(st.session_state.get("screening_stage1_tickers", []))
+clst_fund = "CLST" in set(st.session_state.get("screening_fundamental_tickers", []))
+clst_row = results_df[results_df["Ticker"].astype(str).eq("CLST")]
+clst_has_data = bool(not clst_row.empty and int(clst_row.iloc[0]["Available Params"]) >= min_data)
+clst_story = bool(not clst_row.empty and bool(clst_row.iloc[0]["Story Selected"]))
+clst_eligible = bool(not clst_row.empty and bool(clst_row.iloc[0]["Eligible"]))
+pipeline_counts["CLST – v předvýběru 800"] = int(clst_stage1)
+pipeline_counts["CLST – ve fundamentální fázi"] = int(clst_fund)
+pipeline_counts["CLST – má dostatek dat"] = int(clst_has_data)
+pipeline_counts["CLST – Story Fit ≥ minimum"] = int(clst_story)
+pipeline_counts["CLST – Eligible"] = int(clst_eligible)
 pipeline_counts["Prošlo klasickým filtrem"] = int(results_df["Pass"].sum())
 pipeline_counts["Eligible před cenou/textem"] = int(results_df["Eligible"].sum())
 pipeline_counts["Posláno do cenové fáze"] = int(min(max_price_candidates, pipeline_counts["Eligible před cenou/textem"])) if max_price_candidates > 0 else 0
@@ -1729,6 +1749,19 @@ with st.expander("🔬 Diagnostika průchodu screeningem", expanded=False):
         ]
         st.dataframe(pd.DataFrame(diag_rows), use_container_width=True, hide_index=True)
         st.caption("Tyto počty slouží pouze k diagnostice pipeline. Nemění výběr ani skóre titulů.")
+        fresh = st.session_state.get("screening_fresh_run", False)
+        st.caption(f"Režim běhu: **{'ČERSTVÝ – cache vymazána' if fresh else 'STANDARDNÍ – cache mohla být použita'}**")
+        clst_info = {
+            "CLST – předvýběr 800": pc.get("CLST – v předvýběru 800", 0),
+            "CLST – fundamentální fáze": pc.get("CLST – ve fundamentální fázi", 0),
+            "CLST – dostatek dat": pc.get("CLST – má dostatek dat", 0),
+            "CLST – Story Fit ≥ minimum": pc.get("CLST – Story Fit ≥ minimum", 0),
+            "CLST – Eligible": pc.get("CLST – Eligible", 0),
+        }
+        st.markdown("**🔎 Stopa CLST**")
+        st.dataframe(pd.DataFrame([{
+            "Kontrola": k, "Stav": "ANO" if v else "NE"
+        } for k, v in clst_info.items()]), use_container_width=True, hide_index=True)
 
 d.metric("Vybraný příběh", int(results_df["Story Selected"].sum()))
 e.metric("Kandidáti", int(results_df["Eligible"].sum()))
@@ -1741,6 +1774,13 @@ st.dataframe(story_counts, use_container_width=True, hide_index=True)
 
 st.markdown("### 🎯 Kandidáti")
 passed = results_df[results_df["Eligible"]].copy()
+with st.expander("🧩 Diagnostika titulů se Story Fit ≥ minimum", expanded=False):
+    sf = results_df[results_df["Story Selected"]].copy()
+    if sf.empty:
+        st.info("Žádný titul nedosáhl minimální Shody s příběhem.")
+    else:
+        sf_cols = [c for c in ["Ticker", "Name", "Story", "Company Archetype", "Shoda s příběhem", "Investiční atraktivita", "Available Params", "Pass", "Eligible", "Posouzení zotavení", "Skóre zotavení", "Turnaround Score"] if c in sf.columns]
+        st.dataframe(sf[sf_cols], use_container_width=True, hide_index=True)
 if passed.empty:
     st.info("Pro zvolený příběh a nastavení dat nebyl nalezen žádný kandidát.")
 else:
