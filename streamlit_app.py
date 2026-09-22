@@ -947,41 +947,55 @@ def _known_text_phrases():
         "is bce stock worth buying", "execution risk", "bce stock",
         "return to profitability", "free cash flow", "cash flow",
         "strong balance sheet", "higher financing costs", "ai and fiber",
-        "asset sales", "rental growth", "funds from operations"
+        "asset sales", "rental growth", "funds from operations",
+        "heavy ai and fiber spending", "financing costs", "operating results"
     ]
     return sorted(set(p.lower() for p in phrases if p), key=len, reverse=True)
 
 
+def _spaced_phrase_pattern(phrase):
+    """Regex for a known phrase whose characters may be separated by whitespace."""
+    chars=[re.escape(ch) for ch in phrase.lower() if ch.isalnum()]
+    if not chars:
+        return None
+    return r"(?<![A-Za-z0-9])" + r"\s*".join(chars) + r"(?![A-Za-z0-9])"
+
+
 def repair_known_spaced_phrases(s):
-    # Some feeds occasionally return every character separated by spaces, e.g.
-    # "e x e c u t i o n r i s k".  Repair only phrases from our known vocabulary,
-    # rather than trying to guess arbitrary English word boundaries.
+    """Repair known phrases BEFORE generic letter-run collapsing."""
+    if not s:
+        return s
     for phrase in _known_text_phrases():
-        compact = re.sub(r"[^a-z0-9]", "", phrase)
-        if len(compact) < 3:
-            continue
-        pattern = r"\s*".join(re.escape(ch) for ch in compact)
-        s = re.sub(pattern, phrase, s, flags=re.I)
+        pattern=_spaced_phrase_pattern(phrase)
+        if pattern:
+            s=re.sub(pattern, phrase, s, flags=re.I)
     return s
 
 
 def collapse_letter_spaced_text(s):
-    # Some RSS/HTML renderers split words into individual characters, sometimes
-    # with newlines: "e x e c u t i o n r i s k". First collapse such runs
-    # to "executionrisk"; the known-phrase repair below then restores safe
-    # word boundaries ("execution risk"). This is deliberately limited to
-    # runs made almost entirely of single letters so ordinary prose is untouched.
-    pattern = r"(?<![A-Za-z])(?:[A-Za-z]\s+){2,}[A-Za-z](?![A-Za-z])"
+    """Collapse residual single-letter runs after known phrases are repaired."""
+    if not s:
+        return s
+    pattern=r"(?<![A-Za-z0-9])(?:[A-Za-z]\s+){3,}[A-Za-z](?![A-Za-z0-9])"
     def repl(m):
         return re.sub(r"\s+", "", m.group(0))
     return re.sub(pattern, repl, s)
 
+
+def normalize_text_evidence_output(x):
+    """Final safety pass: displayed evidence must not contain feed-level letter spacing."""
+    if x is None:
+        return ""
+    s=unescape(clean_text(x))
+    s=re.sub(r"<[^>]+>", " ", s)
+    s=repair_known_spaced_phrases(s)
+    s=collapse_letter_spaced_text(s)
+    s=repair_known_spaced_phrases(s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
 def text_clean(x):
-    s = unescape(clean_text(x))
-    s = re.sub(r"<[^>]+>", " ", s)
-    s = collapse_letter_spaced_text(s)
-    s = repair_known_spaced_phrases(s)
-    return re.sub(r"\s+", " ", s).strip().lower()
+    return normalize_text_evidence_output(x).lower()
 
 def sentence_chunks(text):
     text = text_clean(text)
@@ -1145,6 +1159,9 @@ def score_text_evidence(text, story):
     else:
         label="🟠 Text je smíšený"
 
+    support_text=normalize_text_evidence_output(support_text)
+    warning_text=normalize_text_evidence_output(warning_text)
+    label=normalize_text_evidence_output(label)
     return score,label,positive_score+change_hits,negative_score+risk_hits,support_text,warning_text
 
 
@@ -1210,9 +1227,12 @@ def fetch_text_evidence(yahoo_ticker, story, company_name="", ticker=""):
         if google: parts.append(google)
         text=" ".join(parts)
         score,label,pos,neg,support,warnings=score_text_evidence(text,story)
+        support_text=normalize_text_evidence_output("\n".join(support))
+        warning_text=normalize_text_evidence_output("\n".join(warnings))
+        source_text="Yahoo Finance business summary + identity-filtered Yahoo news + Google News RSS" if text else ""
         return {"Text Score":score,"Text Evidence":label,"Text Positive":pos,"Text Negative":neg,
-                "Text Support":"\n".join(support),"Text Warnings":"\n".join(warnings),
-                "Text Sources":"Yahoo Finance business summary + identity-filtered Yahoo news + Google News RSS" if text else ""}
+                "Text Support":support_text,"Text Warnings":warning_text,
+                "Text Sources":normalize_text_evidence_output(source_text)}
     except Exception as e:
         return {"Text Score":np.nan,"Text Evidence":"⚪ Text nedostupný","Text Positive":0,"Text Negative":0,
                 "Text Support":"","Text Warnings":"","Text Sources":str(e)[:180]}
@@ -1425,14 +1445,18 @@ def final_story_confidence(r):
     return q
 
 def evidence_quality(r):
+    """Verbal quality of the text evidence; numeric Text Score remains internal."""
     score=safe_float(r.get("Text Score"))
     pos=safe_float(r.get("Text Positive")) or 0
     neg=safe_float(r.get("Text Negative")) or 0
-    if pd.isna(score): return "⚪ Nehodnoceno"
-    if pos+neg == 0: return "⚪ Bez důkazu"
-    if neg > pos: return "🟠 Rozporuplné"
-    if pos >= 4: return "🟢 Silnější evidence"
-    return "🟡 Slabší evidence"
+    if pd.isna(score): return "⚪ Zatím nedoloženo"
+    if pos+neg == 0: return "⚪ Zatím nedoloženo"
+    if neg > pos and neg >= 3: return "🟠 Slabé / rozporné"
+    if pos >= 5 and neg <= 2: return "🟢 Silné"
+    if pos >= 2: return "🟡 Střední"
+    return "🟠 Slabé"
+
+
 
 # Sidebar
 st.sidebar.header("⚙️ Nastavení")
@@ -1774,14 +1798,16 @@ else:
         st.write(f"**Cenový obraz:** {r.get('Price View', '—')}")
         st.write(f"**Fundamenty vs. cena:** {r.get('Market / Fundamental View', '—')}")
         st.write(f"**Co naznačuje cena:** {r.get('Price Evidence', '') or '—'}")
-    with st.expander("📰 📰 Co říká dostupný text", expanded=False):
+    with st.expander("📰 Textové důkazy k příběhu", expanded=False):
+        st.write(f"**Doložení příběhu:** {evidence_quality(r)}")
+        if clean_text(r.get("Text Evidence")):
+            st.write(f"**Textový závěr:** {normalize_text_evidence_output(r.get('Text Evidence'))}")
         if clean_text(r.get("Text Support")):
-            st.markdown("**Co text naznačuje**")
             st.markdown(r["Text Support"])
         if clean_text(r.get("Text Warnings")):
-            st.markdown("**Co může příběh zpochybnit**")
+            st.markdown("**Rizika / co může příběh zpochybnit**")
             st.markdown(r["Text Warnings"])
-        elif clean_text(r.get("Text Evidence")) == "⚪ Bez textového důkazu":
+        elif clean_text(r.get("Text Evidence")) in ("⚪ Bez textového důkazu", "⚪ Zatím nedoloženo"):
             st.info("Textová vrstva zatím nenašla dostatečně konkrétní firemní signál. To není potvrzení ani vyvrácení příběhu.")
         if clean_text(r.get("Text Sources")):
             st.caption("Zdroj textu: " + r["Text Sources"])
@@ -1799,12 +1825,14 @@ else:
 
 # Text evidence detail
 with st.expander("📰 Textové důkazy k příběhu", expanded=False):
-    text_cols = ["Ticker", "Name", "Story", "Story Priority", "Text Score", "Text Evidence", "Final Confidence", "Text Support", "Text Warnings", "Text Sources"]
+    text_cols = ["Ticker", "Name", "Story", "Story Priority", "Text Score", "Text Evidence", "Doložení příběhu", "Final Confidence", "Text Support", "Text Warnings", "Text Sources"]
     if "Text Score" in results_df.columns:
         text_view = results_df[(results_df["Text Evidence"] != "⚪ Nehodnoceno") & results_df["Text Score"].notna()].copy()
         if text_view.empty:
             st.info("Textová fáze zatím nebyla provedena nebo pro kandidáty nebyl dostupný text.")
         else:
+            text_view["Doložení příběhu"] = text_view.apply(evidence_quality, axis=1)
+            text_cols = [c for c in text_cols if c in text_view.columns]
             st.dataframe(text_view[text_cols], use_container_width=True, hide_index=True, height=700)
 
 # Availability
