@@ -513,6 +513,20 @@ def prefilter_by_market_data(universe, target):
     if len(chosen)<target:
         rest=out[~out["Ticker"].isin(chosen["Ticker"])].sort_values(["Ticker"])
         chosen=pd.concat([chosen,rest.head(target-len(chosen))],ignore_index=True)
+
+    # IMPORTANT: missing Yahoo price data must not shrink the investment universe.
+    # In previous versions a market-data failure caused the whole prefilter to
+    # return fewer than `target` names (e.g. 399 instead of 800). That meant a
+    # large part of the official universe disappeared before fundamentals were
+    # even considered. Fill the remaining slots deterministically from names
+    # without usable market data. They continue to the fundamental phase; their
+    # price fields are simply unavailable until/if price analysis is performed.
+    if len(chosen) < target:
+        missing = universe[~universe["Ticker"].isin(out["Ticker"])].copy()
+        if not missing.empty:
+            missing = build_stage1_candidates(missing, target - len(chosen)) if 'build_stage1_candidates' in globals() else missing.head(target-len(chosen))
+            chosen = pd.concat([chosen, missing], ignore_index=True)
+
     return chosen.drop(columns=["Bucket"],errors="ignore").head(target).reset_index(drop=True)
 
 def build_stage1_candidates(universe, max_stage1):
