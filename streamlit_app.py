@@ -965,9 +965,21 @@ def repair_known_spaced_phrases(s):
     return s
 
 
+def collapse_letter_spaced_text(s):
+    # Some RSS/HTML renderers split words into individual characters, sometimes
+    # with newlines: "e x e c u t i o n r i s k". First collapse such runs
+    # to "executionrisk"; the known-phrase repair below then restores safe
+    # word boundaries ("execution risk"). This is deliberately limited to
+    # runs made almost entirely of single letters so ordinary prose is untouched.
+    pattern = r"(?<![A-Za-z])(?:[A-Za-z]\s+){2,}[A-Za-z](?![A-Za-z])"
+    def repl(m):
+        return re.sub(r"\s+", "", m.group(0))
+    return re.sub(pattern, repl, s)
+
 def text_clean(x):
     s = unescape(clean_text(x))
     s = re.sub(r"<[^>]+>", " ", s)
+    s = collapse_letter_spaced_text(s)
     s = repair_known_spaced_phrases(s)
     return re.sub(r"\s+", " ", s).strip().lower()
 
