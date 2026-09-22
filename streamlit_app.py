@@ -1779,8 +1779,37 @@ with st.expander("🧩 Diagnostika titulů se Story Fit ≥ minimum", expanded=F
     if sf.empty:
         st.info("Žádný titul nedosáhl minimální Shody s příběhem.")
     else:
-        sf_cols = [c for c in ["Ticker", "Name", "Story", "Company Archetype", "Shoda s příběhem", "Investiční atraktivita", "Available Params", "Pass", "Eligible", "Posouzení zotavení", "Skóre zotavení", "Turnaround Score"] if c in sf.columns]
-        st.dataframe(sf[sf_cols], use_container_width=True, hide_index=True)
+        # V6.9.4: detailní diagnostika všech titulů se Story Fit >= minimum.
+        # Nemění výběr ani skóre; pouze ukazuje, které fundamentální parametry
+        # konkrétnímu titulu chybí a proč případně neprošel přes min_data.
+        def available_params_text(r):
+            return ", ".join([p for p in PARAMS if not pd.isna(r.get(p))])
+
+        def missing_params_text(r):
+            return ", ".join([p for p in PARAMS if pd.isna(r.get(p))])
+
+        sf["Dostupné parametry"] = sf.apply(available_params_text, axis=1)
+        sf["Chybějící parametry"] = sf.apply(missing_params_text, axis=1)
+        sf["Počet dat"] = sf["Available Params"].astype(int)
+        sf["Min. dat splněno"] = sf["Available Params"] >= min_data
+        sf_cols = [
+            "Ticker", "Name", "Story", "Company Archetype", "Shoda s příběhem",
+            "Investiční atraktivita", "Počet dat", "Min. dat splněno",
+            "Dostupné parametry", "Chybějící parametry", "Pass", "Eligible",
+            "Posouzení zotavení", "Skóre zotavení", "Turnaround Score"
+        ]
+        st.dataframe(sf[[c for c in sf_cols if c in sf.columns]], use_container_width=True, hide_index=True)
+
+        # Samostatná krátká kontrola CLST, pokud je mezi tituly se Story Fit >= minimum.
+        clst_diag = sf[sf["Ticker"].astype(str).eq("CLST")].copy()
+        if not clst_diag.empty:
+            r = clst_diag.iloc[0]
+            st.markdown("**CLST – proč není kandidátem**")
+            st.write(
+                f"Dostupná data: **{int(r['Available Params'])}/{len(PARAMS)}** "
+                f"(minimum {min_data}). "
+                + (f"Chybí: {r['Chybějící parametry']}." if r['Chybějící parametry'] else "Nechybí žádný parametr.")
+            )
 if passed.empty:
     st.info("Pro zvolený příběh a nastavení dat nebyl nalezen žádný kandidát.")
 else:
