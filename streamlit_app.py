@@ -1,3 +1,4 @@
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -25,8 +26,15 @@ PARAMS = [
 ]
 
 def clean_text(x):
-    if pd.isna(x):
+    if x is None:
         return ""
+    if isinstance(x, (pd.Series, pd.DataFrame, list, tuple, dict)):
+        return "" if len(x) == 0 else str(x).strip()
+    try:
+        if pd.isna(x):
+            return ""
+    except (TypeError, ValueError):
+        pass
     return str(x).strip()
 
 def safe_float(x):
@@ -812,7 +820,7 @@ def story_fit(r, selected_story):
 
     if selected_story == "🔄 Operating turnaround":
         # 35 prior problem, 20 stabilization, 25 current improvement, 20 persistence.
-        gates = r.get("Posouzení zotavení", {})
+        gates = r.get("Recovery Gates", {})
         if isinstance(gates, dict):
             problem = bool(gates.get("Prior Problem")); bottom = bool(gates.get("Bottom / Stabilization"))
             improvement = bool(gates.get("Current Improvement")); persistence = bool(gates.get("Persistence"))
@@ -1581,7 +1589,7 @@ dirs = results_df.apply(fundamental_direction, axis=1, result_type="expand")
 dirs.columns = ["Fundamental Direction", "Fundamental Trend Score", "Fundamental Evidence"]
 results_df = pd.concat([results_df, dirs], axis=1)
 gates = results_df.apply(recovery_gates, axis=1, result_type="expand")
-gates.columns = ["Posouzení zotavení", "Skóre zotavení", "Posouzení zotavení"]
+gates.columns = ["Posouzení zotavení", "Skóre zotavení", "Recovery Gates"]
 results_df = pd.concat([results_df, gates], axis=1)
 turns = results_df.apply(turnaround_score, axis=1, result_type="expand")
 turns.columns = ["Turnaround Score", "Turnaround Evidence"]
@@ -1665,7 +1673,7 @@ if run:
         results_df = empty_evidence_columns(results_df)
 
     evidence_cols = [c for c in [
-        "Ticker", "Posouzení zotavení", "Skóre zotavení", "Posouzení zotavení", "Text Score", "Text Evidence", "Text Positive", "Text Negative", "Text Support", "Text Warnings", "Text Sources",
+        "Ticker", "Posouzení zotavení", "Skóre zotavení", "Recovery Gates", "Text Score", "Text Evidence", "Text Positive", "Text Negative", "Text Support", "Text Warnings", "Text Sources",
         "Skóre ceny", "Price View", "Drawdown 3Y", "Drawdown 5Y", "Recovery from 3Y Low", "Recovery from 5Y Low",
         "6M Return", "12M Return", "Days Since 3Y Low", "MA50 vs MA200", "Higher Low", "Higher High", "Price Trend", "Price Evidence"
     ] if c in results_df.columns]
@@ -1853,7 +1861,7 @@ else:
         detail_cols = [
             "Ticker","Yahoo Ticker","Name","Exchange","Company Archetype","Company Type","Sector","Industry",
             *PARAMS,"Revenue CAGR 3Y","Net Income CAGR 3Y","Net Margin","Margin Change 3Y",
-            "Revenue Prior YoY","Net Income Prior YoY","Fundamental Direction","Fundamental Trend Score","Fundamental Evidence","Posouzení zotavení","Skóre zotavení","Posouzení zotavení","Turnaround Score","Turnaround Evidence",
+            "Revenue Prior YoY","Net Income Prior YoY","Fundamental Direction","Fundamental Trend Score","Fundamental Evidence","Posouzení zotavení","Skóre zotavení","Recovery Gates","Turnaround Score","Turnaround Evidence",
             "Story Priority","Text Score","Final Confidence","Status","Mapping","Data Source","Error"
         ]
         detail_cols = [c for c in detail_cols if c in r.index]
