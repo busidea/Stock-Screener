@@ -812,7 +812,7 @@ def story_fit(r, selected_story):
 
     if selected_story == "🔄 Operating turnaround":
         # 35 prior problem, 20 stabilization, 25 current improvement, 20 persistence.
-        gates = r.get("Posouzení zotavenís", {})
+        gates = r.get("Posouzení zotavení", {})
         if isinstance(gates, dict):
             problem = bool(gates.get("Prior Problem")); bottom = bool(gates.get("Bottom / Stabilization"))
             improvement = bool(gates.get("Current Improvement")); persistence = bool(gates.get("Persistence"))
@@ -1540,6 +1540,12 @@ if run:
         progress.progress((i+1)/len(candidates))
     progress.empty(); status_text.empty()
     st.session_state["screening_results"] = pd.DataFrame(rows)
+    st.session_state["screening_pipeline_counts"] = {
+        "Celé univerzum": int(len(universe)),
+        "Předselekce trhu": int(len(stage1)),
+        "Fundamentální fáze": int(len(candidates)),
+        "Načtené fundamenty": int(len(rows)),
+    }
 
 results_df = st.session_state.get("screening_results", pd.DataFrame())
 if results_df.empty:
@@ -1575,7 +1581,7 @@ dirs = results_df.apply(fundamental_direction, axis=1, result_type="expand")
 dirs.columns = ["Fundamental Direction", "Fundamental Trend Score", "Fundamental Evidence"]
 results_df = pd.concat([results_df, dirs], axis=1)
 gates = results_df.apply(recovery_gates, axis=1, result_type="expand")
-gates.columns = ["Posouzení zotavení", "Skóre zotavení", "Posouzení zotavenís"]
+gates.columns = ["Posouzení zotavení", "Skóre zotavení", "Posouzení zotavení"]
 results_df = pd.concat([results_df, gates], axis=1)
 turns = results_df.apply(turnaround_score, axis=1, result_type="expand")
 turns.columns = ["Turnaround Score", "Turnaround Evidence"]
@@ -1619,6 +1625,18 @@ if selected_stories:
 else:
     results_df["Story Selected"] = True
 results_df["Eligible"] = (results_df["Available Params"] >= min_data) & results_df["Pass"] & results_df["Story Selected"]
+
+# V6.9.1 diagnostics: keep stage counts visible so changes between versions/runs
+# can be localized without guessing whether they came from universe, prefilter,
+# fundamentals, story-fit filtering, price analysis, or text analysis.
+pipeline_counts = st.session_state.get("screening_pipeline_counts", {}).copy()
+pipeline_counts["Dostatek dat (min. parametry)"] = int((results_df["Available Params"] >= min_data).sum())
+pipeline_counts["Shoda s příběhem ≥ minimum"] = int(results_df["Story Selected"].sum()) if selected_stories else int(len(results_df))
+pipeline_counts["Prošlo klasickým filtrem"] = int(results_df["Pass"].sum())
+pipeline_counts["Eligible před cenou/textem"] = int(results_df["Eligible"].sum())
+pipeline_counts["Posláno do cenové fáze"] = int(min(max_price_candidates, pipeline_counts["Eligible před cenou/textem"])) if max_price_candidates > 0 else 0
+pipeline_counts["Posláno do textové fáze"] = int(min(max_text_candidates, pipeline_counts["Eligible před cenou/textem"])) if max_text_candidates > 0 else 0
+st.session_state["screening_pipeline_counts"] = pipeline_counts
 results_df = results_df.sort_values(["Eligible", "Story Priority"], ascending=[False, False], na_position="last").reset_index(drop=True)
 
 def empty_evidence_columns(df):
@@ -1647,7 +1665,7 @@ if run:
         results_df = empty_evidence_columns(results_df)
 
     evidence_cols = [c for c in [
-        "Ticker", "Posouzení zotavení", "Skóre zotavení", "Posouzení zotavenís", "Text Score", "Text Evidence", "Text Positive", "Text Negative", "Text Support", "Text Warnings", "Text Sources",
+        "Ticker", "Posouzení zotavení", "Skóre zotavení", "Posouzení zotavení", "Text Score", "Text Evidence", "Text Positive", "Text Negative", "Text Support", "Text Warnings", "Text Sources",
         "Skóre ceny", "Price View", "Drawdown 3Y", "Drawdown 5Y", "Recovery from 3Y Low", "Recovery from 5Y Low",
         "6M Return", "12M Return", "Days Since 3Y Low", "MA50 vs MA200", "Higher Low", "Higher High", "Price Trend", "Price Evidence"
     ] if c in results_df.columns]
@@ -1686,6 +1704,25 @@ a,b,c,d,e = st.columns(5)
 a.metric("Načteno", len(results_df))
 b.metric("Kompletní data", int((results_df["Status"] == "OK").sum()))
 c.metric("≥ min. dat", int((results_df["Available Params"] >= min_data).sum()))
+# V6.9.1: diagnostic pipeline summary
+with st.expander("🔬 Diagnostika průchodu screeningem", expanded=False):
+    pc = st.session_state.get("screening_pipeline_counts", {})
+    if pc:
+        diag_rows = [
+            {"Fáze": "Celé univerzum", "Počet titulů": pc.get("Celé univerzum", 0)},
+            {"Fáze": "Předselekce trhu", "Počet titulů": pc.get("Předselekce trhu", 0)},
+            {"Fáze": "Fundamentální fáze", "Počet titulů": pc.get("Fundamentální fáze", 0)},
+            {"Fáze": "Načtené fundamenty", "Počet titulů": pc.get("Načtené fundamenty", 0)},
+            {"Fáze": "Dostatek dat", "Počet titulů": pc.get("Dostatek dat (min. parametry)", 0)},
+            {"Fáze": "Shoda s příběhem ≥ minimum", "Počet titulů": pc.get("Shoda s příběhem ≥ minimum", 0)},
+            {"Fáze": "Prošlo klasickým filtrem", "Počet titulů": pc.get("Prošlo klasickým filtrem", 0)},
+            {"Fáze": "Eligible před cenou/textem", "Počet titulů": pc.get("Eligible před cenou/textem", 0)},
+            {"Fáze": "Posláno do cenové fáze", "Počet titulů": pc.get("Posláno do cenové fáze", 0)},
+            {"Fáze": "Posláno do textové fáze", "Počet titulů": pc.get("Posláno do textové fáze", 0)},
+        ]
+        st.dataframe(pd.DataFrame(diag_rows), use_container_width=True, hide_index=True)
+        st.caption("Tyto počty slouží pouze k diagnostice pipeline. Nemění výběr ani skóre titulů.")
+
 d.metric("Vybraný příběh", int(results_df["Story Selected"].sum()))
 e.metric("Kandidáti", int(results_df["Eligible"].sum()))
 
@@ -1779,7 +1816,7 @@ else:
         })
     with st.expander("📈 Růst a obrat trendu", expanded=False):
         st.write(f"**Posouzení zotavení:** {r.get("Posouzení zotavení","—")} · skóre {safe_float(r.get("Skóre zotavení")):.0f}/100" if not pd.isna(safe_float(r.get("Skóre zotavení"))) else "**Posouzení zotavení:** —")
-        st.write(f"**Brány:** {r.get("Posouzení zotavenís","—")}")
+        st.write(f"**Brány:** {r.get("Posouzení zotavení","—")}")
         st.dataframe(pd.DataFrame([{
             "Směr fundamentů": r["Fundamental Direction"], "Fundamentální trend score": r["Fundamental Trend Score"],
             "Revenue Growth %": r["Revenue Growth"], "Earnings Growth %": r["Earnings Growth"],
@@ -1816,7 +1853,7 @@ else:
         detail_cols = [
             "Ticker","Yahoo Ticker","Name","Exchange","Company Archetype","Company Type","Sector","Industry",
             *PARAMS,"Revenue CAGR 3Y","Net Income CAGR 3Y","Net Margin","Margin Change 3Y",
-            "Revenue Prior YoY","Net Income Prior YoY","Fundamental Direction","Fundamental Trend Score","Fundamental Evidence","Posouzení zotavení","Skóre zotavení","Posouzení zotavenís","Turnaround Score","Turnaround Evidence",
+            "Revenue Prior YoY","Net Income Prior YoY","Fundamental Direction","Fundamental Trend Score","Fundamental Evidence","Posouzení zotavení","Skóre zotavení","Posouzení zotavení","Turnaround Score","Turnaround Evidence",
             "Story Priority","Text Score","Final Confidence","Status","Mapping","Data Source","Error"
         ]
         detail_cols = [c for c in detail_cols if c in r.index]
