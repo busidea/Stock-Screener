@@ -151,91 +151,115 @@ def load_nyse():
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_xetra():
+    """Load the official Xetra universe without materializing the huge CSV in memory.
+
+    Important for Streamlit Cloud: the Deutsche Börse file can be large enough
+    that pandas' C tokenizer raises `Error tokenizing data: out of memory`.
+    We therefore stream the HTTP response and parse rows with Python's csv
+    module, retaining only CS (common stock/equity) records.
+    """
+    import csv
+    from itertools import chain
+
     raw = requests.get(
         XETRA_URL,
-        timeout=30,
-        headers={"User-Agent": "Mozilla/5.0"}
+        timeout=60,
+        headers={"User-Agent": "Mozilla/5.0"},
+        stream=True,
     )
     raw.raise_for_status()
-    text = raw.content.decode("utf-8-sig", errors="replace")
-    lines = text.splitlines()
+
+    # Read only a tiny prefix to locate the real CSV header.
+    prefix = []
+    for line in raw.iter_lines(decode_unicode=True):
+        if line is None:
+            continue
+        line = line.lstrip("\ufeff")
+        prefix.append(line)
+        if len(prefix) >= 20:
+            break
 
     header_idx = None
-    for i, line in enumerate(lines[:20]):
+    for i, line in enumerate(prefix):
         if "Instrument Type" in line and ("Mnemonic" in line or "ISIN" in line):
             header_idx = i
             break
+
     if header_idx is None:
+        raw.close()
         raise ValueError("XETRA: hlavička CSV nebyla nalezena.")
 
-    # The Xetra file is much larger than the final universe.  Loading all
-    # columns into one DataFrame can exceed Streamlit Cloud memory.
-    # Read only the columns we actually need and process the CSV in chunks.
-    header = lines[header_idx].split(";")
+    header_line = prefix[header_idx]
+    reader = csv.reader([header_line], delimiter=";", quotechar='"')
+    header = next(reader)
     header_clean = [clean_text(c) for c in header]
 
-    def header_col(names):
+    def header_index(names):
         for name in names:
             target = clean_text(name).lower()
             for i, col in enumerate(header_clean):
                 if col.lower() == target:
-                    return header[i]
+                    return i
         return None
 
-    typ = header_col(["Instrument Type"])
-    mnemonic = header_col(["Mnemonic"])
-    isin = header_col(["ISIN"])
-    instrument = header_col(["Instrument"])
-    status = header_col(["Instrument Status"])
-    market_status = header_col(["Market Segment Status"])
+    typ_i = header_index(["Instrument Type"])
+    mnemonic_i = header_index(["Mnemonic"])
+    isin_i = header_index(["ISIN"])
+    instrument_i = header_index(["Instrument"])
+    status_i = header_index(["Instrument Status"])
+    market_status_i = header_index(["Market Segment Status"])
 
-    if typ is None or mnemonic is None:
+    if typ_i is None or mnemonic_i is None:
+        raw.close()
         raise ValueError("XETRA: chybí Instrument Type nebo Mnemonic.")
 
-    wanted = [c for c in [typ, mnemonic, isin, instrument, status, market_status] if c]
-    # Keep the original header and data in memory only once; pandas then
-    # materializes small chunks instead of the entire Xetra instrument file.
-    csv_text = "\n".join(lines[header_idx:])
-    frames = []
-    for chunk in pd.read_csv(
-        StringIO(csv_text),
-        sep=";",
-        dtype=str,
-        usecols=wanted,
-        chunksize=20000,
-        low_memory=True,
-    ):
-        chunk.columns = [clean_text(c) for c in chunk.columns]
+    # Reconstruct the stream from the header and all lines after it.
+    # No giant StringIO and no pandas C tokenizer are used.
+    remaining_prefix = prefix[header_idx + 1:]
+    row_lines = chain(remaining_prefix, raw.iter_lines(decode_unicode=True))
+    csv_reader = csv.reader(row_lines, delimiter=";", quotechar='"')
 
-        # Deutsche Börse defines CS as Common Stock / Equity.
-        chunk = chunk[chunk[typ].fillna("").str.upper().eq("CS")].copy()
-
-        if status is not None and status in chunk.columns:
-            active = chunk[status].fillna("").str.lower()
-            chunk = chunk[active.eq("") | active.str.contains("active")]
-
-        if market_status is not None and market_status in chunk.columns:
-            ms = chunk[market_status].fillna("").str.lower()
-            chunk = chunk[ms.eq("") | ms.str.contains("active")]
-
-        if chunk.empty:
+    rows = []
+    for row in csv_reader:
+        if not row or len(row) <= max(typ_i, mnemonic_i):
             continue
 
-        part = pd.DataFrame({
-            "Ticker": chunk[mnemonic].map(yahoo_xetra_ticker),
-            "Name": chunk[instrument].map(clean_text) if instrument else "",
-            "Exchange": "XETRA",
-            "ISIN": chunk[isin].map(clean_text) if isin else "",
-            "Source": "Deutsche Börse Xetra",
-        })
-        part = part[part["Ticker"].str.len() > 3].copy()
-        if not part.empty:
-            frames.append(part)
+        typ = clean_text(row[typ_i]).upper()
+        if typ != "CS":
+            continue
 
-    if not frames:
+        if status_i is not None and status_i < len(row):
+            status = clean_text(row[status_i]).lower()
+            if status and "active" not in status:
+                continue
+
+        if market_status_i is not None and market_status_i < len(row):
+            market_status = clean_text(row[market_status_i]).lower()
+            if market_status and "active" not in market_status:
+                continue
+
+        mnemonic = clean_text(row[mnemonic_i])
+        if not mnemonic:
+            continue
+
+        ticker = yahoo_xetra_ticker(mnemonic)
+        if len(ticker) <= 3:
+            continue
+
+        name = clean_text(row[instrument_i]) if instrument_i is not None and instrument_i < len(row) else ""
+        isin = clean_text(row[isin_i]) if isin_i is not None and isin_i < len(row) else ""
+
+        rows.append((ticker, name, "XETRA", isin, "Deutsche Börse Xetra"))
+
+    raw.close()
+
+    if not rows:
         return pd.DataFrame(columns=["Ticker", "Name", "Exchange", "ISIN", "Source"])
 
-    out = pd.concat(frames, ignore_index=True)
+    out = pd.DataFrame(
+        rows,
+        columns=["Ticker", "Name", "Exchange", "ISIN", "Source"]
+    )
     out = out.drop_duplicates(["Ticker", "ISIN"])
     return out
 
