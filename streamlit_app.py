@@ -13,7 +13,7 @@ from datetime import datetime
 st.set_page_config(page_title="Stock-Screener", page_icon="🔎", layout="wide")
 
 st.title("🔎 Stock-Screener")
-st.caption("V6 – univerzum → fundament → charakter → recovery test → mechanismus → text → cena → investiční příběh")
+st.caption("V6.10 – univerzum → fundament → charakter → recovery test → mechanismus → text → cena → investiční příběh")
 
 NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 NYSE_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
@@ -527,8 +527,7 @@ def fetch_fundamentals(ticker, exchange, name="", isin=""):
 
 
 
-@st.cache_data(ttl=1800, show_spinner=False)
-def prefilter_by_market_data(universe, target):
+def prefilter_by_market_data(universe, target, progress_callback=None):
     """Stage 0/1: use batched one-year prices for the whole universe.
     This is deliberately not a valuation filter: it keeps both beaten-down and
     recovering names so turnaround and value stories are not systematically removed.
@@ -540,6 +539,8 @@ def prefilter_by_market_data(universe, target):
     chunk_size=80
     for i in range(0,len(tickers),chunk_size):
         chunk=tickers[i:i+chunk_size]
+        if progress_callback:
+            progress_callback(i / max(1, len(tickers)), f"Zpracováno {i:,} / {len(tickers):,} titulů · dávka {i+1}–{min(i+len(chunk), len(tickers))}")
         try:
             data=yf.download(chunk, period="1y", interval="1d", auto_adjust=True,
                              progress=False, threads=False, group_by="column")
@@ -556,6 +557,8 @@ def prefilter_by_market_data(universe, target):
                 rows.append((t,ret,vol,len(s)))
         except Exception:
             continue
+    if progress_callback:
+        progress_callback(1.0, f"Zpracováno {len(tickers):,} / {len(tickers):,} titulů · dokončuji výběr")
     md=pd.DataFrame(rows,columns=["Ticker","1Y Return","Volatility","Price Days"])
     if md.empty:
         return build_stage1_candidates(universe,target) if 'build_stage1_candidates' in globals() else universe.head(target).copy()
@@ -1613,20 +1616,27 @@ if run:
         st.session_state["screening_fresh_run"] = True
     else:
         st.session_state["screening_fresh_run"] = False
-    st.info(f"🔄 **Screening byl spuštěn.** Nejprve probíhá předselekce celého univerza ({len(universe):,} titulů), potom fundamentální, textová a cenová fáze. **První fáze může trvat několik minut – stránku neobnovujte.**")
-    stage1_status = st.empty()
-    stage1_status.write("⏳ **1/4 Předselekce trhu:** zpracovávám celé investiční univerzum…")
-    stage1 = prefilter_by_market_data(universe, max_stage1)
-    stage1_status.write(f"✅ **1/4 Předselekce dokončena:** {len(stage1):,} titulů pokračuje do další fáze.")
+    st.info(f"🔄 **Screening byl spuštěn.** Postupně proběhne předselekce, fundamentální data, recovery/příběh, text a cena. **Stránku během běhu neobnovuj.**")
+    stage_status = st.empty()
+    stage_progress = st.progress(0, text="🔄 1/6 Předselekce trhu: připravuji…")
+
+    def update_stage1_progress(value, message):
+        stage_progress.progress(max(0.0, min(1.0, float(value))), text=f"🔄 1/6 Předselekce trhu · {message}")
+
+    stage_status.write(f"🔄 **1/6 Předselekce trhu:** zpracovávám celé univerzum ({len(universe):,} titulů)…")
+    stage1 = prefilter_by_market_data(universe, max_stage1, progress_callback=update_stage1_progress)
+    stage_progress.progress(1.0, text=f"✅ 1/6 Předselekce trhu dokončena · {len(stage1):,} titulů")
+    stage_status.write(f"✅ **1/6 dokončeno:** {len(stage1):,} titulů pokračuje do fundamentální fáze.")
     candidates = build_stage1_candidates(stage1, max_candidates)
     st.session_state["screening_stage1_tickers"] = stage1["Ticker"].astype(str).tolist() if "Ticker" in stage1.columns else []
     st.session_state["screening_fundamental_tickers"] = candidates["Ticker"].astype(str).tolist() if "Ticker" in candidates.columns else []
-    rows = []; progress = st.progress(0); status_text = st.empty()
+    rows = []
+    status_text = st.empty()
     for i, row in candidates.iterrows():
-        status_text.write(f"Načítám {i+1}/{len(candidates)}: **{row['Ticker']}**")
+        status_text.write(f"🔄 **2/6 Fundamentální data:** {i+1}/{len(candidates)} · aktuálně **{row['Ticker']}**")
         rows.append(fetch_fundamentals(row["Ticker"], row["Exchange"], row.get("Name", ""), row.get("ISIN", "")))
-        progress.progress((i+1)/len(candidates))
-    progress.empty(); status_text.empty()
+        stage_progress.progress((i+1)/max(1,len(candidates)), text=f"🔄 2/6 Fundamentální data · {i+1}/{len(candidates)} · {row['Ticker']}")
+    status_text.write(f"✅ **2/6 Fundamentální data dokončena:** {len(rows)} titulů.")
     st.session_state["screening_results"] = pd.DataFrame(rows)
     st.session_state["screening_pipeline_counts"] = {
         "Celé univerzum": int(len(universe)),
@@ -1640,6 +1650,8 @@ if results_df.empty:
     st.warning("Pro vybrané nastavení nebyla načtena žádná data."); st.stop()
 
 # Scores and stories
+stage_progress.progress(0, text="🔄 3/6 Charakter + recovery + investiční příběh: vyhodnocuji…")
+stage_status.write("🔄 **3/6 Charakter + recovery + investiční příběh:** vyhodnocuji fundamentální obraz…")
 # Keep raw screening data separate from derived/evidence layers. Streamlit reruns
 # (for example when changing the selected candidate) must not re-append columns.
 raw_results = st.session_state.get("screening_raw_results")
@@ -1713,6 +1725,8 @@ if selected_stories:
 else:
     results_df["Story Selected"] = True
 results_df["Eligible"] = (results_df["Available Params"] >= min_data) & results_df["Pass"] & results_df["Story Selected"]
+stage_progress.progress(1.0, text=f"✅ 3/6 Charakter + recovery + příběh dokončen · {int(results_df["Eligible"].sum())} kandidátů")
+stage_status.write(f"✅ **3/6 dokončeno:** {int(results_df["Eligible"].sum())} kandidátů splňuje podmínky.")
 
 # V6.9.1 diagnostics: keep stage counts visible so changes between versions/runs
 # can be localized without guessing whether they came from universe, prefilter,
@@ -1755,10 +1769,16 @@ def empty_evidence_columns(df):
 
 # Evidence is kept separately, keyed by ticker. This survives UI-only reruns.
 if run:
+    stage_progress.progress(0, text=f"🔄 4/6 Textové důkazy · připravuji až {min(max_text_candidates, int(results_df["Eligible"].sum()))} kandidátů")
+    stage_status.write(f"🔄 **4/6 Textové důkazy:** prověřuji nejvýše {min(max_text_candidates, int(results_df["Eligible"].sum()))} kandidátů.")
     if max_text_candidates > 0:
         results_df = add_text_evidence(results_df, max_text_candidates)
     else:
         results_df = empty_evidence_columns(results_df)
+    stage_progress.progress(1.0, text="✅ 4/6 Textové důkazy dokončeny")
+    stage_status.write("✅ **4/6 Textové důkazy dokončeny.**")
+    stage_progress.progress(0, text=f"🔄 5/6 Cenová fáze · připravuji až {min(max_price_candidates, int(results_df["Eligible"].sum()))} kandidátů")
+    stage_status.write(f"🔄 **5/6 Cenová fáze:** prověřuji nejvýše {min(max_price_candidates, int(results_df["Eligible"].sum()))} kandidátů.")
     if max_price_candidates > 0:
         results_df = add_price_analysis(results_df, max_price_candidates)
     else:
@@ -1770,6 +1790,8 @@ if run:
         "6M Return", "12M Return", "Days Since 3Y Low", "MA50 vs MA200", "Higher Low", "Higher High", "Price Trend", "Price Evidence"
     ] if c in results_df.columns]
     st.session_state["screening_evidence"] = results_df[evidence_cols].drop_duplicates("Ticker").copy()
+    stage_progress.progress(1.0, text="✅ 6/6 Screening dokončen")
+    stage_status.write("✅ **6/6 Screening dokončen.** Výsledky jsou připraveny níže.")
 else:
     results_df = empty_evidence_columns(results_df)
     cached_evidence = st.session_state.get("screening_evidence")
