@@ -483,7 +483,7 @@ def prefilter_by_market_data(universe, target):
         chunk=tickers[i:i+chunk_size]
         try:
             data=yf.download(chunk, period="1y", interval="1d", auto_adjust=True,
-                             progress=False, threads=True, group_by="column")
+                             progress=False, threads=False, group_by="column")
             close=data["Close"] if isinstance(data,pd.DataFrame) and "Close" in data else pd.DataFrame()
             if isinstance(close,pd.Series):
                 close=close.to_frame()
