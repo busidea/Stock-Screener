@@ -168,39 +168,74 @@ def load_xetra():
     if header_idx is None:
         raise ValueError("XETRA: hlavička CSV nebyla nalezena.")
 
-    df = pd.read_csv(StringIO("\n".join(lines[header_idx:])), sep=";", dtype=str)
-    df.columns = [clean_text(c) for c in df.columns]
+    # The Xetra file is much larger than the final universe.  Loading all
+    # columns into one DataFrame can exceed Streamlit Cloud memory.
+    # Read only the columns we actually need and process the CSV in chunks.
+    header = lines[header_idx].split(";")
+    header_clean = [clean_text(c) for c in header]
 
-    typ = find_col(df, ["Instrument Type"])
-    mnemonic = find_col(df, ["Mnemonic"])
-    isin = find_col(df, ["ISIN"])
-    instrument = find_col(df, ["Instrument"])
-    status = find_col(df, ["Instrument Status"])
-    market_status = find_col(df, ["Market Segment Status"])
+    def header_col(names):
+        for name in names:
+            target = clean_text(name).lower()
+            for i, col in enumerate(header_clean):
+                if col.lower() == target:
+                    return header[i]
+        return None
+
+    typ = header_col(["Instrument Type"])
+    mnemonic = header_col(["Mnemonic"])
+    isin = header_col(["ISIN"])
+    instrument = header_col(["Instrument"])
+    status = header_col(["Instrument Status"])
+    market_status = header_col(["Market Segment Status"])
 
     if typ is None or mnemonic is None:
         raise ValueError("XETRA: chybí Instrument Type nebo Mnemonic.")
 
-    # Deutsche Börse defines CS as Common Stock / Equity.
-    df = df[df[typ].fillna("").str.upper().eq("CS")].copy()
+    wanted = [c for c in [typ, mnemonic, isin, instrument, status, market_status] if c]
+    # Keep the original header and data in memory only once; pandas then
+    # materializes small chunks instead of the entire Xetra instrument file.
+    csv_text = "\n".join(lines[header_idx:])
+    frames = []
+    for chunk in pd.read_csv(
+        StringIO(csv_text),
+        sep=";",
+        dtype=str,
+        usecols=wanted,
+        chunksize=20000,
+        low_memory=True,
+    ):
+        chunk.columns = [clean_text(c) for c in chunk.columns]
 
-    if status is not None:
-        active = df[status].fillna("").str.lower()
-        active_mask = active.eq("") | active.str.contains("active")
-        df = df[active_mask]
-    if market_status is not None:
-        ms = df[market_status].fillna("").str.lower()
-        active_mask = ms.eq("") | ms.str.contains("active")
-        df = df[active_mask]
+        # Deutsche Börse defines CS as Common Stock / Equity.
+        chunk = chunk[chunk[typ].fillna("").str.upper().eq("CS")].copy()
 
-    out = pd.DataFrame({
-        "Ticker": df[mnemonic].map(yahoo_xetra_ticker),
-        "Name": df[instrument].map(clean_text) if instrument else "",
-        "Exchange": "XETRA",
-        "ISIN": df[isin].map(clean_text) if isin else "",
-        "Source": "Deutsche Börse Xetra"
-    })
-    out = out[out["Ticker"].str.len() > 3].copy()
+        if status is not None and status in chunk.columns:
+            active = chunk[status].fillna("").str.lower()
+            chunk = chunk[active.eq("") | active.str.contains("active")]
+
+        if market_status is not None and market_status in chunk.columns:
+            ms = chunk[market_status].fillna("").str.lower()
+            chunk = chunk[ms.eq("") | ms.str.contains("active")]
+
+        if chunk.empty:
+            continue
+
+        part = pd.DataFrame({
+            "Ticker": chunk[mnemonic].map(yahoo_xetra_ticker),
+            "Name": chunk[instrument].map(clean_text) if instrument else "",
+            "Exchange": "XETRA",
+            "ISIN": chunk[isin].map(clean_text) if isin else "",
+            "Source": "Deutsche Börse Xetra",
+        })
+        part = part[part["Ticker"].str.len() > 3].copy()
+        if not part.empty:
+            frames.append(part)
+
+    if not frames:
+        return pd.DataFrame(columns=["Ticker", "Name", "Exchange", "ISIN", "Source"])
+
+    out = pd.concat(frames, ignore_index=True)
     out = out.drop_duplicates(["Ticker", "ISIN"])
     return out
 
