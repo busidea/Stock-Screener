@@ -13,7 +13,7 @@ from datetime import datetime
 st.set_page_config(page_title="Stock-Screener", page_icon="🔎", layout="wide")
 
 st.title("🔎 Stock-Screener")
-st.caption("V6.10 – univerzum → fundament → charakter → recovery test → mechanismus → text → cena → investiční příběh")
+st.caption("V6.10.1 – univerzum → fundament → charakter → recovery → mechanismus → text → cena → investiční příběh")
 
 NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 NYSE_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
@@ -537,10 +537,12 @@ def prefilter_by_market_data(universe, target, progress_callback=None):
     tickers = universe["Ticker"].dropna().astype(str).unique().tolist()
     rows=[]
     chunk_size=80
+    started_at = time.time()
     for i in range(0,len(tickers),chunk_size):
         chunk=tickers[i:i+chunk_size]
+        batch_started = time.time()
         if progress_callback:
-            progress_callback(i / max(1, len(tickers)), f"Zpracováno {i:,} / {len(tickers):,} titulů · dávka {i+1}–{min(i+len(chunk), len(tickers))}")
+            progress_callback(i / max(1, len(tickers)), f"Čekám na Yahoo · dávka {i+1}–{min(i+len(chunk), len(tickers))} · celkem {i:,}/{len(tickers):,}")
         try:
             data=yf.download(chunk, period="1y", interval="1d", auto_adjust=True,
                              progress=False, threads=False, group_by="column")
@@ -555,10 +557,15 @@ def prefilter_by_market_data(universe, target, progress_callback=None):
                 ret=(float(s.iloc[-1])/float(s.iloc[0])-1)*100 if s.iloc[0]>0 else 0
                 vol=float(s.pct_change().std()*100) if len(s)>20 else 0
                 rows.append((t,ret,vol,len(s)))
-        except Exception:
+        except Exception as exc:
+            if progress_callback:
+                progress_callback(min(1.0, (i + len(chunk)) / max(1, len(tickers)), f"Dávka {i+1}–{min(i+len(chunk), len(tickers))} nedostupná · pokračuji dál · {time.time()-started_at:.0f} s"))
             continue
+        if progress_callback:
+            done = min(i + len(chunk), len(tickers))
+            progress_callback(done / max(1, len(tickers)), f"Zpracováno {done:,} / {len(tickers):,} · poslední dávka {time.time()-batch_started:.1f} s · celkem {time.time()-started_at:.0f} s")
     if progress_callback:
-        progress_callback(1.0, f"Zpracováno {len(tickers):,} / {len(tickers):,} titulů · dokončuji výběr")
+        progress_callback(1.0, f"Zpracováno {len(tickers):,} / {len(tickers):,} titulů · dokončuji výběr · celkem {time.time()-started_at:.0f} s")
     md=pd.DataFrame(rows,columns=["Ticker","1Y Return","Volatility","Price Days"])
     if md.empty:
         return build_stage1_candidates(universe,target) if 'build_stage1_candidates' in globals() else universe.head(target).copy()
@@ -1616,7 +1623,7 @@ if run:
         st.session_state["screening_fresh_run"] = True
     else:
         st.session_state["screening_fresh_run"] = False
-    st.info(f"🔄 **Screening byl spuštěn.** Postupně proběhne předselekce, fundamentální data, recovery/příběh, text a cena. **Stránku během běhu neobnovuj.**")
+    st.info(f"🔄 **Screening běží.** Průběh se aktualizuje po každé dávce. **Stránku během běhu neobnovuj.**")
     stage_status = st.empty()
     stage_progress = st.progress(0, text="🔄 1/6 Předselekce trhu: připravuji…")
 
@@ -1661,8 +1668,8 @@ if raw_results is None or raw_results.empty:
 derived_cols = [
     "Value Score", "Quality Score", "Growth Score", "Company Archetype", "Company Type",
     "Fundamental Direction", "Fundamental Trend Score", "Fundamental Evidence",
-    "Turnaround Score", "Turnaround Evidence", "Story", "Shoda s příběhem", "Investiční atraktivita", "Story Priority",
-    "Available Params", "Pass", "Story Selected", "Eligible",
+    "Turnaround Score", "Turnaround Evidence", "Story", "Shoda s příběhem", "Potenciální shoda s příběhem", "Investiční atraktivita", "Story Priority",
+    "Available Params", "Potenciální shoda s příběhem", "Pass", "Story Selected", "Eligible",
     "Text Score", "Text Evidence", "Text Positive", "Text Negative", "Text Support",
     "Text Warnings", "Text Sources", "Skóre ceny", "Price View", "Drawdown 3Y",
     "Drawdown 5Y", "Recovery from 3Y Low", "Recovery from 5Y Low", "6M Return",
@@ -1688,6 +1695,7 @@ turns.columns = ["Turnaround Score", "Turnaround Evidence"]
 results_df = pd.concat([results_df, turns], axis=1)
 results_df["Story"] = results_df.apply(classify_story, axis=1)
 results_df["Investiční atraktivita"] = results_df.apply(investment_attractiveness, axis=1)
+results_df["Available Params"] = results_df[PARAMS].notna().sum(axis=1)
 def best_selected_story_fit(r):
     if not selected_stories:
         return np.nan
@@ -1695,12 +1703,18 @@ def best_selected_story_fit(r):
     fits = [x for x in fits if not pd.isna(x)]
     return round(max(fits), 1) if fits else np.nan
 
-results_df["Shoda s příběhem"] = results_df.apply(best_selected_story_fit, axis=1)
+# V6.10.1: distinguish a calculated/potential fit from a valid fit.
+# A story fit can be mathematically computed from a partial row, but it must
+# not be treated as a real candidate signal until the minimum data threshold is met.
+results_df["Potenciální shoda s příběhem"] = results_df.apply(best_selected_story_fit, axis=1)
+results_df["Shoda s příběhem"] = results_df.apply(
+    lambda r: safe_float(r.get("Potenciální shoda s příběhem")) if int(r.get("Available Params", 0)) >= min_data else np.nan,
+    axis=1
+)
 results_df["Story Priority"] = results_df.apply(
     lambda r: story_priority(r, None) if pd.isna(safe_float(r.get("Shoda s příběhem"))) else round(
         0.60 * safe_float(r.get("Shoda s příběhem")) + 0.40 * safe_float(r.get("Investiční atraktivita")), 1
         ) if not pd.isna(safe_float(r.get("Investiční atraktivita"))) else safe_float(r.get("Shoda s příběhem")), axis=1)
-results_df["Available Params"] = results_df[PARAMS].notna().sum(axis=1)
 
 # Optional classic filters. Missing data never passes a requested filter.
 def passes_classic(r):
@@ -1888,11 +1902,12 @@ with st.expander("🧩 Diagnostika titulů se Story Fit ≥ minimum", expanded=F
         sf["Počet dat"] = sf["Available Params"].astype(int)
         sf["Min. dat splněno"] = sf["Available Params"] >= min_data
         sf_cols = [
-            "Ticker", "Name", "Story", "Company Archetype", "Shoda s příběhem",
+            "Ticker", "Name", "Story", "Company Archetype", "Shoda s příběhem", "Potenciální shoda s příběhem",
             "Investiční atraktivita", "Počet dat", "Min. dat splněno",
             "Dostupné parametry", "Chybějící parametry", "Pass", "Eligible",
             "Posouzení zotavení", "Skóre zotavení", "Turnaround Score"
         ]
+        st.caption("Shoda s příběhem je platná pouze při splnění minima dat. Potenciální shoda může být spočtena i z neúplných dat a slouží jen k diagnostice, nikoli k výběru kandidáta.")
         st.dataframe(sf[[c for c in sf_cols if c in sf.columns]], use_container_width=True, hide_index=True)
 
         # Samostatná krátká kontrola CLST, pokud je mezi tituly se Story Fit >= minimum.
@@ -1904,6 +1919,7 @@ with st.expander("🧩 Diagnostika titulů se Story Fit ≥ minimum", expanded=F
                 f"Dostupná data: **{int(r['Available Params'])}/{len(PARAMS)}** "
                 f"(minimum {min_data}). "
                 + (f"Chybí: {r['Chybějící parametry']}." if r['Chybějící parametry'] else "Nechybí žádný parametr.")
+                + (f" Potenciální shoda s vybraným příběhem je **{r['Potenciální shoda s příběhem']:.0f}/100**, ale kvůli nedostatku dat se jako skutečná shoda nepoužije." if not pd.isna(r.get('Potenciální shoda s příběhem')) and int(r['Available Params']) < min_data else "")
             )
 if passed.empty:
     st.info("Pro zvolený příběh a nastavení dat nebyl nalezen žádný kandidát.")
