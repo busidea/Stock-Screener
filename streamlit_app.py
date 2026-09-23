@@ -1531,11 +1531,11 @@ if clear:
 if not selected_exchanges:
     st.warning("Vyber alespoň jednu burzu."); st.stop()
 
-with st.spinner("Načítám aktuální seznam titulů z oficiálních zdrojů…"):
-    try:
-        universe = load_universe(selected_exchanges)
-    except Exception as e:
-        st.error(f"Chyba při načtení univerza: {e}"); st.stop()
+st.info("Načítám aktuální seznam titulů z oficiálních zdrojů…")
+try:
+    universe = load_universe(selected_exchanges)
+except Exception as e:
+    st.error(f"Chyba při načtení univerza: {e}"); st.stop()
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Celkem v univerzu", f"{len(universe):,}".replace(",", " "))
