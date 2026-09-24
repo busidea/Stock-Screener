@@ -53,7 +53,7 @@ def update_runtime(status=None, stage=None, message=None, error=None, run_id=Non
 
 
 st.title("🔎 Stock-Screener")
-st.caption("V6.10.2 – univerzum → fundament → charakter → recovery → mechanismus → text → cena → investiční příběh")
+st.caption("V6.10.3 – volba burzy → univerzum → fundament → charakter → recovery → mechanismus → text → cena → investiční příběh")
 
 NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 NYSE_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
@@ -1592,12 +1592,18 @@ def evidence_quality(r):
 
 # Sidebar
 st.sidebar.header("⚙️ Nastavení")
-selected_exchanges = st.sidebar.multiselect("Burzy", ["NASDAQ", "NYSE", "XETRA"], default=["NASDAQ", "NYSE", "XETRA"])
+universe_choice = st.sidebar.radio(
+    "Univerzum / burza",
+    ["Všechny burzy", "NASDAQ", "NYSE", "XETRA"],
+    index=0,
+    help="Pro rychlejší a cílenější screening zvol jednu burzu. Režim Všechny burzy zachová prohledání celého univerza."
+)
+selected_exchanges = ["NASDAQ", "NYSE", "XETRA"] if universe_choice == "Všechny burzy" else [universe_choice]
 min_cap_b = st.sidebar.number_input("Min. Market Cap (mld.)", min_value=0.0, value=1.0, step=0.5)
 max_candidates = st.sidebar.slider("Max. titulů pro fundamentální fázi", 100, 600, 350, 50)
 max_text_candidates = st.sidebar.slider("Max. titulů pro textovou fázi", 0, 60, 40, 5)
 max_price_candidates = st.sidebar.slider("Max. titulů pro cenovou fázi", 0, 60, 40, 5)
-max_stage1 = st.sidebar.slider("Max. titulů z celého univerza do předvýběru", 200, 1500, 800, 100)
+max_stage1 = st.sidebar.slider("Max. titulů z univerza do předvýběru", 200, 1500, 800, 100)
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("🎯 Jaký příběh hledám?")
@@ -1652,6 +1658,8 @@ c1, c2, c3, c4 = st.columns(4)
 c1.metric("Celkem v univerzu", f"{len(universe):,}".replace(",", " "))
 for i, ex in enumerate(selected_exchanges[:3], start=2):
     [c2, c3, c4][i-2].metric(ex, f"{int((universe['Exchange'] == ex).sum()):,}".replace(",", " "))
+if universe_choice != "Všechny burzy":
+    st.caption(f"🎯 Zvoleno cílené univerzum: **{universe_choice}** · {len(universe):,} titulů. Další fáze budou pracovat pouze s tímto trhem.")
 
 st.markdown("### 🌍 Univerzum")
 st.caption("NASDAQ/NYSE jsou získávány z Nasdaq Trader; XETRA z oficiálního seznamu Deutsche Börse. XETRA je omezeno na Instrument Type = CS (Common Stock / Equity).")
@@ -1672,7 +1680,7 @@ if not run and "screening_results" not in st.session_state:
 
 if run:
     run_id = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + hashlib.md5(str(time.time_ns()).encode()).hexdigest()[:6]
-    update_runtime(status="running", stage="1/6", message="Screening spuštěn", error="", run_id=run_id)
+    update_runtime(status="running", stage="1/6", message=f"Screening spuštěn · univerzum: {universe_choice} · {len(universe):,} titulů", error="", run_id=run_id)
     if fresh_run:
         st.cache_data.clear()
         st.session_state["screening_fresh_run"] = True
@@ -1686,9 +1694,10 @@ if run:
         update_runtime(status="running", stage="1/6", message=message, run_id=run_id)
         stage_progress.progress(max(0.0, min(1.0, float(value))), text=f"🔄 1/6 Předselekce trhu · {message}")
 
-    stage_status.write(f"🔄 **1/6 Předselekce trhu:** zpracovávám celé univerzum ({len(universe):,} titulů)…")
-    stage1 = prefilter_by_market_data(universe, max_stage1, _progress_callback=update_stage1_progress)
-    update_runtime(status="running", stage="2/6", message=f"Předselekce dokončena: {len(stage1):,} titulů", run_id=run_id)
+    effective_stage1 = min(int(max_stage1), int(len(universe)))
+    stage_status.write(f"🔄 **1/6 Předselekce trhu:** zpracovávám univerzum **{universe_choice}** ({len(universe):,} titulů)…")
+    stage1 = prefilter_by_market_data(universe, effective_stage1, _progress_callback=update_stage1_progress)
+    update_runtime(status="running", stage="2/6", message=f"Předselekce dokončena · {universe_choice}: {len(stage1):,} titulů", run_id=run_id)
     st.session_state["screening_run_id"] = run_id
     stage_progress.progress(1.0, text=f"✅ 1/6 Předselekce trhu dokončena · {len(stage1):,} titulů")
     stage_status.write(f"✅ **1/6 dokončeno:** {len(stage1):,} titulů pokračuje do fundamentální fáze.")
@@ -1720,6 +1729,7 @@ if run:
     st.session_state["screening_results"] = pd.DataFrame(rows)
     st.session_state["screening_raw_results"] = pd.DataFrame(rows).copy()
     st.session_state["screening_pipeline_counts"] = {
+        "Univerzum": universe_choice,
         "Celé univerzum": int(len(universe)),
         "Předselekce trhu": int(len(stage1)),
         "Fundamentální fáze": int(len(candidates)),
