@@ -53,7 +53,7 @@ def update_runtime(status=None, stage=None, message=None, error=None, run_id=Non
 
 
 st.title("🔎 Stock-Screener")
-st.caption("V6.10.3 – volba burzy → univerzum → fundament → charakter → recovery → mechanismus → text → cena → investiční příběh")
+st.caption("V6.10.4 – volba burzy → univerzum → fundament → charakter → recovery → mechanismus → text → cena → investiční příběh")
 
 NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 NYSE_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
@@ -861,16 +861,33 @@ def recovery_gates(r):
     bottom = (sign or (not pd.isna(prior_eg) and prior_eg < 0 and not pd.isna(eg) and eg > 0) or (not pd.isna(prior_rg) and prior_rg < 0 and not pd.isna(rg) and rg >= 0) or (not pd.isna(mc) and mc >= 3))
     improvement = ((not pd.isna(eg) and eg > 5) or (not pd.isna(rg) and rg > 3) or (not pd.isna(mc) and mc >= 2) or (not pd.isna(fcf) and fcf > 0 and sign))
     persistence = ((not pd.isna(mc) and mc >= 2) and ((not pd.isna(eg) and eg > 0) or (not pd.isna(rg) and rg >= 0)))
-    severe_profit = sign or (not pd.isna(ni_cagr) and ni_cagr <= -15)
-    severe_revenue = not pd.isna(rev_cagr) and rev_cagr <= -15
+    # Severity is deliberately based on the business, not on the share price.
+    # A large price fall is useful later as market context, but it is not proof
+    # that the underlying business suffered a serious operational problem.
+    severe_profit = ((not pd.isna(ni_cagr) and ni_cagr <= -15) or
+                     (not pd.isna(prior_eg) and prior_eg <= -20))
+    severe_revenue = ((not pd.isna(rev_cagr) and rev_cagr <= -15) or
+                      (not pd.isna(prior_rg) and prior_rg <= -10))
     severe_margin = not pd.isna(mc) and mc <= -8
-    dd3 = safe_float(r.get("Drawdown 3Y")); severe_price = not pd.isna(dd3) and dd3 <= -50
-    crisis = bool(severe_profit or severe_revenue or severe_margin or severe_price)
+    severity = bool(severe_profit or severe_revenue or severe_margin)
+
+    # Quantitative mechanism proxy: improvement should have an economic source,
+    # not merely a one-period earnings rebound. Text evidence is checked later
+    # and remains evidence rather than a hard gate for candidate generation.
+    mechanism = bool(
+        ((not pd.isna(mc) and mc >= 2) and
+         ((not pd.isna(rg) and rg >= 0) or (not pd.isna(eg) and eg > 0) or
+          (not pd.isna(fcf) and fcf > 0)))
+        or
+        ((not pd.isna(rg) and rg >= 3) and (not pd.isna(eg) and eg > 0))
+    )
+
     gates = {"Prior Problem": bool(problem), "Bottom / Stabilization": bool(bottom), "Current Improvement": bool(improvement),
-             "Persistence": bool(persistence), "Cyclical": bool(cyclical), "Asset / financial": bool(asset_recovery),
-             "Technology": bool(technology), "Severity / crisis": bool(crisis)}
-    score = 30*problem + 20*bottom + 25*improvement + 15*persistence
-    if not crisis: score -= 25
+             "Persistence": bool(persistence), "Mechanism / economics": mechanism,
+             "Cyclical": bool(cyclical), "Asset / financial": bool(asset_recovery),
+             "Technology": bool(technology), "Severity / business": severity}
+    score = 25*problem + 15*bottom + 25*improvement + 15*persistence + 20*mechanism
+    if not severity: score -= 30
     if cyclical: score -= 15
     if asset_recovery: score -= 20
     if technology: score -= 15
@@ -878,7 +895,7 @@ def recovery_gates(r):
     if cyclical and improvement: label = "🔵 Cyklické zotavení"
     elif asset_recovery and improvement: label = "🏢 Aktivové / finanční zotavení"
     elif technology and improvement: label = "🟣 Růstové zotavení, ne klasický turnaround"
-    elif problem and bottom and improvement and persistence and crisis: label = "🟢 Silná struktura turnaroundu"
+    elif problem and bottom and improvement and persistence and mechanism and severity: label = "🟢 Silná struktura turnaroundu"
     elif problem and improvement: label = "🟡 Zotavení – chybí závažnost nebo mechanismus"
     else: label = "⚪ Nedostatek důkazů o turnaroundu"
     return label, float(score), gates
@@ -950,11 +967,14 @@ def story_fit(r, selected_story):
             improvement = bool(gates.get("Current Improvement")); persistence = bool(gates.get("Persistence"))
         else:
             problem = bottom = improvement = persistence = False
+            gates = {}
         score = 0
         score += 35 if problem else 0
         score += 20 if bottom else 0
         score += 25 if improvement else 0
         score += 20 if persistence else 0
+        score += 10 if bool(gates.get("Mechanism / economics")) else 0
+        score -= 15 if not bool(gates.get("Severity / business")) else 0
         if archetype in ("Commodity / resource", "Cyclical industrial", "Technology / high growth",
                          "REIT / real estate", "Investment holding", "Asset manager / capital markets",
                          "Financial institution"):
