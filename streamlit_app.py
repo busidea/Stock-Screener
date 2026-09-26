@@ -1644,87 +1644,6 @@ def analyst_yahoo_ticker(ticker, exchange):
     return ticker + ".DE"
 
 
-@st.cache_data(ttl=1800, show_spinner=False)
-def analyst_yahoo_search_candidates(query, exchange):
-    """Return identity candidates from Yahoo search without trusting ticker alone."""
-    query = clean_text(query)
-    if not query:
-        return []
-    try:
-        url = "https://query1.finance.yahoo.com/v1/finance/search"
-        r = requests.get(
-            url,
-            params={"q": query, "quotesCount": 20, "newsCount": 0},
-            timeout=12,
-            headers={"User-Agent": "Mozilla/5.0"},
-        )
-        r.raise_for_status()
-        data = r.json() or {}
-    except Exception:
-        return []
-
-    out = []
-    seen = set()
-    for item in data.get("quotes", []):
-        sym = clean_text(item.get("symbol")).upper()
-        qt = clean_text(item.get("quoteType")).upper()
-        name = clean_text(item.get("longname") or item.get("shortname"))
-        exch = clean_text(item.get("exchange"))
-        if not sym or not name or qt not in ("EQUITY", "STOCK"):
-            continue
-        # The Analyst currently works with the three supported exchange universes.
-        if exchange == "XETRA" and not sym.endswith(".DE"):
-            continue
-        if exchange in ("NASDAQ", "NYSE") and sym.endswith(".DE"):
-            continue
-        key = (sym, name.lower())
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append({"symbol": sym, "name": name, "exchange": exch, "quoteType": qt})
-    return out[:10]
-
-
-def analyst_resolve_identity(ticker, exchange):
-    """Resolve a user ticker to one or more explicit company identities."""
-    ticker = clean_text(ticker).upper()
-    base = ticker[:-3] if ticker.endswith(".DE") else ticker
-    queries = [ticker]
-    if base != ticker:
-        queries.append(base)
-    else:
-        queries.append(f"{base}.DE" if exchange == "XETRA" else base)
-
-    candidates = []
-    seen = set()
-    for q in queries:
-        for item in analyst_yahoo_search_candidates(q, exchange):
-            key = item["symbol"]
-            if key not in seen:
-                seen.add(key)
-                candidates.append(item)
-
-    # Prefer an exact symbol match. For XETRA, prefer the .DE listing.
-    def rank(x):
-        sym = x["symbol"]
-        exact = 0 if sym == ticker else 1
-        de = 0 if exchange == "XETRA" and sym == f"{base}.DE" else 1
-        return (exact, de, sym)
-    candidates.sort(key=rank)
-
-    # If Yahoo search produced nothing, retain the deterministic ticker as a
-    # fallback; the subsequent quote lookup still validates the identity.
-    if not candidates:
-        return {"status": "unresolved", "candidates": [], "input": ticker}
-
-    # Exact single candidate is safe enough to continue automatically.
-    if len(candidates) == 1:
-        return {"status": "resolved", "candidates": candidates, "selected": candidates[0], "input": ticker}
-
-    # Multiple candidates: let the user explicitly choose instead of guessing.
-    return {"status": "ambiguous", "candidates": candidates, "input": ticker}
-
-
 def analyst_human_number(x, decimals=1):
     x = safe_float(x)
     if pd.isna(x):
@@ -2103,61 +2022,145 @@ def _analyst_event_direction(text):
     return "pozitivní" if p>n else "negativní" if n>p else "smíšený / nejasný"
 
 
-def analyst_current_developments(company, q, annual, quarterly, news, sec):
-    """Research core: turn verified company-specific news into themes, not a headline list."""
-    clusters=_analyst_cluster_news(news)
-    sections=[]
-    preferred=["Strategie / portfolio","Výsledky / provoz","Trh / regulace","Management / kapitál","Produkt / technologie"]
-    for cat in preferred:
-        rows=clusters.get(cat,[])
-        if not rows: continue
-        lead=rows[0]; titles=[clean_text(r.get("Název")) for r in rows[:3] if clean_text(r.get("Název"))]
-        blob=" ".join((clean_text(r.get("Název"))+" "+clean_text(r.get("Popis"))) for r in rows[:3])
-        direction=_analyst_event_direction(blob)
-        evidence="; ".join(titles[:2])
-        impact={
-            "Strategie / portfolio":"Může měnit složení firmy, alokaci kapitálu a dlouhodobou ekonomiku jednotlivých segmentů.",
-            "Výsledky / provoz":"Může měnit tempo růstu, marže a schopnost převádět růst do cash flow.",
-            "Trh / regulace":"Může měnit poptávku, ceny, náklady nebo přístup firmy na konkrétní trhy.",
-            "Management / kapitál":"Může měnit kvalitu exekuce, kapitálovou strukturu nebo důvěryhodnost vedení.",
-            "Produkt / technologie":"Může měnit konkurenceschopnost, budoucí růst nebo nákladovou pozici."
-        }[cat]
-        sections.append(f"**{cat} — směr: {direction}.** Z dostupných podkladů vystupuje jako hlavní změna: {evidence}. **Ekonomický význam:** {impact}")
-
-    # Explicitly connect the news themes with the financial trend.
-    fin=analyst_financial_summary(annual,quarterly)
-    if fin and "nelze" not in fin.lower():
-        sections.append(f"**Finanční vazba:** {fin}")
-
-    # SEC is used as a confirmation signal, not as a dump of filing rows.
-    if sec is not None and not sec.empty:
-        forms=sec["Formulář"].astype(str).value_counts().to_dict() if "Formulář" in sec.columns else {}
-        if forms:
-            common=", ".join(f"{k} ({v}×)" for k,v in list(forms.items())[:4])
-            sections.append(f"**Regulatorní stopa (USA):** poslední veřejná podání zahrnují {common}. Samotný typ podání není důkazem změny; slouží pouze jako kontrola, zda je kolem firmy aktuální reportovací aktivita.")
-    if not sections:
-        return "Nebylo nalezeno dost relevantních a jednoznačně firemních podkladů, ze kterých by šlo poctivě sestavit aktuální změny."
-    return "\n\n".join(sections)
+def _analyst_compact_financial_context(annual, quarterly):
+    chunks=[]
+    if annual is not None and not annual.empty:
+        d=annual.copy().tail(5)
+        cols=[c for c in ["Year","Revenue","Net Income","FCF","Net Margin %","Debt"] if c in d.columns]
+        if cols: chunks.append("ROČNÍ DATA:\n"+d[cols].to_csv(index=False))
+    if quarterly is not None and not quarterly.empty:
+        d=quarterly.copy().tail(8)
+        cols=[c for c in ["Quarter","Revenue","Net Income","FCF","Net Margin %","Debt"] if c in d.columns]
+        if cols: chunks.append("KVARTÁLNÍ DATA:\n"+d[cols].to_csv(index=False))
+        ttm=analyst_ttm_from_quarters(quarterly)
+        if ttm is not None and not ttm.empty:
+            cols=[c for c in ["Period","Revenue","Net Income","FCF","Net Margin %","Debt"] if c in ttm.columns]
+            if cols: chunks.append("TTM:\n"+ttm[cols].to_csv(index=False))
+    return "\n".join(chunks)[:14000]
 
 
-def analyst_story_hypothesis(q, annual, quarterly, news, sec):
-    # Only shared story names are used. This is a hypothesis from the Analyst's own data, not Screener output.
+def _analyst_news_context(news, max_items=18):
+    if news is None or news.empty: return "ŽÁDNÉ DOSTATEČNĚ RELEVANTNÍ ZPRÁVY."
+    d=news.copy()
+    d["_dt"]=pd.to_datetime(d.get("Datum",""),errors="coerce",utc=True)
+    if "Relevance" not in d.columns: d["Relevance"]=0
+    d=d.sort_values(["_dt","Relevance"],ascending=[False,False],na_position="last")
+    rows=[]
+    for _,r in d.head(max_items).iterrows():
+        title=clean_text(r.get("Název")); desc=clean_text(r.get("Popis")); source=clean_text(r.get("Zdroj")); date=clean_text(r.get("Datum")); link=clean_text(r.get("Odkaz"))
+        if title: rows.append(f"- {date} | {source} | {title}\n  Kontext: {desc[:900]}\n  Odkaz: {link}")
+    return "\n".join(rows)[:18000] if rows else "ŽÁDNÉ DOSTATEČNĚ RELEVANTNÍ ZPRÁVY."
+
+
+def _analyst_sec_context(sec, max_items=10):
+    if sec is None or sec.empty: return "ŽÁDNÁ SEC PODÁNÍ NEBYLA NAČTENA."
+    cols=[c for c in ["Datum","Formulář","Název","Odkaz"] if c in sec.columns]
+    return sec[cols].head(max_items).to_csv(index=False)[:7000] if cols else "SEC DATA NEJSOU V POUŽITELNÉ PODOBĚ."
+
+
+def _analyst_story_options():
+    return ["🏆 Quality Compounder","💎 Kvalita za rozumnou cenu","🚀 Růst za rozumnou cenu","💰 Value / levná firma","🔄 Operating turnaround","🔄 Recovery candidate","🌐 Cyclical / commodity recovery","🏗️ Asset / financial recovery","🏢 Real-estate value","🛠️ Operational improvement","🚀 Growth / recovery","🔥 High Growth / dražší příběh","🪤 Value Trap – varování","Nejasný / smíšený příběh"]
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def analyst_ai_synthesis(company, ticker, exchange, q, annual, quarterly, news, sec):
+    try:
+        from g4f.client import Client
+    except Exception as e:
+        return {"ok":False,"error":f"G4F není dostupné: {e}","text":""}
+    profile=(
+        f"Firma: {company}\nTicker: {ticker}\nBurza: {exchange}\n"
+        f"Sektor: {clean_text(q.get('sector'))}\nOdvětví: {clean_text(q.get('industry'))}\n"
+        f"Země: {clean_text(q.get('country'))}\n"
+        f"Cena: {analyst_human_number(q.get('price'),2)} {clean_text(q.get('currency'))}\n"
+        f"Market Cap: {analyst_human_number(q.get('market_cap'))}\n"
+        f"P/E: {analyst_human_number(q.get('pe'),1)} | Forward P/E: {analyst_human_number(q.get('forward_pe'),1)} | P/S: {analyst_human_number(q.get('ps'),1)} | P/B: {analyst_human_number(q.get('pb'),1)}"
+    )
+    summary=clean_text(q.get("summary"))[:5000]
+    fin=_analyst_compact_financial_context(annual,quarterly)
+    news_txt=_analyst_news_context(news,18)
+    sec_txt=_analyst_sec_context(sec,10)
+    stories="; ".join(_analyst_story_options())
+    system=(
+        "Jsi zkušený akciový analytik. Pracuješ jako nezávislý analytik společnosti, nikoli jako screener. "
+        "Tvým úkolem není doporučit nákup/prodej a není tvým úkolem pouze shrnout články. "
+        "Musíš z dostupných podkladů sám identifikovat nejdůležitější probíhající změny ve firmě a propojit je s ekonomikou podniku. "
+        "Buď konkrétní, kritický a transparentní. Pokud jsou důkazy slabé nebo si odporují, řekni to. "
+        "Nikdy nevymýšlej skutečnosti, které nejsou v podkladech."
+    )
+    user=(
+        f"Analyzuj společnost {company} ({ticker}) podle následujících veřejných podkladů.\n\n"
+        f"{profile}\n\nSTRUČNÝ PROFIL Z YAHOO:\n{summary}\n\n{fin}\n\n"
+        f"AKTUÁLNÍ FIREMNĚ RELEVANTNÍ ZPRÁVY A JEJICH KONTEXT:\n{news_txt}\n\n"
+        f"SEC PODÁNÍ (pokud jsou k dispozici):\n{sec_txt}\n\n"
+        f"POVOLENÉ NÁZVY INVESTIČNÍCH PŘÍBĚHŮ:\n{stories}\n\n"
+        "ÚKOL:\n"
+        "1. Neudělej seznam článků. Z dostupných informací sám identifikuj 3 až 4 nejdůležitější změny nebo probíhající témata, která mohou měnit ekonomiku firmy nebo její investiční příběh.\n"
+        "2. U každého tématu vysvětli: CO SE MĚNÍ → PROČ → EKONOMICKÝ DOPAD → zda jde spíše o strukturální, cyklickou nebo dočasnou změnu → CO BY TOTO TÉMA POTVRDILO NEBO VYVRÁTILO.\n"
+        "3. Témata seřaď podle významu. U prvního tématu výslovně vysvětli, proč je důležitější než druhé.\n"
+        "4. Propoj více zdrojů a finanční vývoj. Pokud si média a finanční data odporují, upozorni na rozpor.\n"
+        "5. Odděl skutečnou změnu v ekonomice firmy od pouhého pohybu ceny akcie nebo jednorázové zprávy.\n"
+        "6. Na konci urč jednu PRACOVNÍ interpretaci investičního příběhu z povolených názvů. Vyber ji podle dostupných důkazů, nikoli podle jednoduchého P/E či růstu.\n"
+        "7. Uveď 2 až 4 nejdůležitější věci, které má investor v dalších výsledcích / měsících sledovat.\n"
+        "8. Nepiš prázdné fráze. Každý závěr musí mít konkrétní vazbu na podklad.\n\n"
+        "VÝSTUP V ČEŠTINĚ:\n"
+        "## Co se ve firmě právě mění\n"
+        "### 1. [výstižný název tématu]\n**Co se mění:** ...\n**Proč:** ...\n**Ekonomický dopad:** ...\n**Charakter změny:** ...\n**Proč je to důležité:** ...\n**Co potvrdí / vyvrátí:** ...\n**Podklady:** ...\n\n"
+        "### 2. ...\n### 3. ...\n### 4. ...\n\n"
+        "## Pracovní investiční příběh\n**[jeden přesný název z povolených názvů]**\nVysvětlení: ...\n**Protiargument:** ...\n\n"
+        "## Co bych teď sledoval\n- ...\n- ...\n- ...\n"
+    )
+    last_err=""
+    for model in ["gpt-4o-mini","gpt-4.1","gpt-4o"]:
+        try:
+            client=Client()
+            resp=client.chat.completions.create(
+                model=model,
+                messages=[{"role":"system","content":system},{"role":"user","content":user}],
+                web_search=False,
+            )
+            msg=getattr(getattr(resp,"choices",[None])[0],"message",None)
+            text=getattr(msg,"content","") if msg is not None else ""
+            text=clean_text(text)
+            if len(text)>500: return {"ok":True,"error":"","text":text,"model":model}
+            last_err=f"Model {model} vrátil příliš krátkou odpověď."
+        except Exception as e:
+            last_err=f"{model}: {e}"
+    return {"ok":False,"error":last_err or "AI syntéza selhala.","text":""}
+
+
+def analyst_current_developments(company, q, annual, quarterly, news, sec, ticker="", exchange=""):
+    result=analyst_ai_synthesis(company,ticker,exchange,q,annual,quarterly,news,sec)
+    if result.get("ok"):
+        text=result.get("text","")
+        marker="## Pracovní investiční příběh"
+        return text.split(marker,1)[0].strip() if marker in text else text
+    return f"### ⚠️ AI syntéza není v tomto běhu dostupná\n{result.get('error','Neznámá chyba.')}\n\nMechanická kategorizace článků zde není vydávána za analytický závěr."
+
+
+def analyst_story_hypothesis(q, annual, quarterly, news, sec, ai_result=None):
+    if ai_result and ai_result.get("ok"):
+        text=ai_result.get("text","")
+        marker="## Pracovní investiční příběh"
+        if marker in text:
+            part=text.split(marker,1)[1]
+            if "## Co bych teď sledoval" in part: part=part.split("## Co bych teď sledoval",1)[0]
+            return "AI syntéza",part.strip()
+    return _analyst_story_hypothesis_fallback(q,annual,quarterly,news,sec)
+
+
+def _analyst_story_hypothesis_fallback(q, annual, quarterly, news, sec):
     rev=q.get("revenue_growth",np.nan); earn=q.get("earnings_growth",np.nan); pe=q.get("pe",np.nan); fpe=q.get("forward_pe",np.nan); roe=q.get("roe",np.nan)
     primary="Nejasný / smíšený příběh"; why="Dostupné údaje zatím neukazují jednu dominantní ekonomickou změnu."
     if not pd.isna(rev) and not pd.isna(earn) and rev>8 and earn>12:
-        primary="Růst za rozumnou cenu" if pd.isna(fpe) or fpe<30 else "Vysoký růst / dražší příběh"
-        why="Růst tržeb i zisku je výrazný; hlavní otázkou je, zda tempo růstu dokáže ospravedlnit očekávání v ceně."
+        primary="Růst za rozumnou cenu" if pd.isna(fpe) or fpe<30 else "Vysoký růst / dražší příběh"; why="Růst tržeb i zisku je výrazný; hlavní otázkou je, zda tempo růstu dokáže ospravedlnit očekávání v ceně."
     elif not pd.isna(roe) and roe>15 and not pd.isna(rev) and rev>3:
-        primary="Kvalita za rozumnou cenu" if pd.isna(pe) or pe<30 else "Kvalitní růst"
-        why="Rentabilita a růst naznačují kvalitní ekonomiku; valuace rozhoduje o tom, kolik této kvality je již započteno."
+        primary="Kvalita za rozumnou cenu" if pd.isna(pe) or pe<30 else "Kvalitní růst"; why="Rentabilita a růst naznačují kvalitní ekonomiku; valuace rozhoduje o tom, kolik této kvality je již započteno."
     elif not pd.isna(earn) and earn>10 and not pd.isna(rev) and rev>-2:
-        primary="Provozní zlepšení"
-        why="Zisk se zlepšuje rychleji než tržby, což může odpovídat zlepšení marží nebo normalizaci nákladů."
+        primary="Provozní zlepšení"; why="Zisk se zlepšuje rychleji než tržby, což může odpovídat zlepšení marží nebo normalizaci nákladů."
     elif not pd.isna(pe) and 0<pe<12:
-        primary="Value / levná firma"
-        why="Ocenění je nízké; je ale nutné ověřit, zda nejde o strukturálně slabý podnik."
+        primary="Value / levná firma"; why="Ocenění je nízké; je ale nutné ověřit, zda nejde o strukturálně slabý podnik."
     return primary,why
-
 
 def analyst_render(ticker_input):
     st.title("🔎 Analytik")
@@ -2169,56 +2172,23 @@ def analyst_render(ticker_input):
     with c2:
         default_ex=2 if str(ticker_input).upper().endswith(".DE") else 0
         exchange=st.selectbox("Trh",["NASDAQ","NYSE","XETRA"],index=default_ex)
-
     analyse=st.button("🔬 Spustit analytické jádro",type="primary")
-    if analyse:
-        ticker=clean_text(ticker_input).upper()
-        if not ticker:
-            st.warning("Zadej ticker.")
-            return
-        st.session_state.pop("analyst_selected_identity",None)
-        st.session_state["analyst_resolution"] = analyst_resolve_identity(ticker,exchange)
-
-    resolution=st.session_state.get("analyst_resolution")
-    selected=st.session_state.get("analyst_selected_identity")
-
-    # Identity step: do not guess when Yahoo returns several plausible companies.
-    if resolution and not selected:
-        candidates=resolution.get("candidates",[])
-        if resolution.get("status")=="ambiguous" and candidates:
-            st.info("Ticker není jednoznačný. Vyber společnost, kterou chceš analyzovat:")
-            labels=[]
-            for x in candidates:
-                suffix=f" · {x['exchange']}" if x.get('exchange') else ""
-                labels.append(f"{x['name']} — {x['symbol']}{suffix}")
-            choice=st.radio("Nalezené společnosti",labels,index=0)
-            if st.button("➡️ Pokračovat s vybranou společností",type="primary"):
-                idx=labels.index(choice)
-                st.session_state["analyst_selected_identity"]=candidates[idx]
-                st.rerun()
-            return
-        if resolution.get("status")=="unresolved":
-            st.error(f"Ticker {resolution.get('input','')} se nepodařilo spolehlivě identifikovat pro trh {exchange}.")
-            st.caption("Zkus ticker přesně podle vybraného trhu; pokud existuje více tříd akcií, Analytik je v další verzi nabídne k výběru.")
-            return
-        if resolution.get("status")=="resolved":
-            selected=resolution.get("selected")
-            st.session_state["analyst_selected_identity"]=selected
-
-    if not selected:
-        st.info("Zadej ticker. Pro první test doporučuji SHL na XETRA – právě zde ověříme rozlišení Siemens Healthineers od jiných titulů se stejným tickerem.")
+    if not analyse:
+        st.info("Zadej ticker. Pro první test doporučuji například SHL na XETRA, protože na něm dobře uvidíme, zda Analytik dokáže oddělit skutečné firemní změny od šumu.")
         return
 
     ticker=clean_text(ticker_input).upper()
-    yahoo_ticker=selected.get("symbol") or analyst_yahoo_ticker(ticker,exchange)
-    status=st.empty()
-    status.info(f"1/5 Ověřuji identitu firmy: {selected.get('name','')} ({yahoo_ticker})…")
-    q=analyst_get_quote_data(yahoo_ticker)
-    company=q.get("name") or selected.get("name") or ""
-    if not company:
-        st.error(f"Identita {selected.get('name', ticker)} se nepodařila načíst přes Yahoo Finance ({yahoo_ticker}).")
+    if not ticker:
+        st.warning("Zadej ticker.")
         return
-    st.success(f"Analyzuji: **{company}** · {yahoo_ticker} · {exchange}")
+    yahoo_ticker=analyst_yahoo_ticker(ticker,exchange)
+    status=st.empty()
+    status.info("1/5 Ověřuji identitu firmy a načítám veřejná data…")
+    q=analyst_get_quote_data(yahoo_ticker)
+    company=q.get("name") or ""
+    if not company:
+        st.error(f"Ticker {ticker} se nepodařilo jednoznačně načíst přes Yahoo Finance ({yahoo_ticker}).")
+        return
 
     status.info("2/5 Sestavuji dlouhodobý finanční trend, poslední kvartály a cenový kontext…")
     annual=analyst_get_financial_history(yahoo_ticker)
@@ -2229,9 +2199,10 @@ def analyst_render(ticker_input):
     status.info("3/5 Hledám firemně relevantní aktuální události a filtruji kolize tickeru…")
     news=analyst_google_news(company,ticker,q.get("ir_website") or q.get("website"))
 
-    status.info("4/5 Propojuji události s ekonomikou firmy…")
-    current=analyst_current_developments(company,q,annual,quarterly,news,sec)
-    primary,story_reason=analyst_story_hypothesis(q,annual,quarterly,news,sec)
+    status.info("4/5 AI propojuje události, finanční vývoj a ekonomiku firmy…")
+    ai_result=analyst_ai_synthesis(company,ticker,exchange,q,annual,quarterly,news,sec)
+    current=analyst_current_developments(company,q,annual,quarterly,news,sec,ticker,exchange)
+    primary,story_reason=analyst_story_hypothesis(q,annual,quarterly,news,sec,ai_result)
     price_comment=analyst_price_commentary(price)
     status.success("5/5 Analytické jádro dokončeno.")
 
@@ -2257,17 +2228,13 @@ def analyst_render(ticker_input):
     with st.expander("🧠 Jádro testu – co se ve firmě mění",expanded=True):
         st.markdown(current)
         if news is not None and not news.empty:
-            st.markdown("**Podklady, ze kterých byly změny odvozeny:**")
-            for _,n in news.head(8).iterrows():
-                date=clean_text(n.get("Datum")); source=clean_text(n.get("Zdroj"))
-                meta=" · ".join(x for x in [date,source] if x)
-                link=clean_text(n.get("Odkaz"))
-                if link:
-                    st.markdown(f"- [{n.get('Název')}]({link})" + (f" · {meta}" if meta else ""))
-                else:
-                    st.markdown(f"- {n.get('Název')}" + (f" · {meta}" if meta else ""))
+            with st.expander("📚 Podklady použité AI syntézou",expanded=False):
+                for _,n in news.head(12).iterrows():
+                    date=clean_text(n.get("Datum")); source=clean_text(n.get("Zdroj")); link=clean_text(n.get("Odkaz")); meta=" · ".join(x for x in [date,source] if x); title=clean_text(n.get("Název"))
+                    if link: st.markdown(f"- [{title}]({link})" + (f" · {meta}" if meta else ""))
+                    else: st.markdown(f"- {title}" + (f" · {meta}" if meta else ""))
         else:
-            st.warning("Nebyly nalezeny dostatečně relevantní firemní zprávy. To je v testu validní výsledek – Analytik nemá doplňovat domněnky.")
+            st.warning("Nebyly nalezeny dostatečně relevantní firemní zprávy. AI v takovém případě nesmí doplňovat domněnky.")
 
     with st.expander("📊 2. Finanční vývoj – trend, ne snapshot",expanded=True):
         st.write(analyst_financial_summary(annual,quarterly))
@@ -2307,21 +2274,26 @@ def analyst_render(ticker_input):
 
     with st.expander("🧩 7. Investiční příběh – pracovní hypotéza",expanded=True):
         st.markdown(f"### {primary}")
-        st.write(story_reason)
-        st.caption("Je to nezávislá hypotéza Analytika. Nejde o výsledek Screeneru ani o investiční doporučení.")
+        st.markdown(story_reason)
+        st.caption("Pracovní interpretace je nezávislá na Screeneru; pokud AI nebyla dostupná, je použit pouze záložní kvantitativní výklad.")
 
     with st.expander("🧭 8. Cenový kontext",expanded=True):
         st.write(price_comment)
 
     with st.expander("🎯 9. Co má smysl dále ověřit",expanded=True):
-        st.markdown("- Je hlavní změna **strukturální, cyklická, nebo pouze dočasná**?")
-        st.markdown("- Promítá se už do **tržeb, marží a cash flow**, nebo zatím jen do očekávání?")
-        st.markdown("- Jak na změnu reaguje **management** a odpovídají jeho kroky komunikaci?")
-        st.markdown("- Co by v dalších výsledcích **potvrdilo** hlavní hypotézu a co by ji **vyvrátilo**?")
+        if ai_result.get("ok") and "## Co bych teď sledoval" in ai_result.get("text",""):
+            st.markdown(ai_result["text"].split("## Co bych teď sledoval",1)[1].strip())
+        else:
+            st.markdown("- Je hlavní změna **strukturální, cyklická, nebo pouze dočasná**?")
+            st.markdown("- Promítá se už do **tržeb, marží a cash flow**, nebo zatím jen do očekávání?")
+            st.markdown("- Jak na změnu reaguje **management** a odpovídají jeho kroky komunikaci?")
+            st.markdown("- Co by v dalších výsledcích **potvrdilo** hlavní hypotézu a co by ji **vyvrátilo**?")
 
     with st.expander("📚 Zdroje a diagnostika",expanded=False):
         st.write(f"Yahoo Finance: {yahoo_ticker}")
         st.write(f"Relevantních zpráv po filtrování identity: {len(news) if news is not None else 0}")
+        st.write(f"AI syntéza: {"OK" if ai_result.get("ok") else "nedostupná"} {ai_result.get("model","")}")
+        if not ai_result.get("ok"): st.caption(ai_result.get("error", ""))
         if exchange in ("NASDAQ","NYSE"):
             st.write(f"SEC poslední podání načtena: {len(sec) if sec is not None else 0}")
         st.caption("Analytik používá pouze veřejně dostupné zdroje. Pokud důkaz chybí, výstup jej nemá nahrazovat domněnkou.")
