@@ -1634,6 +1634,7 @@ ANALYST_STORIES = [
 ]
 
 
+
 def analyst_yahoo_ticker(ticker, exchange):
     ticker = clean_text(ticker).upper()
     if exchange in ("NASDAQ", "NYSE"):
@@ -1644,7 +1645,6 @@ def analyst_yahoo_ticker(ticker, exchange):
 
 
 def analyst_human_number(x, decimals=1):
-    """Readable Czech-style financial number: 24,0 mil. / 24,0 mld. / 24 000."""
     x = safe_float(x)
     if pd.isna(x):
         return "—"
@@ -1666,20 +1666,15 @@ def analyst_pct(x, decimals=1):
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def analyst_get_quote_data(yahoo_ticker):
-    """Public Yahoo Finance data used only as factual input to Analytik."""
     t = yf.Ticker(yahoo_ticker)
-    info = {}
-    fast = {}
+    info, fast = {}, {}
     try: info = t.info or {}
     except Exception: pass
     try: fast = dict(t.fast_info)
     except Exception: pass
-
-    price = first_valid(info.get("currentPrice"), info.get("regularMarketPrice"), fast.get("last_price"))
-    market_cap = first_valid(info.get("marketCap"), fast.get("market_cap"))
     return {
-        "price": price,
-        "market_cap": market_cap,
+        "price": first_valid(info.get("currentPrice"), info.get("regularMarketPrice"), fast.get("last_price")),
+        "market_cap": first_valid(info.get("marketCap"), fast.get("market_cap")),
         "currency": clean_text(info.get("currency")),
         "name": clean_text(info.get("longName") or info.get("shortName")),
         "sector": clean_text(info.get("sector")),
@@ -1719,22 +1714,41 @@ def _analyst_statement_series(df, labels):
     return pd.Series(dtype=float)
 
 
-def _analyst_build_history(t, quarterly=False):
-    income = pd.DataFrame(); balance = pd.DataFrame(); cashflow = pd.DataFrame()
-    try: income = t.quarterly_income_stmt if quarterly else t.income_stmt
-    except Exception: pass
-    try: balance = t.quarterly_balance_sheet if quarterly else t.balance_sheet
-    except Exception: pass
-    try: cashflow = t.quarterly_cashflow if quarterly else t.cashflow
-    except Exception: pass
+def _analyst_get_statement(t, attr, getter_name, freq):
+    frames = []
+    try:
+        x = getattr(t, attr, None)
+        if isinstance(x, pd.DataFrame) and not x.empty:
+            frames.append(x)
+    except Exception:
+        pass
+    try:
+        getter = getattr(t, getter_name, None)
+        if callable(getter):
+            x = getter(freq=freq)
+            if isinstance(x, pd.DataFrame) and not x.empty:
+                frames.append(x)
+    except Exception:
+        pass
+    for x in frames:
+        if isinstance(x, pd.DataFrame) and not x.empty:
+            return x
+    return pd.DataFrame()
 
-    rev = _analyst_statement_series(income, ["Total Revenue", "Operating Revenue"])
-    ni = _analyst_statement_series(income, ["Net Income", "Net Income Common Stockholders"])
-    op = _analyst_statement_series(income, ["Operating Income", "Operating Income or Loss"])
-    ocf = _analyst_statement_series(cashflow, ["Operating Cash Flow", "Total Cash From Operating Activities"])
-    capex = _analyst_statement_series(cashflow, ["Capital Expenditure", "Capital Expenditure Reported"])
-    debt = _analyst_statement_series(balance, ["Total Debt"])
-    equity = _analyst_statement_series(balance, ["Stockholders Equity", "Common Stock Equity", "Total Equity Gross Minority Interest"])
+
+def _analyst_build_history(t, quarterly=False):
+    freq = "quarterly" if quarterly else "yearly"
+    income = _analyst_get_statement(t, "quarterly_income_stmt" if quarterly else "income_stmt", "get_income_stmt", freq)
+    balance = _analyst_get_statement(t, "quarterly_balance_sheet" if quarterly else "balance_sheet", "get_balance_sheet", freq)
+    cashflow = _analyst_get_statement(t, "quarterly_cashflow" if quarterly else "cashflow", "get_cash_flow", freq)
+
+    rev = _analyst_statement_series(income, ["Total Revenue", "Operating Revenue", "TotalRevenue"])
+    ni = _analyst_statement_series(income, ["Net Income", "Net Income Common Stockholders", "NetIncome"])
+    op = _analyst_statement_series(income, ["Operating Income", "Operating Income or Loss", "OperatingIncome"])
+    ocf = _analyst_statement_series(cashflow, ["Operating Cash Flow", "Total Cash From Operating Activities", "OperatingCashFlow"])
+    capex = _analyst_statement_series(cashflow, ["Capital Expenditure", "Capital Expenditure Reported", "CapitalExpenditure"])
+    debt = _analyst_statement_series(balance, ["Total Debt", "TotalDebt"])
+    equity = _analyst_statement_series(balance, ["Stockholders Equity", "Common Stock Equity", "Total Equity Gross Minority Interest", "StockholdersEquity"])
 
     cols = {name: s for name, s in [
         ("Revenue", rev), ("Net Income", ni), ("Operating Income", op),
@@ -1751,8 +1765,8 @@ def _analyst_build_history(t, quarterly=False):
     dates = sorted(set(dates))
     if not dates:
         return pd.DataFrame()
+    # Keep the most recent requested window, but do not fabricate missing years/quarters.
     dates = dates[-8:] if quarterly else dates[-5:]
-
     out = pd.DataFrame(index=dates)
     for name, s in cols.items():
         ss = s.copy()
@@ -1762,13 +1776,15 @@ def _analyst_build_history(t, quarterly=False):
         out.index = [f"{d.year} Q{d.quarter}" for d in out.index]
     else:
         out.index = [str(d.year) for d in out.index]
-
     if "Revenue" in out and "Net Income" in out:
-        out["Net Margin %"] = np.where(out["Revenue"] > 0, out["Net Income"] / out["Revenue"] * 100, np.nan)
+        revs = pd.to_numeric(out["Revenue"], errors="coerce")
+        nis = pd.to_numeric(out["Net Income"], errors="coerce")
+        out["Net Margin %"] = np.where(revs > 0, nis / revs * 100, np.nan)
     if "Operating Cash Flow" in out and "Capital Expenditure" in out:
-        out["FCF"] = out["Operating Cash Flow"] + out["Capital Expenditure"]
-        if (out["Capital Expenditure"] >= 0).mean() > 0.5:
-            out["FCF"] = out["Operating Cash Flow"] - out["Capital Expenditure"]
+        ocf_s = pd.to_numeric(out["Operating Cash Flow"], errors="coerce")
+        cap_s = pd.to_numeric(out["Capital Expenditure"], errors="coerce")
+        # Yahoo generally reports capex as negative. Handle both conventions.
+        out["FCF"] = np.where(cap_s <= 0, ocf_s + cap_s, ocf_s - cap_s)
     return out.reset_index(names="Období")
 
 
@@ -1783,18 +1799,19 @@ def analyst_get_quarterly_history(yahoo_ticker):
 
 
 def analyst_ttm_from_quarters(quarterly):
-    if quarterly is None or quarterly.empty:
+    if quarterly is None or quarterly.empty or len(quarterly) < 4:
         return pd.DataFrame()
-    q = quarterly.copy().tail(4)
-    if len(q) < 4:
-        return pd.DataFrame()
+    q = quarterly.tail(4)
     row = {"Období": "TTM"}
     for c in ["Revenue", "Net Income", "Operating Income", "Operating Cash Flow", "FCF"]:
         if c in q.columns:
             vals = pd.to_numeric(q[c], errors="coerce")
-            row[c] = vals.sum(min_count=3)
-    if "Revenue" in row and "Net Income" in row and row["Revenue"] not in (0, np.nan):
-        row["Net Margin %"] = row["Net Income"] / row["Revenue"] * 100
+            if vals.notna().sum() >= 3:
+                row[c] = vals.sum(min_count=3)
+    rev = safe_float(row.get("Revenue"))
+    ni = safe_float(row.get("Net Income"))
+    if not pd.isna(rev) and rev > 0 and not pd.isna(ni):
+        row["Net Margin %"] = ni / rev * 100
     return pd.DataFrame([row])
 
 
@@ -1805,24 +1822,28 @@ def analyst_price_history(yahoo_ticker):
         if hist is None or hist.empty:
             return pd.DataFrame()
         out = hist[[c for c in ["Close", "Volume"] if c in hist.columns]].copy().reset_index()
-        if "Date" in out.columns:
-            out["Date"] = pd.to_datetime(out["Date"], errors="coerce").dt.tz_localize(None)
-        return out
+        date_col = "Date" if "Date" in out.columns else out.columns[0]
+        out[date_col] = pd.to_datetime(out[date_col], errors="coerce", utc=True).dt.tz_localize(None)
+        if date_col != "Date": out = out.rename(columns={date_col: "Date"})
+        return out.dropna(subset=["Date"])
     except Exception:
         return pd.DataFrame()
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def analyst_sec_ticker_map():
-    url = "https://www.sec.gov/files/company_tickers.json"
-    r = requests.get(url, timeout=30, headers={"User-Agent": "Stock-Screener research contact research@example.com"})
-    r.raise_for_status()
-    data = r.json()
-    return pd.DataFrame([{
-        "ticker": clean_text(item.get("ticker")).upper(),
-        "name": clean_text(item.get("title")),
-        "cik": str(item.get("cik_str", "")).zfill(10)
-    } for item in data.values()])
+    try:
+        url = "https://www.sec.gov/files/company_tickers.json"
+        r = requests.get(url, timeout=30, headers={"User-Agent": "Stock-Screener research contact research@example.com"})
+        r.raise_for_status()
+        data = r.json()
+        return pd.DataFrame([{
+            "ticker": clean_text(item.get("ticker")).upper(),
+            "name": clean_text(item.get("title")),
+            "cik": str(item.get("cik_str", "")).zfill(10)
+        } for item in data.values()])
+    except Exception:
+        return pd.DataFrame()
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -1830,360 +1851,366 @@ def analyst_sec_filings(ticker):
     try:
         mp = analyst_sec_ticker_map()
         hit = mp[mp["ticker"].eq(clean_text(ticker).upper())]
-        if hit.empty:
-            return pd.DataFrame()
+        if hit.empty: return pd.DataFrame()
         cik = hit.iloc[0]["cik"]
         url = f"https://data.sec.gov/submissions/CIK{cik}.json"
         r = requests.get(url, timeout=30, headers={"User-Agent": "Stock-Screener research contact research@example.com"})
         r.raise_for_status()
         recent = r.json().get("filings", {}).get("recent", {})
-        n = min(len(recent.get("form", [])), 40)
-        rows = []
+        rows=[]
+        n=min(len(recent.get("form",[])), 35)
         for i in range(n):
-            rows.append({
-                "Datum": recent.get("filingDate", [""])[i],
-                "Formulář": recent.get("form", [""])[i],
-                "Datum výkazu": recent.get("reportDate", [""])[i],
-                "Dokument": recent.get("primaryDocument", [""])[i],
-                "Accession": recent.get("accessionNumber", [""])[i],
-            })
+            rows.append({"Datum":recent.get("filingDate",[""])[i],"Formulář":recent.get("form",[""])[i],"Datum výkazu":recent.get("reportDate",[""])[i],"Dokument":recent.get("primaryDocument",[""])[i],"Accession":recent.get("accessionNumber",[""])[i]})
         return pd.DataFrame(rows)
     except Exception:
         return pd.DataFrame()
 
 
+def _analyst_company_tokens(company):
+    stop={"inc","inc.","corp","corp.","corporation","company","co","co.","ltd","limited","plc","sa","ag","se","nv","the","group","holdings","holding"}
+    toks=re.findall(r"[a-zA-ZÀ-ž0-9]+", clean_text(company).lower())
+    return [x for x in toks if len(x)>=3 and x not in stop]
+
+
+def _analyst_news_relevant(title, description, company, ticker):
+    text=(clean_text(title)+" "+clean_text(description)).lower()
+    if not text: return False, 0
+    bad={"hockey","nhl","leafs","prospect","training camp","football","soccer","basketball","baseball","cricket","fantasy","match report","recipe","weather"}
+    if any(x in text for x in bad): return False, 0
+    name=clean_text(company).lower()
+    tokens=_analyst_company_tokens(company)
+    exact_name=name and name in text
+    ticker_clean=clean_text(ticker).lower().replace(".de","")
+    token_hits=sum(1 for x in tokens[:4] if x in text)
+    score=(8 if exact_name else 0)+(2*token_hits)
+    if ticker_clean and re.search(rf"\b{re.escape(ticker_clean)}\b",text): score+=3
+    event_terms=["earnings","results","guidance","outlook","revenue","profit","margin","orders","demand","china","tariff","regulation","acquisition","acquire","divest","sale","spin-off","spinoff","restructur","separation","ceo","cfo","management","debt","buyback","dividend","launch","approval","recall","settlement","lawsuit","factory","capacity"]
+    score += sum(1 for w in event_terms if w in text)
+    # Company name is the strongest identity test. If neither exact name nor multiple name tokens appear, reject.
+    if not exact_name and token_hits < 2 and score < 6:
+        return False, 0
+    return True, score
+
+
 @st.cache_data(ttl=900, show_spinner=False)
 def analyst_google_news(company_name, ticker, ir_website=""):
-    """Search company-specific public news and discard obvious ticker noise."""
     import xml.etree.ElementTree as ET
     from urllib.parse import urlparse
-
-    company = clean_text(company_name)
-    if not company:
-        return pd.DataFrame()
-
-    domain = ""
-    try:
-        domain = urlparse(clean_text(ir_website)).netloc.replace("www.", "")
-    except Exception:
-        pass
-
-    queries = [
-        f'"{company}"',
-        f'"{company}" (results OR earnings OR guidance OR outlook)',
-        f'"{company}" (strategy OR restructuring OR acquisition OR divestment OR "spin-off" OR separation)',
-        f'"{company}" (China OR regulation OR margin OR demand OR orders)',
-        f'"{company}" (CEO OR CFO OR management)',
+    company=clean_text(company_name)
+    if not company: return pd.DataFrame()
+    domain=""
+    try: domain=urlparse(clean_text(ir_website)).netloc.replace("www.","")
+    except Exception: pass
+    queries=[
+        f'"{company}" earnings results guidance outlook',
+        f'"{company}" strategy restructuring acquisition divestment separation',
+        f'"{company}" demand orders margin China regulation tariff',
+        f'"{company}" CEO CFO management investor',
+        f'"{company}" product launch approval capacity factory',
     ]
-    if domain:
-        queries.append(f'"{company}" site:{domain}')
-
-    # Typical false-positive vocabulary for ticker collisions / unrelated news.
-    bad_terms = {
-        "hockey", "nhl", "leafs", "prospect", "training camp", "football", "soccer",
-        "basketball", "baseball", "cricket", "scorecard", "fantasy", "match report"
-    }
-    rows = []
+    if domain: queries.append(f'"{company}" site:{domain}')
+    rows=[]
     for query in queries:
-        q = requests.utils.quote(query)
-        url = f"https://news.google.com/rss/search?q={q}&hl=en-US&gl=US&ceid=US:en"
         try:
-            r = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
-            r.raise_for_status()
-            root = ET.fromstring(r.text)
-            for item in root.findall(".//item")[:12]:
-                title = clean_text(item.findtext("title"))
-                if not title:
-                    continue
-                low = title.lower()
-                if any(term in low for term in bad_terms):
-                    continue
-                exact = company.lower() in low
-                score = 4 if exact else 1
-                event_words = [
-                    "spin-off", "spinoff", "divest", "sale", "separate", "restructur", "acqui",
-                    "guidance", "outlook", "earnings", "results", "margin", "china", "diagnostic",
-                    "ceo", "cfo", "orders", "demand", "profit", "revenue", "layoff", "cut", "debt"
-                ]
-                score += sum(1 for w in event_words if w in low)
-                source_el = item.find("source")
-                source = clean_text(source_el.text if source_el is not None else "")
-                rows.append({
-                    "Název": title,
-                    "Zdroj": source,
-                    "Datum": clean_text(item.findtext("pubDate")),
-                    "Odkaz": clean_text(item.findtext("link")),
-                    "Relevance": score,
-                })
+            url="https://news.google.com/rss/search?q="+requests.utils.quote(query)+"&hl=en-US&gl=US&ceid=US:en"
+            r=requests.get(url,timeout=20,headers={"User-Agent":"Mozilla/5.0"})
+            r.raise_for_status(); root=ET.fromstring(r.text)
+            for item in root.findall(".//item")[:15]:
+                title=clean_text(item.findtext("title")); desc=clean_text(item.findtext("description"));
+                ok,score=_analyst_news_relevant(title,desc,company,ticker)
+                if not ok: continue
+                source_el=item.find("source")
+                source=clean_text(source_el.text if source_el is not None else "")
+                rows.append({"Název":title,"Popis":re.sub(r"<[^>]+>"," ",desc),"Zdroj":source,"Datum":clean_text(item.findtext("pubDate")),"Odkaz":clean_text(item.findtext("link")),"Relevance":score})
         except Exception:
             continue
-    if not rows:
-        return pd.DataFrame()
-    out = pd.DataFrame(rows)
-    out = out.drop_duplicates(subset=["Název"]).sort_values(["Relevance", "Datum"], ascending=[False, False])
-    return out.head(25).reset_index(drop=True)
+    if not rows: return pd.DataFrame()
+    out=pd.DataFrame(rows).drop_duplicates(subset=["Název"])
+    return out.sort_values(["Relevance","Datum"],ascending=[False,False]).head(35).reset_index(drop=True)
 
 
-def analyst_trend_interpretation(fin, quarterly=None):
-    if fin is None or fin.empty:
-        return "Finanční časová řada se nepodařila spolehlivě získat."
-    parts = []
-    def pct_change(col):
-        if col not in fin.columns: return np.nan
-        s = pd.to_numeric(fin[col], errors="coerce").dropna()
-        if len(s) < 2 or s.iloc[0] == 0: return np.nan
-        return (s.iloc[-1] / s.iloc[0] - 1) * 100
-    for col, label in [("Revenue", "tržby"), ("Net Income", "čistý zisk"), ("FCF", "FCF"), ("Debt", "dluh")]:
-        x = pct_change(col)
+def _analyst_fmt_pct(v):
+    return "—" if pd.isna(safe_float(v)) else analyst_pct(v,1)
+
+
+def analyst_financial_summary(annual, quarterly):
+    """Interpret trends rather than merely displaying ratios."""
+    if annual is None or annual.empty:
+        return "Finanční trend se nepodařilo z veřejných dat spolehlivě sestavit."
+    parts=[]
+    def series_change(df,col):
+        if col not in df.columns: return np.nan
+        s=pd.to_numeric(df[col],errors="coerce").dropna()
+        if len(s)<2 or s.iloc[0]==0: return np.nan
+        return (s.iloc[-1]/s.iloc[0]-1)*100
+    for col,label in [("Revenue","tržby"),("Net Income","čistý zisk"),("FCF","volný cash flow")]:
+        x=series_change(annual,col)
         if not pd.isna(x):
-            direction = "rostou" if x > 5 else "klesají" if x < -5 else "jsou přibližně stabilní"
-            parts.append(f"{label} {direction} v pětiletém okně ({analyst_pct(x,0)}).")
-    if "Net Margin %" in fin.columns:
-        s = pd.to_numeric(fin["Net Margin %"], errors="coerce").dropna()
-        if len(s) >= 2:
-            d = s.iloc[-1] - s.iloc[0]
-            parts.append(f"čistá marže se změnila o {analyst_pct(d,1)} p. b.")
+            parts.append(f"Za dostupné víceleté období {label} {'rostou' if x>5 else 'klesají' if x<-5 else 'jsou zhruba stabilní'} ({analyst_pct(x,0)}).")
+    if "Net Margin %" in annual.columns:
+        s=pd.to_numeric(annual["Net Margin %"],errors="coerce").dropna()
+        if len(s)>=2:
+            d=s.iloc[-1]-s.iloc[0]
+            parts.append(f"Čistá marže se proti začátku sledovaného období změnila o {analyst_pct(d,1)} p. b.")
+    if "Debt" in annual.columns:
+        x=series_change(annual,"Debt")
+        if not pd.isna(x): parts.append(f"Dluh se ve stejném období změnil o {analyst_pct(x,0)}.")
     if quarterly is not None and not quarterly.empty:
-        q = quarterly.tail(4)
-        if "Revenue" in q.columns and len(q) >= 2:
-            vals = pd.to_numeric(q["Revenue"], errors="coerce").dropna()
-            if len(vals) >= 2 and vals.iloc[-1] > vals.iloc[-2]:
-                parts.append("Poslední čtvrtletní údaje ukazují, že vývoj nelze posuzovat pouze podle posledního uzavřeného účetního roku.")
+        ttm=analyst_ttm_from_quarters(quarterly)
+        if not ttm.empty and not annual.empty:
+            for col,label in [("Revenue","tržby"),("Net Income","čistý zisk"),("FCF","FCF")]:
+                if col in ttm.columns and col in annual.columns:
+                    a=pd.to_numeric(annual[col],errors="coerce").dropna()
+                    v=safe_float(ttm.iloc[0].get(col))
+                    if len(a) and not pd.isna(v):
+                        delta=(v/a.iloc[-1]-1)*100 if a.iloc[-1] not in (0,np.nan) else np.nan
+                        if not pd.isna(delta): parts.append(f"TTM {label} jsou oproti poslednímu uzavřenému roku {analyst_pct(delta,0)}.")
+    if len(annual)<5: parts.append(f"Pozor: Yahoo Finance poskytlo pouze {len(annual)} celých účetních období, nikoli plných pět let.")
+    if quarterly is not None and len(quarterly)<8: parts.append(f"Čtvrtletní řada obsahuje pouze {len(quarterly)} období; TTM je proto {('dostupné' if len(quarterly)>=4 else 'nedostupné')}.")
     return " ".join(parts) if parts else "Trend nelze z dostupných údajů spolehlivě určit."
 
 
 def analyst_price_commentary(price):
-    if price is None or price.empty or "Close" not in price.columns:
-        return "Cenový kontext se nepodařilo spolehlivě získat."
-    p = pd.to_numeric(price["Close"], errors="coerce").dropna()
-    if len(p) < 30:
-        return "Cenová historie je příliš krátká pro smysluplné vyhodnocení."
-    last = p.iloc[-1]
-    ret_12m = (last / p.iloc[max(0, len(p)-252)] - 1) * 100 if len(p) > 252 else np.nan
-    ret_3y = (last / p.iloc[max(0, len(p)-756)] - 1) * 100 if len(p) > 756 else np.nan
-    high_3y = p.tail(min(756, len(p))).max()
-    dist_high = (last / high_3y - 1) * 100 if high_3y else np.nan
-    ma50 = p.tail(50).mean()
-    ma200 = p.tail(200).mean() if len(p) >= 200 else np.nan
-    comments = []
-    if not pd.isna(ret_12m):
-        comments.append(f"za posledních 12 měsíců {analyst_pct(ret_12m)}")
-    if not pd.isna(ret_3y):
-        comments.append(f"za přibližně 3 roky {analyst_pct(ret_3y)}")
-    if not pd.isna(dist_high):
-        comments.append(f"od tříletého maxima {analyst_pct(dist_high)}")
-    if not pd.isna(ma200):
-        comments.append("50denní průměr je nad 200denním" if ma50 > ma200 else "50denní průměr je pod 200denním")
-    if ret_12m > 15 and dist_high > -10:
-        interpretation = "Trh už část zlepšení zřejmě ocenil; prostor pro další růst proto závisí více na dalším potvrzení fundamentů."
-    elif ret_12m < -15 and not pd.isna(dist_high) and dist_high < -20:
-        interpretation = "Cena zůstává výrazně pod nedávnými maximy, takže trh zatím plně nepotvrzuje pozitivní vývoj."
-    else:
-        interpretation = "Cenový vývoj zatím neposkytuje jednoznačné potvrzení ani vyvrácení fundamentálního příběhu."
-    return "Cena " + "; ".join(comments) + ". " + interpretation
+    if price is None or price.empty or "Close" not in price.columns: return "Cenovou historii se nepodařilo spolehlivě získat."
+    p=pd.to_numeric(price["Close"],errors="coerce").dropna()
+    if len(p)<60: return "Cenová historie je příliš krátká pro smysluplný kontext."
+    last=p.iloc[-1]; ret12=(last/p.iloc[max(0,len(p)-252)]-1)*100 if len(p)>252 else np.nan; ret3=(last/p.iloc[max(0,len(p)-756)]-1)*100 if len(p)>756 else np.nan
+    hi=p.tail(min(756,len(p))).max(); dist=(last/hi-1)*100 if hi else np.nan
+    ma50=p.tail(50).mean(); ma200=p.tail(200).mean() if len(p)>=200 else np.nan
+    facts=[]
+    if not pd.isna(ret12): facts.append(f"12M {analyst_pct(ret12)}")
+    if not pd.isna(ret3): facts.append(f"3Y {analyst_pct(ret3)}")
+    if not pd.isna(dist): facts.append(f"od 3Y maxima {analyst_pct(dist)}")
+    if not pd.isna(ma200): facts.append("50D nad 200D" if ma50>ma200 else "50D pod 200D")
+    if not pd.isna(ret12) and ret12>15 and dist>-10: interp="Cena už část zlepšení zřejmě promítá do ocenění; další potvrzení bude muset přijít z výsledků."
+    elif not pd.isna(ret12) and ret12<-15 and dist<-20: interp="Cena zůstává výrazně pod nedávnými maximy; trh tedy zatím vývoj plně nepotvrzuje."
+    else: interp="Cenový vývoj zatím neposkytuje jednoznačné potvrzení ani vyvrácení fundamentálního příběhu."
+    return "; ".join(facts)+". "+interp
+
+
+_ANALYST_EVENT_GROUPS={
+    "Strategie / portfolio":["spin-off","spinoff","separation","divest","divestment","sale","carve-out","acquisition","acquire","merger","portfolio"],
+    "Výsledky / provoz":["earnings","results","revenue","profit","margin","cash flow","guidance","outlook","orders","demand","cost","capacity"],
+    "Trh / regulace":["china","tariff","regulation","regulatory","sanction","government","approval","reimbursement","pricing"],
+    "Management / kapitál":["ceo","cfo","management","appoint","resign","buyback","dividend","debt","refinanc","shareholder"],
+    "Produkt / technologie":["launch","product","technology","innovation","approval","clinical","trial","patent","factory"]
+}
+
+
+def _analyst_cluster_news(news):
+    clusters={k:[] for k in _ANALYST_EVENT_GROUPS}
+    if news is None or news.empty: return clusters
+    for _,r in news.iterrows():
+        text=(clean_text(r.get("Název"))+" "+clean_text(r.get("Popis"))).lower()
+        hits=[]
+        for cat,words in _ANALYST_EVENT_GROUPS.items():
+            score=sum(1 for w in words if w in text)
+            if score: hits.append((score,cat))
+        if hits:
+            hits.sort(reverse=True)
+            clusters[hits[0][1]].append(r)
+    for cat in clusters:
+        clusters[cat]=clusters[cat][:5]
+    return clusters
+
+
+def _analyst_event_direction(text):
+    t=text.lower()
+    pos=["raises","raised","growth","strong","record","improve","improved","increase","increased","beat","higher","recovery","expands","orders"]
+    neg=["cuts","cut","weak","decline","declining","lower","miss","pressure","slow","slower","loss","warning","challenge","tariff","layoff","restructur"]
+    p=sum(1 for x in pos if x in t); n=sum(1 for x in neg if x in t)
+    return "pozitivní" if p>n else "negativní" if n>p else "smíšený / nejasný"
 
 
 def analyst_current_developments(company, q, annual, quarterly, news, sec):
-    """Turn public signals into a short event-oriented research view, not a news dump."""
-    items = []
-    if news is not None and not news.empty:
-        for _, row in news.head(18).iterrows():
-            title = clean_text(row.get("Název"))
-            low = title.lower()
-            category = None
-            if any(x in low for x in ["spin-off", "spinoff", "separat", "divest", "sale", "carve-out", "acqui", "merger"]):
-                category = "Strategie / portfolio"
-            elif any(x in low for x in ["china", "regulation", "tariff", "sanction", "government"]):
-                category = "Trh / regulace"
-            elif any(x in low for x in ["margin", "profit", "revenue", "earnings", "guidance", "outlook", "orders", "demand", "cash flow", "debt"]):
-                category = "Výsledky / provoz"
-            elif any(x in low for x in ["ceo", "cfo", "management", "appoint", "resign"]):
-                category = "Management"
-            if category:
-                items.append((category, title, clean_text(row.get("Zdroj")), clean_text(row.get("Datum"))))
+    """Research core: turn verified company-specific news into themes, not a headline list."""
+    clusters=_analyst_cluster_news(news)
+    sections=[]
+    preferred=["Strategie / portfolio","Výsledky / provoz","Trh / regulace","Management / kapitál","Produkt / technologie"]
+    for cat in preferred:
+        rows=clusters.get(cat,[])
+        if not rows: continue
+        lead=rows[0]; titles=[clean_text(r.get("Název")) for r in rows[:3] if clean_text(r.get("Název"))]
+        blob=" ".join((clean_text(r.get("Název"))+" "+clean_text(r.get("Popis"))) for r in rows[:3])
+        direction=_analyst_event_direction(blob)
+        evidence="; ".join(titles[:2])
+        impact={
+            "Strategie / portfolio":"Může měnit složení firmy, alokaci kapitálu a dlouhodobou ekonomiku jednotlivých segmentů.",
+            "Výsledky / provoz":"Může měnit tempo růstu, marže a schopnost převádět růst do cash flow.",
+            "Trh / regulace":"Může měnit poptávku, ceny, náklady nebo přístup firmy na konkrétní trhy.",
+            "Management / kapitál":"Může měnit kvalitu exekuce, kapitálovou strukturu nebo důvěryhodnost vedení.",
+            "Produkt / technologie":"Může měnit konkurenceschopnost, budoucí růst nebo nákladovou pozici."
+        }[cat]
+        sections.append(f"**{cat} — směr: {direction}.** Z dostupných podkladů vystupuje jako hlavní změna: {evidence}. **Ekonomický význam:** {impact}")
 
-    # Deduplicate similar event headlines.
-    seen = set(); clean_items = []
-    for item in items:
-        key = re.sub(r"[^a-z0-9]+", " ", item[1].lower()).strip()
-        if key in seen: continue
-        seen.add(key); clean_items.append(item)
+    # Explicitly connect the news themes with the financial trend.
+    fin=analyst_financial_summary(annual,quarterly)
+    if fin and "nelze" not in fin.lower():
+        sections.append(f"**Finanční vazba:** {fin}")
 
-    sections = []
-    for category in ["Strategie / portfolio", "Výsledky / provoz", "Trh / regulace", "Management"]:
-        matches = [x for x in clean_items if x[0] == category]
-        if not matches: continue
-        lead = matches[0][1]
-        support = matches[1:3]
-        text = f"**{category}:** {lead}"
-        if support:
-            text += " Další dostupné zprávy tento směr doplňují: " + " · ".join(x[1] for x in support) + "."
-        sections.append(text)
-
-    # Connect current events to the financial picture.
-    if quarterly is not None and not quarterly.empty and annual is not None and not annual.empty:
-        ttm = analyst_ttm_from_quarters(quarterly)
-        if not ttm.empty and "Revenue" in ttm.columns and "Revenue" in annual.columns:
-            last_annual = pd.to_numeric(annual["Revenue"], errors="coerce").dropna()
-            ttm_rev = safe_float(ttm.iloc[0].get("Revenue"))
-            if len(last_annual) and not pd.isna(ttm_rev) and last_annual.iloc[-1] != 0:
-                sections.append(f"**Finanční kontext:** TTM tržby dosahují přibližně {analyst_human_number(ttm_rev)}, takže poslední uzavřený účetní rok není jediným relevantním pohledem na současný stav.")
-
+    # SEC is used as a confirmation signal, not as a dump of filing rows.
+    if sec is not None and not sec.empty:
+        forms=sec["Formulář"].astype(str).value_counts().to_dict() if "Formulář" in sec.columns else {}
+        if forms:
+            common=", ".join(f"{k} ({v}×)" for k,v in list(forms.items())[:4])
+            sections.append(f"**Regulatorní stopa (USA):** poslední veřejná podání zahrnují {common}. Samotný typ podání není důkazem změny; slouží pouze jako kontrola, zda je kolem firmy aktuální reportovací aktivita.")
     if not sections:
-        return "Z dostupných veřejných zpráv se nepodařilo oddělit dostatečně konkrétní aktuální událost od obecného zpravodajského šumu."
+        return "Nebylo nalezeno dost relevantních a jednoznačně firemních podkladů, ze kterých by šlo poctivě sestavit aktuální změny."
     return "\n\n".join(sections)
 
 
-def analyst_story_hypothesis(q, fin, news, sec):
-    """Transparent heuristic fallback. It is a hypothesis, not a rating."""
-    rev_g = q.get("revenue_growth", np.nan); earn_g = q.get("earnings_growth", np.nan)
-    pe = q.get("pe", np.nan); fpe = q.get("forward_pe", np.nan); roe = q.get("roe", np.nan)
-    if not pd.isna(rev_g) and not pd.isna(earn_g) and rev_g > 8 and earn_g > 12:
-        primary = "Růst za rozumnou cenu" if (pd.isna(fpe) or fpe < 30) else "Vysoký růst / dražší příběh"
-        why = "Růst tržeb i zisku je výrazný; otázkou je, zda tempo růstu odpovídá očekáváním obsaženým v ocenění."
-    elif not pd.isna(roe) and roe > 15 and not pd.isna(rev_g) and rev_g > 3 and (pd.isna(pe) or pe < 30):
-        primary = "Kvalita za rozumnou cenu"
-        why = "Rentabilita, růst a ocenění vytvářejí předpoklad kvalitního podnikání za relativně umírněnou cenu."
-    elif not pd.isna(earn_g) and earn_g > 10 and not pd.isna(rev_g) and rev_g > -2:
-        primary = "Provozní zlepšení"
-        why = "Zisk se zlepšuje rychleji než tržby, což může odpovídat provoznímu zlepšení nebo normalizaci marží."
-    elif not pd.isna(pe) and pe > 0 and pe < 12 and (pd.isna(rev_g) or rev_g < 5):
-        primary = "Value / levná firma"
-        why = "Nízké ocenění spolu s omezeným růstem vytváří hodnotový příběh, ale je třeba vyloučit value trap."
-    else:
-        primary = "Nejasný / smíšený příběh"
-        why = "Dostupná data zatím neposkytují dostatečně silnou kombinaci trendů pro jednoznačné zařazení."
-    return primary, why
+def analyst_story_hypothesis(q, annual, quarterly, news, sec):
+    # Only shared story names are used. This is a hypothesis from the Analyst's own data, not Screener output.
+    rev=q.get("revenue_growth",np.nan); earn=q.get("earnings_growth",np.nan); pe=q.get("pe",np.nan); fpe=q.get("forward_pe",np.nan); roe=q.get("roe",np.nan)
+    primary="Nejasný / smíšený příběh"; why="Dostupné údaje zatím neukazují jednu dominantní ekonomickou změnu."
+    if not pd.isna(rev) and not pd.isna(earn) and rev>8 and earn>12:
+        primary="Růst za rozumnou cenu" if pd.isna(fpe) or fpe<30 else "Vysoký růst / dražší příběh"
+        why="Růst tržeb i zisku je výrazný; hlavní otázkou je, zda tempo růstu dokáže ospravedlnit očekávání v ceně."
+    elif not pd.isna(roe) and roe>15 and not pd.isna(rev) and rev>3:
+        primary="Kvalita za rozumnou cenu" if pd.isna(pe) or pe<30 else "Kvalitní růst"
+        why="Rentabilita a růst naznačují kvalitní ekonomiku; valuace rozhoduje o tom, kolik této kvality je již započteno."
+    elif not pd.isna(earn) and earn>10 and not pd.isna(rev) and rev>-2:
+        primary="Provozní zlepšení"
+        why="Zisk se zlepšuje rychleji než tržby, což může odpovídat zlepšení marží nebo normalizaci nákladů."
+    elif not pd.isna(pe) and 0<pe<12:
+        primary="Value / levná firma"
+        why="Ocenění je nízké; je ale nutné ověřit, zda nejde o strukturálně slabý podnik."
+    return primary,why
 
 
 def analyst_render(ticker_input):
     st.title("🔎 Analytik")
-    st.caption("Nezávislá analýza firmy · Analytik nevidí výsledky Screeneru ani důvod, proč byl titul vybrán.")
+    st.caption("Nezávislé výzkumné jádro · Analytik nevidí Screener ani důvod, proč byl titul vybrán.")
 
-    c1, c2 = st.columns([3, 1])
+    c1,c2=st.columns([3,1])
     with c1:
-        ticker_input = st.text_input("Ticker", value=ticker_input, placeholder="např. SHL, GOOGL, ONC, AT1.DE")
+        ticker_input=st.text_input("Ticker",value=ticker_input,placeholder="např. SHL, GOOGL, ONC, AT1.DE")
     with c2:
-        exchange = st.selectbox("Trh", ["NASDAQ", "NYSE", "XETRA"], index=2 if str(ticker_input).upper().endswith(".DE") else 0)
-    analyse = st.button("🔬 Analyzovat firmu", type="primary")
+        default_ex=2 if str(ticker_input).upper().endswith(".DE") else 0
+        exchange=st.selectbox("Trh",["NASDAQ","NYSE","XETRA"],index=default_ex)
+    analyse=st.button("🔬 Spustit analytické jádro",type="primary")
     if not analyse:
-        st.info("Zadej ticker a spusť analýzu. Analytik pracuje nezávisle na Screeneru.")
+        st.info("Zadej ticker. Pro první test doporučuji například SHL na XETRA, protože na něm dobře uvidíme, zda Analytik dokáže oddělit skutečné firemní změny od šumu.")
         return
 
-    ticker = clean_text(ticker_input).upper()
+    ticker=clean_text(ticker_input).upper()
     if not ticker:
         st.warning("Zadej ticker.")
         return
-    yahoo_ticker = analyst_yahoo_ticker(ticker, exchange)
-    status = st.empty()
-    status.info("1/5 Ověřuji společnost a načítám veřejná data…")
-    q = analyst_get_quote_data(yahoo_ticker)
-    company = q.get("name") or ticker
+    yahoo_ticker=analyst_yahoo_ticker(ticker,exchange)
+    status=st.empty()
+    status.info("1/5 Ověřuji identitu firmy a načítám veřejná data…")
+    q=analyst_get_quote_data(yahoo_ticker)
+    company=q.get("name") or ""
     if not company:
-        st.error(f"Společnost {yahoo_ticker} se nepodařilo identifikovat.")
+        st.error(f"Ticker {ticker} se nepodařilo jednoznačně načíst přes Yahoo Finance ({yahoo_ticker}).")
         return
 
-    status.info("2/5 Zpracovávám pětiletý vývoj a poslední čtvrtletí…")
-    annual = analyst_get_financial_history(yahoo_ticker)
-    quarterly = analyst_get_quarterly_history(yahoo_ticker)
-    price = analyst_price_history(yahoo_ticker)
-    sec = analyst_sec_filings(ticker) if exchange in ("NASDAQ", "NYSE") else pd.DataFrame()
+    status.info("2/5 Sestavuji dlouhodobý finanční trend, poslední kvartály a cenový kontext…")
+    annual=analyst_get_financial_history(yahoo_ticker)
+    quarterly=analyst_get_quarterly_history(yahoo_ticker)
+    price=analyst_price_history(yahoo_ticker)
+    sec=analyst_sec_filings(ticker) if exchange in ("NASDAQ","NYSE") else pd.DataFrame()
 
-    status.info("3/5 Prověřuji aktuální dění a odfiltruji nesouvisející zprávy…")
-    news = analyst_google_news(company, ticker, q.get("ir_website") or q.get("website"))
-    current = analyst_current_developments(company, q, annual, quarterly, news, sec)
-    status.info("4/5 Skládám nezávislý analytický pohled…")
-    primary, story_reason = analyst_story_hypothesis(q, annual, news, sec)
-    price_comment = analyst_price_commentary(price)
-    status.success("5/5 Analýza připravena.")
+    status.info("3/5 Hledám firemně relevantní aktuální události a filtruji kolize tickeru…")
+    news=analyst_google_news(company,ticker,q.get("ir_website") or q.get("website"))
+
+    status.info("4/5 Propojuji události s ekonomikou firmy…")
+    current=analyst_current_developments(company,q,annual,quarterly,news,sec)
+    primary,story_reason=analyst_story_hypothesis(q,annual,quarterly,news,sec)
+    price_comment=analyst_price_commentary(price)
+    status.success("5/5 Analytické jádro dokončeno.")
 
     st.markdown(f"## {company}")
-    st.caption(f"Ticker **{ticker}** · Yahoo **{yahoo_ticker}** · {exchange} · data načtena {datetime.now().strftime('%d.%m.%Y %H:%M')}")
+    st.caption(f"Ticker **{ticker}** · Yahoo **{yahoo_ticker}** · {exchange} · načteno {datetime.now().strftime('%d.%m.%Y %H:%M')}")
 
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Cena", f"{analyst_human_number(q.get('price'), 2)} {q.get('currency','')}")
-    m2.metric("Tržní kapitalizace", analyst_human_number(q.get("market_cap")))
-    m3.metric("P/E", analyst_human_number(q.get("pe"), 1))
-    m4.metric("ROE", "—" if pd.isna(safe_float(q.get("roe"))) else f"{safe_float(q.get('roe'))*100:.1f} %".replace(".", ","))
+    m1,m2,m3,m4=st.columns(4)
+    price_txt=analyst_human_number(q.get("price"),2)
+    m1.metric("Cena",f"{price_txt} {q.get('currency','')}")
+    m2.metric("Tržní kapitalizace",analyst_human_number(q.get("market_cap")))
+    m3.metric("P/E",analyst_human_number(q.get("pe"),1))
+    roe=safe_float(q.get("roe"))
+    m4.metric("ROE","—" if pd.isna(roe) else f"{roe*100:.1f} %".replace(".",","))
 
-    with st.expander("🏢 1. Základní profil a obchodní model", expanded=True):
+    with st.expander("🏢 1. Základní profil a obchodní model",expanded=True):
         if q.get("sector") or q.get("industry"):
             st.write(f"**Sektor:** {q.get('sector') or '—'} · **Odvětví:** {q.get('industry') or '—'}")
+        if q.get("country"):
+            st.write(f"**Sídlo / země:** {q.get('country')}")
         if q.get("summary"):
             st.write(q["summary"])
 
-    # Deliberately only chapter headings for the unfinished analytical layers.
-    with st.expander("🛡️ 2. Konkurenční prostředí a MOAT", expanded=False):
-        st.caption("Kapitola připravena pro cílenou analýzu konkurenční výhody. V této verzi zatím bez automatického hodnocení.")
-
-    with st.expander("📊 3. Finanční profil / finanční vývoj", expanded=True):
-        st.write(analyst_trend_interpretation(annual, quarterly))
-        if not annual.empty:
-            st.markdown("**Pětiletý vývoj – celé účetní roky**")
-            display = annual.copy()
-            for c in display.columns[1:]:
-                if c.endswith("%"):
-                    display[c] = pd.to_numeric(display[c], errors="coerce").map(lambda x: "—" if pd.isna(x) else f"{x:.1f} %".replace(".", ","))
+    with st.expander("🧠 Jádro testu – co se ve firmě mění",expanded=True):
+        st.markdown(current)
+        if news is not None and not news.empty:
+            st.markdown("**Podklady, ze kterých byly změny odvozeny:**")
+            for _,n in news.head(8).iterrows():
+                date=clean_text(n.get("Datum")); source=clean_text(n.get("Zdroj"))
+                meta=" · ".join(x for x in [date,source] if x)
+                link=clean_text(n.get("Odkaz"))
+                if link:
+                    st.markdown(f"- [{n.get('Název')}]({link})" + (f" · {meta}" if meta else ""))
                 else:
-                    display[c] = pd.to_numeric(display[c], errors="coerce").map(analyst_human_number)
-            st.dataframe(display, use_container_width=True, hide_index=True)
-        if not quarterly.empty:
-            st.markdown("**Posledních 8 čtvrtletí**")
-            qdisplay = quarterly.copy()
-            for c in qdisplay.columns[1:]:
-                if c.endswith("%"):
-                    qdisplay[c] = pd.to_numeric(qdisplay[c], errors="coerce").map(lambda x: "—" if pd.isna(x) else f"{x:.1f} %".replace(".", ","))
-                else:
-                    qdisplay[c] = pd.to_numeric(qdisplay[c], errors="coerce").map(analyst_human_number)
-            st.dataframe(qdisplay, use_container_width=True, hide_index=True)
-            ttm = analyst_ttm_from_quarters(quarterly)
-            if not ttm.empty:
-                st.markdown("**TTM – posledních 12 měsíců**")
-                tdisplay = ttm.copy()
-                for c in tdisplay.columns[1:]:
-                    if c.endswith("%"):
-                        tdisplay[c] = pd.to_numeric(tdisplay[c], errors="coerce").map(lambda x: "—" if pd.isna(x) else f"{x:.1f} %".replace(".", ","))
-                    else:
-                        tdisplay[c] = pd.to_numeric(tdisplay[c], errors="coerce").map(analyst_human_number)
-                st.dataframe(tdisplay, use_container_width=True, hide_index=True)
-                st.caption("TTM = poslední čtyři dostupná čtvrtletí. Díky tomu Analytik nemusí čekat na konec účetního roku a může zachytit aktuální vývoj.")
-
-    with st.expander("💰 4. Valuace", expanded=True):
-        vals = {"P/E": q.get("pe"), "Forward P/E": q.get("forward_pe"), "P/S": q.get("ps"), "P/B": q.get("pb")}
-        st.write(" · ".join(f"**{k}:** {analyst_human_number(v)}" for k, v in vals.items() if not pd.isna(safe_float(v))) or "Valuační data nejsou dostupná.")
-        st.caption("Valuace zde není přepočítávána na odhad férové ceny. Cílem je ukázat očekávání obsažená v ocenění.")
-
-    with st.expander("🌍 5. Perspektiva odvětví", expanded=False):
-        st.caption("Kapitola připravena pro cílenou analýzu odvětví a jeho dopadu na konkrétní ekonomiku firmy. V této verzi zatím bez automatického hodnocení.")
-
-    with st.expander("👔 6. Management a jeho důvěryhodnost", expanded=False):
-        st.caption("Kapitola připravena pro samostatné sledování zkušenosti vedení, guidance, konzistence slov a činů a změn ve způsobu komunikace. V této verzi zatím bez automatického hodnocení.")
-
-    with st.expander("🔥 7. Aktuální problematika a klíčové katalyzátory", expanded=True):
-        st.write(current)
-        if not news.empty:
-            st.markdown("**Použité konkrétní veřejné podklady:**")
-            for _, n in news.head(8).iterrows():
-                src = f" · {n['Zdroj']}" if n.get("Zdroj") else ""
-                st.markdown(f"- {n['Název']}{src}")
+                    st.markdown(f"- {n.get('Název')}" + (f" · {meta}" if meta else ""))
         else:
-            st.caption("Nebyly nalezeny dostatečně relevantní veřejné zprávy.")
+            st.warning("Nebyly nalezeny dostatečně relevantní firemní zprávy. To je v testu validní výsledek – Analytik nemá doplňovat domněnky.")
 
-    with st.expander("🧭 Cenový kontext", expanded=True):
+    with st.expander("📊 2. Finanční vývoj – trend, ne snapshot",expanded=True):
+        st.write(analyst_financial_summary(annual,quarterly))
+        if not annual.empty:
+            st.markdown("**Celé účetní roky dostupné přes Yahoo Finance**")
+            d=annual.copy()
+            for c in d.columns[1:]:
+                d[c]=d[c].map(lambda x: "—" if pd.isna(safe_float(x)) else (f"{safe_float(x):.1f} %".replace(".",",") if c.endswith("%") else analyst_human_number(x)))
+            st.dataframe(d,use_container_width=True,hide_index=True)
+        if not quarterly.empty:
+            st.markdown("**Posledních dostupných 8 čtvrtletí**")
+            d=quarterly.copy()
+            for c in d.columns[1:]:
+                d[c]=d[c].map(lambda x: "—" if pd.isna(safe_float(x)) else (f"{safe_float(x):.1f} %".replace(".",",") if c.endswith("%") else analyst_human_number(x)))
+            st.dataframe(d,use_container_width=True,hide_index=True)
+            ttm=analyst_ttm_from_quarters(quarterly)
+            if not ttm.empty:
+                st.markdown("**TTM – poslední čtyři dostupná čtvrtletí**")
+                d=ttm.copy()
+                for c in d.columns[1:]:
+                    d[c]=d[c].map(lambda x: "—" if pd.isna(safe_float(x)) else (f"{safe_float(x):.1f} %".replace(".",",") if c.endswith("%") else analyst_human_number(x)))
+                st.dataframe(d,use_container_width=True,hide_index=True)
+
+    with st.expander("💰 3. Valuace – jaká očekávání jsou v ceně",expanded=False):
+        vals=[]
+        for k,v in [("P/E",q.get("pe")),("Forward P/E",q.get("forward_pe")),("P/S",q.get("ps")),("P/B",q.get("pb"))]:
+            if not pd.isna(safe_float(v)): vals.append(f"**{k}:** {analyst_human_number(v,1)}")
+        st.write(" · ".join(vals) if vals else "Valuační data nejsou dostupná.")
+        st.caption("Cílem není vyrábět falešně přesnou férovou cenu, ale zjistit, jaké očekávání může být v ocenění obsaženo.")
+
+    with st.expander("🛡️ 4. Konkurenční prostředí a MOAT",expanded=False):
+        st.caption("Tato část bude doplněna až po ověření, že výzkumné jádro správně identifikuje firmu a její skutečné aktuální změny.")
+    with st.expander("🌍 5. Perspektiva odvětví",expanded=False):
+        st.caption("Zatím záměrně bez automatického výkladu. Nechceme přidávat obecné sektorové fráze dříve, než funguje jádro.")
+    with st.expander("👔 6. Management a jeho důvěryhodnost",expanded=False):
+        st.caption("Další fáze bude sledovat sliby vedení versus realitu, změny guidance, kapitálovou alokaci a změny komunikace v čase.")
+
+    with st.expander("🧩 7. Investiční příběh – pracovní hypotéza",expanded=True):
+        st.markdown(f"### {primary}")
+        st.write(story_reason)
+        st.caption("Je to nezávislá hypotéza Analytika. Nejde o výsledek Screeneru ani o investiční doporučení.")
+
+    with st.expander("🧭 8. Cenový kontext",expanded=True):
         st.write(price_comment)
 
-    with st.expander("🧩 8. Investiční příběh", expanded=False):
-        st.caption("Kapitola připravena pro nezávislé určení investičního příběhu. V této verzi pouze pracovní hypotéza z dostupných kvantitativních údajů.")
+    with st.expander("🎯 9. Co má smysl dále ověřit",expanded=True):
+        st.markdown("- Je hlavní změna **strukturální, cyklická, nebo pouze dočasná**?")
+        st.markdown("- Promítá se už do **tržeb, marží a cash flow**, nebo zatím jen do očekávání?")
+        st.markdown("- Jak na změnu reaguje **management** a odpovídají jeho kroky komunikaci?")
+        st.markdown("- Co by v dalších výsledcích **potvrdilo** hlavní hypotézu a co by ji **vyvrátilo**?")
 
-    with st.expander("🎯 9. Závěr analytika", expanded=False):
-        st.caption("Kapitola připravena pro závěrečnou syntézu: co se ve firmě skutečně děje, co příběh potvrzuje či zpochybňuje a co má investor dále sledovat.")
-
-    with st.expander("📚 Použité veřejné zdroje", expanded=False):
-        st.write(f"**Yahoo Finance:** {yahoo_ticker}")
-        if exchange in ("NASDAQ", "NYSE"):
-            st.write("**SEC EDGAR:** veřejná podání společnosti, pokud bylo možné ticker jednoznačně přiřadit.")
-        st.write("**Google News RSS:** pouze jako vstup pro vyhledání a ověření konkrétních událostí; nesouvisející výsledky jsou filtrovány.")
-        st.caption("Pokud veřejné zdroje neposkytují dostatek podkladů, Analytik to přizná místo doplňování domněnek.")
+    with st.expander("📚 Zdroje a diagnostika",expanded=False):
+        st.write(f"Yahoo Finance: {yahoo_ticker}")
+        st.write(f"Relevantních zpráv po filtrování identity: {len(news) if news is not None else 0}")
+        if exchange in ("NASDAQ","NYSE"):
+            st.write(f"SEC poslední podání načtena: {len(sec) if sec is not None else 0}")
+        st.caption("Analytik používá pouze veřejně dostupné zdroje. Pokud důkaz chybí, výstup jej nemá nahrazovat domněnkou.")
 
 
 # Page navigation. Analytik is deliberately isolated from the Screener execution path.
