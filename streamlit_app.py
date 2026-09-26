@@ -1644,6 +1644,87 @@ def analyst_yahoo_ticker(ticker, exchange):
     return ticker + ".DE"
 
 
+@st.cache_data(ttl=1800, show_spinner=False)
+def analyst_yahoo_search_candidates(query, exchange):
+    """Return identity candidates from Yahoo search without trusting ticker alone."""
+    query = clean_text(query)
+    if not query:
+        return []
+    try:
+        url = "https://query1.finance.yahoo.com/v1/finance/search"
+        r = requests.get(
+            url,
+            params={"q": query, "quotesCount": 20, "newsCount": 0},
+            timeout=12,
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        r.raise_for_status()
+        data = r.json() or {}
+    except Exception:
+        return []
+
+    out = []
+    seen = set()
+    for item in data.get("quotes", []):
+        sym = clean_text(item.get("symbol")).upper()
+        qt = clean_text(item.get("quoteType")).upper()
+        name = clean_text(item.get("longname") or item.get("shortname"))
+        exch = clean_text(item.get("exchange"))
+        if not sym or not name or qt not in ("EQUITY", "STOCK"):
+            continue
+        # The Analyst currently works with the three supported exchange universes.
+        if exchange == "XETRA" and not sym.endswith(".DE"):
+            continue
+        if exchange in ("NASDAQ", "NYSE") and sym.endswith(".DE"):
+            continue
+        key = (sym, name.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"symbol": sym, "name": name, "exchange": exch, "quoteType": qt})
+    return out[:10]
+
+
+def analyst_resolve_identity(ticker, exchange):
+    """Resolve a user ticker to one or more explicit company identities."""
+    ticker = clean_text(ticker).upper()
+    base = ticker[:-3] if ticker.endswith(".DE") else ticker
+    queries = [ticker]
+    if base != ticker:
+        queries.append(base)
+    else:
+        queries.append(f"{base}.DE" if exchange == "XETRA" else base)
+
+    candidates = []
+    seen = set()
+    for q in queries:
+        for item in analyst_yahoo_search_candidates(q, exchange):
+            key = item["symbol"]
+            if key not in seen:
+                seen.add(key)
+                candidates.append(item)
+
+    # Prefer an exact symbol match. For XETRA, prefer the .DE listing.
+    def rank(x):
+        sym = x["symbol"]
+        exact = 0 if sym == ticker else 1
+        de = 0 if exchange == "XETRA" and sym == f"{base}.DE" else 1
+        return (exact, de, sym)
+    candidates.sort(key=rank)
+
+    # If Yahoo search produced nothing, retain the deterministic ticker as a
+    # fallback; the subsequent quote lookup still validates the identity.
+    if not candidates:
+        return {"status": "unresolved", "candidates": [], "input": ticker}
+
+    # Exact single candidate is safe enough to continue automatically.
+    if len(candidates) == 1:
+        return {"status": "resolved", "candidates": candidates, "selected": candidates[0], "input": ticker}
+
+    # Multiple candidates: let the user explicitly choose instead of guessing.
+    return {"status": "ambiguous", "candidates": candidates, "input": ticker}
+
+
 def analyst_human_number(x, decimals=1):
     x = safe_float(x)
     if pd.isna(x):
@@ -2088,23 +2169,56 @@ def analyst_render(ticker_input):
     with c2:
         default_ex=2 if str(ticker_input).upper().endswith(".DE") else 0
         exchange=st.selectbox("Trh",["NASDAQ","NYSE","XETRA"],index=default_ex)
+
     analyse=st.button("🔬 Spustit analytické jádro",type="primary")
-    if not analyse:
-        st.info("Zadej ticker. Pro první test doporučuji například SHL na XETRA, protože na něm dobře uvidíme, zda Analytik dokáže oddělit skutečné firemní změny od šumu.")
+    if analyse:
+        ticker=clean_text(ticker_input).upper()
+        if not ticker:
+            st.warning("Zadej ticker.")
+            return
+        st.session_state.pop("analyst_selected_identity",None)
+        st.session_state["analyst_resolution"] = analyst_resolve_identity(ticker,exchange)
+
+    resolution=st.session_state.get("analyst_resolution")
+    selected=st.session_state.get("analyst_selected_identity")
+
+    # Identity step: do not guess when Yahoo returns several plausible companies.
+    if resolution and not selected:
+        candidates=resolution.get("candidates",[])
+        if resolution.get("status")=="ambiguous" and candidates:
+            st.info("Ticker není jednoznačný. Vyber společnost, kterou chceš analyzovat:")
+            labels=[]
+            for x in candidates:
+                suffix=f" · {x['exchange']}" if x.get('exchange') else ""
+                labels.append(f"{x['name']} — {x['symbol']}{suffix}")
+            choice=st.radio("Nalezené společnosti",labels,index=0)
+            if st.button("➡️ Pokračovat s vybranou společností",type="primary"):
+                idx=labels.index(choice)
+                st.session_state["analyst_selected_identity"]=candidates[idx]
+                st.rerun()
+            return
+        if resolution.get("status")=="unresolved":
+            st.error(f"Ticker {resolution.get('input','')} se nepodařilo spolehlivě identifikovat pro trh {exchange}.")
+            st.caption("Zkus ticker přesně podle vybraného trhu; pokud existuje více tříd akcií, Analytik je v další verzi nabídne k výběru.")
+            return
+        if resolution.get("status")=="resolved":
+            selected=resolution.get("selected")
+            st.session_state["analyst_selected_identity"]=selected
+
+    if not selected:
+        st.info("Zadej ticker. Pro první test doporučuji SHL na XETRA – právě zde ověříme rozlišení Siemens Healthineers od jiných titulů se stejným tickerem.")
         return
 
     ticker=clean_text(ticker_input).upper()
-    if not ticker:
-        st.warning("Zadej ticker.")
-        return
-    yahoo_ticker=analyst_yahoo_ticker(ticker,exchange)
+    yahoo_ticker=selected.get("symbol") or analyst_yahoo_ticker(ticker,exchange)
     status=st.empty()
-    status.info("1/5 Ověřuji identitu firmy a načítám veřejná data…")
+    status.info(f"1/5 Ověřuji identitu firmy: {selected.get('name','')} ({yahoo_ticker})…")
     q=analyst_get_quote_data(yahoo_ticker)
-    company=q.get("name") or ""
+    company=q.get("name") or selected.get("name") or ""
     if not company:
-        st.error(f"Ticker {ticker} se nepodařilo jednoznačně načíst přes Yahoo Finance ({yahoo_ticker}).")
+        st.error(f"Identita {selected.get('name', ticker)} se nepodařila načíst přes Yahoo Finance ({yahoo_ticker}).")
         return
+    st.success(f"Analyzuji: **{company}** · {yahoo_ticker} · {exchange}")
 
     status.info("2/5 Sestavuji dlouhodobý finanční trend, poslední kvartály a cenový kontext…")
     annual=analyst_get_financial_history(yahoo_ticker)
