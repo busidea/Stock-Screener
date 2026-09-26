@@ -2064,10 +2064,18 @@ def _analyst_story_options():
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def analyst_ai_synthesis(company, ticker, exchange, q, annual, quarterly, news, sec):
+    """AI synthesis for the independent Analyst module.
+
+    Important design rule: the Analyst receives company evidence only. It does
+    not receive Screener scores, candidate status, or the reason the ticker was
+    selected by the Screener.
+    """
     try:
         from g4f.client import Client
+        import g4f.Provider as Provider
     except Exception as e:
-        return {"ok":False,"error":f"G4F není dostupné: {e}","text":""}
+        return {"ok":False,"error":f"G4F není dostupné: {e}","text":"","model":""}
+
     profile=(
         f"Firma: {company}\nTicker: {ticker}\nBurza: {exchange}\n"
         f"Sektor: {clean_text(q.get('sector'))}\nOdvětví: {clean_text(q.get('industry'))}\n"
@@ -2081,12 +2089,15 @@ def analyst_ai_synthesis(company, ticker, exchange, q, annual, quarterly, news, 
     news_txt=_analyst_news_context(news,18)
     sec_txt=_analyst_sec_context(sec,10)
     stories="; ".join(_analyst_story_options())
+
     system=(
-        "Jsi zkušený akciový analytik. Pracuješ jako nezávislý analytik společnosti, nikoli jako screener. "
-        "Tvým úkolem není doporučit nákup/prodej a není tvým úkolem pouze shrnout články. "
-        "Musíš z dostupných podkladů sám identifikovat nejdůležitější probíhající změny ve firmě a propojit je s ekonomikou podniku. "
-        "Buď konkrétní, kritický a transparentní. Pokud jsou důkazy slabé nebo si odporují, řekni to. "
-        "Nikdy nevymýšlej skutečnosti, které nejsou v podkladech."
+        "Jsi zkušený akciový analytik a pracuješ jako nezávislý analytik jedné konkrétní společnosti. "
+        "Nejsi screener a nevíš, proč byl tento titul vybrán. Tvým úkolem není doporučit nákup ani prodej "
+        "a není tvým úkolem pouze shrnout články. Musíš sám z dostupných podkladů zjistit, co se ve firmě "
+        "v poslední době skutečně mění a které změny jsou ekonomicky nejvýznamnější. "
+        "Propojuj více zdrojů, výsledky a finanční trend. Rozliš jednorázovou událost od trendu. "
+        "Rozliš strukturální, cyklické a dočasné změny. Pokud si zdroje odporují, ukaž rozpor. "
+        "Buď konkrétní a kritický. Pokud důkaz nestačí, řekni to. Nic nevymýšlej."
     )
     user=(
         f"Analyzuj společnost {company} ({ticker}) podle následujících veřejných podkladů.\n\n"
@@ -2094,39 +2105,65 @@ def analyst_ai_synthesis(company, ticker, exchange, q, annual, quarterly, news, 
         f"AKTUÁLNÍ FIREMNĚ RELEVANTNÍ ZPRÁVY A JEJICH KONTEXT:\n{news_txt}\n\n"
         f"SEC PODÁNÍ (pokud jsou k dispozici):\n{sec_txt}\n\n"
         f"POVOLENÉ NÁZVY INVESTIČNÍCH PŘÍBĚHŮ:\n{stories}\n\n"
-        "ÚKOL:\n"
-        "1. Neudělej seznam článků. Z dostupných informací sám identifikuj 3 až 4 nejdůležitější změny nebo probíhající témata, která mohou měnit ekonomiku firmy nebo její investiční příběh.\n"
-        "2. U každého tématu vysvětli: CO SE MĚNÍ → PROČ → EKONOMICKÝ DOPAD → zda jde spíše o strukturální, cyklickou nebo dočasnou změnu → CO BY TOTO TÉMA POTVRDILO NEBO VYVRÁTILO.\n"
-        "3. Témata seřaď podle významu. U prvního tématu výslovně vysvětli, proč je důležitější než druhé.\n"
-        "4. Propoj více zdrojů a finanční vývoj. Pokud si média a finanční data odporují, upozorni na rozpor.\n"
-        "5. Odděl skutečnou změnu v ekonomice firmy od pouhého pohybu ceny akcie nebo jednorázové zprávy.\n"
-        "6. Na konci urč jednu PRACOVNÍ interpretaci investičního příběhu z povolených názvů. Vyber ji podle dostupných důkazů, nikoli podle jednoduchého P/E či růstu.\n"
-        "7. Uveď 2 až 4 nejdůležitější věci, které má investor v dalších výsledcích / měsících sledovat.\n"
-        "8. Nepiš prázdné fráze. Každý závěr musí mít konkrétní vazbu na podklad.\n\n"
-        "VÝSTUP V ČEŠTINĚ:\n"
+        "HLAVNÍ ÚKOL:\n"
+        "Prostuduj podklady jako celek a vytvoř vlastní pracovní interpretaci toho, co se ve firmě právě odehrává. "
+        "Nechci seznam článků ani seznam kategorií. Chci syntézu.\n\n"
+        "1. Identifikuj 3 až 4 nejdůležitější PROBÍHAJÍCÍ ZMĚNY nebo TÉMATA, která mohou měnit ekonomiku firmy "
+        "nebo její investiční příběh. Pokud jsou pouze 2 opravdu významná témata, raději uveď 2 než uměle vytvářej 4.\n"
+        "2. U každého tématu vysvětli řetězec: CO SE MĚNÍ → PROČ SE TO DĚJE → JAKÝ JE EKONOMICKÝ DOPAD → "
+        "zda je změna strukturální, cyklická nebo dočasná → CO JI POTVRDÍ NEBO VYVRÁTÍ.\n"
+        "3. Témata seřaď podle významu. U prvního tématu výslovně napiš, proč je podle dostupných důkazů významnější než druhé. "
+        "Nejde o přesné skóre, ale o analytickou prioritu.\n"
+        "4. Propoj informace z více zdrojů. Pokud například článek tvrdí něco, co neodpovídá výsledkům nebo guidance, upozorni na to.\n"
+        "5. Odděl skutečnou změnu v ekonomice firmy od pohybu akcie, jednorázové zprávy, běžné PR komunikace nebo obecného trendu sektoru.\n"
+        "6. Z finančních tabulek používej hlavně trend: změnu růstu, marží, zisku, cash flow, zadlužení a rozdíl mezi posledním TTM a minulostí. "
+        "Nehodnoť firmu jen podle jediného ukazatele.\n"
+        "7. Na konci urč jednu PRACOVNÍ interpretaci investičního příběhu z povolených názvů. Vyber ji podle celkové ekonomiky příběhu, nikoli podle jednoduchého P/E nebo růstu.\n"
+        "8. Uveď protiargument: co je na této interpretaci nejslabší nebo co může znamenat, že se mýlíme.\n"
+        "9. Uveď 2 až 4 konkrétní věci, které má investor sledovat v dalších výsledcích / měsících.\n"
+        "10. Nepiš prázdné fráze typu 'společnost čelí výzvám' bez vysvětlení jakým a s jakým ekonomickým dopadem. Každý důležitý závěr musí být opřen o konkrétní podklad.\n\n"
+        "VÝSTUP V ČEŠTINĚ. Použij přesně tuto strukturu:\n"
         "## Co se ve firmě právě mění\n"
-        "### 1. [výstižný název tématu]\n**Co se mění:** ...\n**Proč:** ...\n**Ekonomický dopad:** ...\n**Charakter změny:** ...\n**Proč je to důležité:** ...\n**Co potvrdí / vyvrátí:** ...\n**Podklady:** ...\n\n"
+        "### 1. [výstižný název tématu]\n"
+        "**Co se mění:** ...\n**Proč:** ...\n**Ekonomický dopad:** ...\n"
+        "**Charakter změny:** ...\n**Proč je to důležité:** ...\n**Co potvrdí / vyvrátí:** ...\n"
+        "**Podklady:** uveď konkrétní zdroje nebo výsledky, o které se tvrzení opírá.\n\n"
         "### 2. ...\n### 3. ...\n### 4. ...\n\n"
-        "## Pracovní investiční příběh\n**[jeden přesný název z povolených názvů]**\nVysvětlení: ...\n**Protiargument:** ...\n\n"
+        "### Proč je první téma důležitější než druhé\n...\n\n"
+        "## Pracovní investiční příběh\n"
+        "**[jeden přesný název z povolených názvů]**\nVysvětlení: ...\n"
+        "**Protiargument:** ...\n\n"
         "## Co bych teď sledoval\n- ...\n- ...\n- ...\n"
     )
+
+    # Do not use G4F's generic RetryProvider here: on Streamlit Cloud it can
+    # spend a long time trying paid/authenticated/browser providers and then
+    # return a misleading wall of provider errors. Prefer explicitly selected
+    # free/public routes first, then a small controlled fallback list.
+    attempts=[
+        ("Pollinations", Provider.Pollinations, "gpt-4.1-nano"),
+        ("Pollinations", Provider.Pollinations, "deepseek-r1"),
+        ("default", None, "gpt-4.1-nano"),
+    ]
     last_err=""
-    for model in ["gpt-4o-mini","gpt-4.1","gpt-4o"]:
+    for label, provider, model in attempts:
         try:
-            client=Client()
+            client=Client(provider=provider) if provider is not None else Client()
             resp=client.chat.completions.create(
                 model=model,
                 messages=[{"role":"system","content":system},{"role":"user","content":user}],
                 web_search=False,
+                stream=False,
             )
             msg=getattr(getattr(resp,"choices",[None])[0],"message",None)
             text=getattr(msg,"content","") if msg is not None else ""
             text=clean_text(text)
-            if len(text)>500: return {"ok":True,"error":"","text":text,"model":model}
-            last_err=f"Model {model} vrátil příliš krátkou odpověď."
+            if len(text)>700 and "## Co se ve firmě právě mění" in text:
+                return {"ok":True,"error":"","text":text,"model":f"{label}/{model}"}
+            last_err=f"{label}/{model}: model vrátil neúplnou odpověď."
         except Exception as e:
-            last_err=f"{model}: {e}"
-    return {"ok":False,"error":last_err or "AI syntéza selhala.","text":""}
+            last_err=f"{label}/{model}: {type(e).__name__}: {e}"
+    return {"ok":False,"error":last_err or "AI syntéza selhala.","text":"","model":""}
 
 
 def analyst_current_developments(company, q, annual, quarterly, news, sec, ticker="", exchange=""):
