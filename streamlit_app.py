@@ -2022,518 +2022,475 @@ def _analyst_event_direction(text):
     return "pozitivní" if p>n else "negativní" if n>p else "smíšený / nejasný"
 
 
-def _analyst_compact_financial_context(annual, quarterly):
-    chunks=[]
+def _analyst_source_item(source_type, source, date, claim, period="", url="", extra=""):
+    return {
+        "type": clean_text(source_type),
+        "source": clean_text(source),
+        "date": clean_text(date),
+        "claim": clean_text(claim),
+        "period": clean_text(period),
+        "url": clean_text(url),
+        "extra": clean_text(extra),
+    }
+
+
+def _analyst_add_profile_evidence(pack, q):
+    for label, key in [
+        ("Sektor", "sector"), ("Odvětví", "industry"),
+        ("Země", "country"), ("Měna", "currency"),
+        ("Typ instrumentu", "quote_type")
+    ]:
+        value = clean_text(q.get(key))
+        if value:
+            pack.append(_analyst_source_item(
+                "profile", "Yahoo Finance", "aktuální data",
+                f"{label}: {value}"
+            ))
+
+    vals = []
+    for key, label in [
+        ("pe", "P/E"), ("forward_pe", "Forward P/E"),
+        ("ps", "P/S"), ("pb", "P/B"), ("roe", "ROE"),
+        ("revenue_growth", "Revenue Growth"),
+        ("earnings_growth", "Earnings Growth"),
+        ("free_cash_flow", "Free Cash Flow"),
+        ("debt_to_equity", "Debt/Equity")
+    ]:
+        v = safe_float(q.get(key))
+        if pd.isna(v):
+            continue
+        if key in ("roe", "revenue_growth", "earnings_growth"):
+            v = v * 100 if abs(v) <= 3 else v
+            txt = f"{v:.2f} %"
+        else:
+            txt = analyst_human_number(v, 2)
+        vals.append(f"{label}: {txt}")
+    if vals:
+        pack.append(_analyst_source_item(
+            "market_data", "Yahoo Finance", "aktuální data", "; ".join(vals)
+        ))
+
+
+def _analyst_add_financial_evidence(pack, annual, quarterly):
+    def add_rows(df, extra):
+        if df is None or df.empty:
+            return
+        for _, row in df.iterrows():
+            period = clean_text(row.get("Období"))
+            vals = []
+            for col, label in [
+                ("Revenue", "Tržby"), ("Net Income", "Čistý zisk"),
+                ("Operating Income", "Provozní zisk"),
+                ("Operating Cash Flow", "Provozní cash flow"),
+                ("FCF", "FCF"), ("Debt", "Dluh"),
+                ("Equity", "Vlastní kapitál"),
+                ("Net Margin %", "Čistá marže")
+            ]:
+                if col not in df.columns:
+                    continue
+                v = safe_float(row.get(col))
+                if pd.isna(v):
+                    continue
+                txt = f"{v:.2f} %" if col.endswith("%") else analyst_human_number(v)
+                vals.append(f"{label}: {txt}")
+            if vals:
+                pack.append(_analyst_source_item(
+                    "financial", "Yahoo Finance / yfinance", period,
+                    "; ".join(vals), period=period, extra=extra
+                ))
+    add_rows(annual, "Celý účetní rok")
+    add_rows(quarterly, "Čtvrtletní účetní období")
+
+    ttm = analyst_ttm_from_quarters(quarterly)
+    add_rows(ttm, "TTM = poslední čtyři dostupná čtvrtletí")
+
+
+def _analyst_add_news_evidence(pack, news, max_items=30):
+    if news is None or news.empty:
+        return
+    d = news.copy()
+    if "Datum" in d.columns:
+        d["_dt"] = pd.to_datetime(d["Datum"], errors="coerce", utc=True)
+    else:
+        d["_dt"] = pd.NaT
+    if "Relevance" not in d.columns:
+        d["Relevance"] = 0
+    d = d.sort_values(["_dt", "Relevance"], ascending=[False, False], na_position="last")
+    for _, row in d.head(max_items).iterrows():
+        title = clean_text(row.get("Název"))
+        if not title:
+            continue
+        desc = clean_text(row.get("Popis"))
+        claim = title + (f" | Popis zdroje: {desc[:1200]}" if desc else "")
+        pack.append(_analyst_source_item(
+            "news", clean_text(row.get("Zdroj")) or "Google News",
+            clean_text(row.get("Datum")), claim,
+            url=clean_text(row.get("Odkaz")),
+            extra="Externí zpráva; titulek/popisek je claim zdroje, nikoli automaticky ověřený fakt"
+        ))
+
+
+def _analyst_add_sec_evidence(pack, sec):
+    if sec is None or sec.empty:
+        return
+    for _, row in sec.head(20).iterrows():
+        form = clean_text(row.get("Formulář"))
+        date = clean_text(row.get("Datum"))
+        report = clean_text(row.get("Datum výkazu"))
+        doc = clean_text(row.get("Dokument"))
+        acc = clean_text(row.get("Accession"))
+        url = clean_text(row.get("Odkaz"))
+        claim = f"SEC podání: {form or 'neuvedeno'}"
+        if report:
+            claim += f"; období výkazu: {report}"
+        if doc:
+            claim += f"; dokument: {doc}"
+        pack.append(_analyst_source_item(
+            "regulatory", "SEC / EDGAR", date, claim,
+            period=report, url=url, extra=f"Accession: {acc}" if acc else ""
+        ))
+
+
+def analyst_build_evidence_pack(company, ticker, exchange, q, annual, quarterly, news, sec):
+    """Evidence layer. Screener data, score ani důvod výběru se sem nikdy nepředávají."""
+    pack = []
+    _analyst_add_profile_evidence(pack, q)
+    _analyst_add_financial_evidence(pack, annual, quarterly)
+    _analyst_add_news_evidence(pack, news)
+    _analyst_add_sec_evidence(pack, sec)
+    return pack
+
+
+def _analyst_evidence_text(pack, max_chars=36000):
+    rows = []
+    for i, item in enumerate(pack, 1):
+        line = (
+            f"[E{i}] TYP={item['type']} | ZDROJ={item['source']} | "
+            f"DATUM={item['date']} | OBDOBÍ={item['period']} | "
+            f"CLAIM/FAKT={item['claim']}"
+        )
+        if item.get("extra"):
+            line += f" | POZNÁMKA={item['extra']}"
+        if item.get("url"):
+            line += f" | URL={item['url']}"
+        rows.append(line)
+    return "\n".join(rows)[:max_chars]
+
+
+def _analyst_financial_change_summary(annual, quarterly):
+    parts = []
     if annual is not None and not annual.empty:
-        d=annual.copy().tail(5)
-        cols=[c for c in ["Year","Revenue","Net Income","FCF","Net Margin %","Debt"] if c in d.columns]
-        if cols: chunks.append("ROČNÍ DATA:\n"+d[cols].to_csv(index=False))
+        for col, label in [("Revenue", "tržby"), ("Net Income", "čistý zisk"), ("FCF", "FCF"), ("Debt", "dluh")]:
+            if col not in annual.columns:
+                continue
+            s = pd.to_numeric(annual[col], errors="coerce").dropna()
+            if len(s) >= 2 and s.iloc[0] != 0:
+                parts.append(f"V dostupné roční řadě se {label} změnil z {analyst_human_number(s.iloc[0])} na {analyst_human_number(s.iloc[-1])}.")
     if quarterly is not None and not quarterly.empty:
-        d=quarterly.copy().tail(8)
-        cols=[c for c in ["Quarter","Revenue","Net Income","FCF","Net Margin %","Debt"] if c in d.columns]
-        if cols: chunks.append("KVARTÁLNÍ DATA:\n"+d[cols].to_csv(index=False))
-        ttm=analyst_ttm_from_quarters(quarterly)
-        if ttm is not None and not ttm.empty:
-            cols=[c for c in ["Period","Revenue","Net Income","FCF","Net Margin %","Debt"] if c in ttm.columns]
-            if cols: chunks.append("TTM:\n"+ttm[cols].to_csv(index=False))
-    return "\n".join(chunks)[:14000]
+        for col, label in [("Revenue", "tržby"), ("Net Income", "čistý zisk"), ("FCF", "FCF")]:
+            if col not in quarterly.columns:
+                continue
+            s = pd.to_numeric(quarterly[col], errors="coerce").dropna()
+            if len(s) >= 2:
+                parts.append(f"V dostupné kvartální řadě se {label} změnil z {analyst_human_number(s.iloc[0])} na {analyst_human_number(s.iloc[-1])}.")
+    return "\n".join(parts)
 
 
-def _analyst_news_context(news, max_items=18):
-    if news is None or news.empty: return "ŽÁDNÉ DOSTATEČNĚ RELEVANTNÍ ZPRÁVY."
-    d=news.copy()
-    d["_dt"]=pd.to_datetime(d.get("Datum",""),errors="coerce",utc=True)
-    if "Relevance" not in d.columns: d["Relevance"]=0
-    d=d.sort_values(["_dt","Relevance"],ascending=[False,False],na_position="last")
-    rows=[]
-    for _,r in d.head(max_items).iterrows():
-        title=clean_text(r.get("Název")); desc=clean_text(r.get("Popis")); source=clean_text(r.get("Zdroj")); date=clean_text(r.get("Datum")); link=clean_text(r.get("Odkaz"))
-        if title: rows.append(f"- {date} | {source} | {title}\n  Kontext: {desc[:900]}\n  Odkaz: {link}")
-    return "\n".join(rows)[:18000] if rows else "ŽÁDNÉ DOSTATEČNĚ RELEVANTNÍ ZPRÁVY."
+def _analyst_price_evidence(price):
+    if price is None or price.empty or "Close" not in price.columns:
+        return ""
+    p = pd.to_numeric(price["Close"], errors="coerce").dropna()
+    if len(p) < 60:
+        return ""
+    last = p.iloc[-1]
+    parts = [f"Poslední dostupná cena: {last:.2f}"]
+    if len(p) > 252:
+        parts.append(f"12M změna ceny: {(last / p.iloc[-253] - 1) * 100:+.1f} %")
+    if len(p) > 756:
+        parts.append(f"3Y změna ceny: {(last / p.iloc[-757] - 1) * 100:+.1f} %")
+    return "; ".join(parts)
 
 
-def _analyst_sec_context(sec, max_items=10):
-    if sec is None or sec.empty: return "ŽÁDNÁ SEC PODÁNÍ NEBYLA NAČTENA."
-    cols=[c for c in ["Datum","Formulář","Název","Odkaz"] if c in sec.columns]
-    return sec[cols].head(max_items).to_csv(index=False)[:7000] if cols else "SEC DATA NEJSOU V POUŽITELNÉ PODOBĚ."
-
-
-def _analyst_story_options():
-    return ["🏆 Quality Compounder","💎 Kvalita za rozumnou cenu","🚀 Růst za rozumnou cenu","💰 Value / levná firma","🔄 Operating turnaround","🔄 Recovery candidate","🌐 Cyclical / commodity recovery","🏗️ Asset / financial recovery","🏢 Real-estate value","🛠️ Operational improvement","🚀 Growth / recovery","🔥 High Growth / dražší příběh","🪤 Value Trap – varování","Nejasný / smíšený příběh"]
-
-
-@st.cache_data(ttl=1800, show_spinner=False)
-def analyst_ai_synthesis(company, ticker, exchange, q, annual, quarterly, news, sec):
-    """AI synthesis for the independent Analyst module.
-
-    Important design rule: the Analyst receives company evidence only. It does
-    not receive Screener scores, candidate status, or the reason the ticker was
-    selected by the Screener.
-    """
+@st.cache_data(ttl=900, show_spinner=False)
+def analyst_ai_synthesis(company, ticker, exchange, q, annual, quarterly, news, sec, price=None):
     try:
-        from g4f.client import Client
-        import g4f.Provider as Provider
-    except Exception as e:
-        return {"ok":False,"error":f"G4F není dostupné: {e}","text":"","model":""}
+        api_key = st.secrets["GROQ_API_KEY"]
+    except Exception:
+        return {"ok": False, "error": "Chybí GROQ_API_KEY ve Streamlit Secrets.", "text": "", "model": "openai/gpt-oss-120b"}
 
-    profile=(
-        f"Firma: {company}\nTicker: {ticker}\nBurza: {exchange}\n"
-        f"Sektor: {clean_text(q.get('sector'))}\nOdvětví: {clean_text(q.get('industry'))}\n"
-        f"Země: {clean_text(q.get('country'))}\n"
-        f"Cena: {analyst_human_number(q.get('price'),2)} {clean_text(q.get('currency'))}\n"
-        f"Market Cap: {analyst_human_number(q.get('market_cap'))}\n"
-        f"P/E: {analyst_human_number(q.get('pe'),1)} | Forward P/E: {analyst_human_number(q.get('forward_pe'),1)} | P/S: {analyst_human_number(q.get('ps'),1)} | P/B: {analyst_human_number(q.get('pb'),1)}"
-    )
-    summary=clean_text(q.get("summary"))[:5000]
-    fin=_analyst_compact_financial_context(annual,quarterly)
-    news_txt=_analyst_news_context(news,18)
-    sec_txt=_analyst_sec_context(sec,10)
-    stories="; ".join(_analyst_story_options())
+    pack = analyst_build_evidence_pack(company, ticker, exchange, q, annual, quarterly, news, sec)
+    evidence = _analyst_evidence_text(pack)
+    fin = _analyst_financial_change_summary(annual, quarterly)
+    price_ctx = _analyst_price_evidence(price)
 
-    system=(
-        "Jsi zkušený akciový analytik a pracuješ jako nezávislý analytik jedné konkrétní společnosti. "
-        "Nejsi screener a nevíš, proč byl tento titul vybrán. Tvým úkolem není doporučit nákup ani prodej "
-        "a není tvým úkolem pouze shrnout články. Musíš sám z dostupných podkladů zjistit, co se ve firmě "
-        "v poslední době skutečně mění a které změny jsou ekonomicky nejvýznamnější. "
-        "Propojuj více zdrojů, výsledky a finanční trend. Rozliš jednorázovou událost od trendu. "
-        "Rozliš strukturální, cyklické a dočasné změny. Pokud si zdroje odporují, ukaž rozpor. "
-        "Buď konkrétní a kritický. Pokud důkaz nestačí, řekni to. Nic nevymýšlej."
-    )
-    user=(
-        f"Analyzuj společnost {company} ({ticker}) podle následujících veřejných podkladů.\n\n"
-        f"{profile}\n\nSTRUČNÝ PROFIL Z YAHOO:\n{summary}\n\n{fin}\n\n"
-        f"AKTUÁLNÍ FIREMNĚ RELEVANTNÍ ZPRÁVY A JEJICH KONTEXT:\n{news_txt}\n\n"
-        f"SEC PODÁNÍ (pokud jsou k dispozici):\n{sec_txt}\n\n"
-        f"POVOLENÉ NÁZVY INVESTIČNÍCH PŘÍBĚHŮ:\n{stories}\n\n"
-        "HLAVNÍ ÚKOL:\n"
-        "Prostuduj podklady jako celek a vytvoř vlastní pracovní interpretaci toho, co se ve firmě právě odehrává. "
-        "Nechci seznam článků ani seznam kategorií. Chci syntézu.\n\n"
-        "1. Identifikuj 3 až 4 nejdůležitější PROBÍHAJÍCÍ ZMĚNY nebo TÉMATA, která mohou měnit ekonomiku firmy "
-        "nebo její investiční příběh. Pokud jsou pouze 2 opravdu významná témata, raději uveď 2 než uměle vytvářej 4.\n"
-        "2. U každého tématu vysvětli řetězec: CO SE MĚNÍ → PROČ SE TO DĚJE → JAKÝ JE EKONOMICKÝ DOPAD → "
-        "zda je změna strukturální, cyklická nebo dočasná → CO JI POTVRDÍ NEBO VYVRÁTÍ.\n"
-        "3. Témata seřaď podle významu. U prvního tématu výslovně napiš, proč je podle dostupných důkazů významnější než druhé. "
-        "Nejde o přesné skóre, ale o analytickou prioritu.\n"
-        "4. Propoj informace z více zdrojů. Pokud například článek tvrdí něco, co neodpovídá výsledkům nebo guidance, upozorni na to.\n"
-        "5. Odděl skutečnou změnu v ekonomice firmy od pohybu akcie, jednorázové zprávy, běžné PR komunikace nebo obecného trendu sektoru.\n"
-        "6. Z finančních tabulek používej hlavně trend: změnu růstu, marží, zisku, cash flow, zadlužení a rozdíl mezi posledním TTM a minulostí. "
-        "Nehodnoť firmu jen podle jediného ukazatele.\n"
-        "7. Na konci urč jednu PRACOVNÍ interpretaci investičního příběhu z povolených názvů. Vyber ji podle celkové ekonomiky příběhu, nikoli podle jednoduchého P/E nebo růstu.\n"
-        "8. Uveď protiargument: co je na této interpretaci nejslabší nebo co může znamenat, že se mýlíme.\n"
-        "9. Uveď 2 až 4 konkrétní věci, které má investor sledovat v dalších výsledcích / měsících.\n"
-        "10. Nepiš prázdné fráze typu 'společnost čelí výzvám' bez vysvětlení jakým a s jakým ekonomickým dopadem. Každý důležitý závěr musí být opřen o konkrétní podklad.\n\n"
-        "VÝSTUP V ČEŠTINĚ. Použij přesně tuto strukturu:\n"
-        "## Co se ve firmě právě mění\n"
-        "### 1. [výstižný název tématu]\n"
-        "**Co se mění:** ...\n**Proč:** ...\n**Ekonomický dopad:** ...\n"
-        "**Charakter změny:** ...\n**Proč je to důležité:** ...\n**Co potvrdí / vyvrátí:** ...\n"
-        "**Podklady:** uveď konkrétní zdroje nebo výsledky, o které se tvrzení opírá.\n\n"
-        "### 2. ...\n### 3. ...\n### 4. ...\n\n"
-        "### Proč je první téma důležitější než druhé\n...\n\n"
-        "## Pracovní investiční příběh\n"
-        "**[jeden přesný název z povolených názvů]**\nVysvětlení: ...\n"
-        "**Protiargument:** ...\n\n"
-        "## Co bych teď sledoval\n- ...\n- ...\n- ...\n"
-    )
-
-    # Do not use G4F's generic RetryProvider here: on Streamlit Cloud it can
-    # spend a long time trying paid/authenticated/browser providers and then
-    # return a misleading wall of provider errors. Prefer explicitly selected
-    # free/public routes first, then a small controlled fallback list.
-    attempts=[
-        ("Pollinations", Provider.Pollinations, "gpt-4.1-nano"),
-        ("Pollinations", Provider.Pollinations, "deepseek-r1"),
-        ("default", None, "gpt-4.1-nano"),
+    allowed_stories = [
+        "Kvalitní compounder", "Kvalita za rozumnou cenu", "Růst za rozumnou cenu",
+        "Value / levná firma", "Provozní turnaround", "Cyklické zotavení",
+        "Aktivové / finanční zotavení", "Realitní hodnota", "Provozní zlepšení",
+        "Růstové zotavení", "Vysoký růst / dražší příběh", "Value trap – varování",
+        "Nejasný / smíšený příběh"
     ]
-    last_err=""
-    for label, provider, model in attempts:
-        try:
-            client=Client(provider=provider) if provider is not None else Client()
-            resp=client.chat.completions.create(
-                model=model,
-                messages=[{"role":"system","content":system},{"role":"user","content":user}],
-                web_search=False,
-                stream=False,
-            )
-            msg=getattr(getattr(resp,"choices",[None])[0],"message",None)
-            text=getattr(msg,"content","") if msg is not None else ""
-            text=clean_text(text)
-            if len(text)>700 and "## Co se ve firmě právě mění" in text:
-                return {"ok":True,"error":"","text":text,"model":f"{label}/{model}"}
-            last_err=f"{label}/{model}: model vrátil neúplnou odpověď."
-        except Exception as e:
-            last_err=f"{label}/{model}: {type(e).__name__}: {e}"
-    return {"ok":False,"error":last_err or "AI syntéza selhala.","text":"","model":""}
+
+    system_prompt = f"""
+Jsi seniorní analytik jedné veřejně obchodované společnosti.
+
+HLAVNÍ ÚKOL: zjistit, CO SE VE FIRMĚ PRÁVĚ MĚNÍ a jak se tím mění ekonomika firmy a pracovní investiční příběh.
+
+PRACUJEŠ VÝHRADNĚ S EVIDENCE PACKEM.
+
+PRAVIDLA:
+- Nevymýšlej žádná čísla, události, management výroky, výsledky, úspory, CAPEX, tržní podíly, zdroje ani odkazy.
+- Každý významný fakt označ [E#].
+- News headline/popisek je claim zdroje, ne automaticky ověřený fakt.
+- Pokud jde o logickou interpretaci, označ ji **Inference:**.
+- Pokud něco z dat nevíme, označ **Neznáme:**.
+- Pokud se zdroje rozcházejí, ukaž konflikt.
+- Neříkej, že konkrétní segment rostl/klesal, pokud to evidence výslovně neříká.
+- Nepoužívej obecné znalosti odvětví jako fakta o této firmě.
+- Nezaměňuj změnu o -18 % za hodnotu -18.
+- Neopakuj pouze tržby, zisk a cenu. Hledej ekonomickou změnu za nimi, ale jen pokud ji důkazy podporují.
+- Vyber nejvýše 4 skutečně odlišná témata. Pokud existují jen 2, napiš 2.
+- Žádné Buy/Hold/Sell, žádné skóre, žádné pořadí.
+- Pracovní příběh je hypotéza, ne doporučení.
+
+POVOLENÉ NÁZVY PRACOVNÍHO PŘÍBĚHU:
+{'; '.join(allowed_stories)}
+"""
+
+    user_prompt = f"""
+FIRMA: {company}
+TICKER: {ticker}
+BURZA: {exchange}
+SEKTOR: {clean_text(q.get('sector'))}
+ODVĚTVÍ: {clean_text(q.get('industry'))}
+
+STRUČNÝ POPIS Z YAHOO FINANCE:
+{clean_text(q.get('summary'))[:5000]}
+
+DETERMINISTICKÝ FINANČNÍ KONTEXT:
+{fin or 'Není k dispozici.'}
+
+CENOVÝ KONTEXT:
+{price_ctx or 'Není k dispozici.'}
+
+EVIDENCE PACK:
+{evidence}
+
+Vytvoř výstup přesně v této logice:
+
+## Co se ve firmě právě mění
+
+### 1. [název skutečné změny]
+**Co víme:** ... [E#]
+**Co se podle toho mění:** ...
+**Ekonomický dopad:** ...
+**Inference:** ...
+**Neznáme:** ...
+**Charakter změny:** strukturální / cyklická / dočasná / jednorázová / nejasná
+**Co by změnu potvrdilo nebo vyvrátilo:** ...
+
+### 2. ...
+Stejná struktura.
+
+### 3. ...
+Pouze pokud existuje třetí odlišné významné téma.
+
+### 4. ...
+Pouze pokud existuje čtvrté odlišné významné téma.
+
+## Vztah k finančním výsledkům
+**Co vidíme v číslech:** ...
+**Co čísla mohou znamenat:** ...
+**Co z čísel nelze zjistit:** ...
+
+## Co si navzájem potvrzují nebo odporují zdroje
+Pouze skutečné vazby a konflikty.
+
+## Pracovní investiční příběh
+**[jeden povolený název]**
+Proč tento příběh odpovídá důkazům: ... [E#]
+**Protiargument:** ...
+**Alternativní interpretace:** ...
+
+## Co bych teď sledoval
+3–5 konkrétních ověřitelných věcí navázaných na dosud nevyřešené otázky.
+"""
+
+    payload = {
+        "model": "openai/gpt-oss-120b",
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ],
+        "temperature": 0.15,
+        "max_tokens": 6000
+    }
+    try:
+        r = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=90
+        )
+        if r.status_code != 200:
+            return {"ok": False, "error": f"Groq HTTP {r.status_code}: {r.text[:1200]}", "text": "", "model": "openai/gpt-oss-120b"}
+        data = r.json()
+        text = clean_text(data.get("choices", [{}])[0].get("message", {}).get("content", ""))
+        if len(text) < 400:
+            return {"ok": False, "error": "Groq vrátil příliš krátkou odpověď.", "text": text, "model": "openai/gpt-oss-120b"}
+        return {"ok": True, "error": "", "text": text, "model": "openai/gpt-oss-120b", "evidence_count": len(pack)}
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}", "text": "", "model": "openai/gpt-oss-120b"}
 
 
-def analyst_current_developments(company, q, annual, quarterly, news, sec, ticker="", exchange=""):
-    result=analyst_ai_synthesis(company,ticker,exchange,q,annual,quarterly,news,sec)
+def analyst_current_developments(company, q, annual, quarterly, news, sec, ticker="", exchange="", price=None):
+    result = analyst_ai_synthesis(company, ticker, exchange, q, annual, quarterly, news, sec, price)
     if result.get("ok"):
-        text=result.get("text","")
-        marker="## Pracovní investiční příběh"
-        return text.split(marker,1)[0].strip() if marker in text else text
-    return f"### ⚠️ AI syntéza není v tomto běhu dostupná\n{result.get('error','Neznámá chyba.')}\n\nMechanická kategorizace článků zde není vydávána za analytický závěr."
+        text = result.get("text", "")
+        if "## Pracovní investiční příběh" in text:
+            text = text.split("## Pracovní investiční příběh", 1)[0].rstrip()
+        return text
+    return "### ⚠️ AI syntéza není dostupná\n\n" + result.get("error", "Neznámá chyba.")
 
 
 def analyst_story_hypothesis(q, annual, quarterly, news, sec, ai_result=None):
     if ai_result and ai_result.get("ok"):
-        text=ai_result.get("text","")
-        marker="## Pracovní investiční příběh"
-        if marker in text:
-            part=text.split(marker,1)[1]
-            if "## Co bych teď sledoval" in part: part=part.split("## Co bych teď sledoval",1)[0]
-            return "AI syntéza",part.strip()
-    return _analyst_story_hypothesis_fallback(q,annual,quarterly,news,sec)
+        text = ai_result.get("text", "")
+        if "## Pracovní investiční příběh" in text:
+            part = text.split("## Pracovní investiční příběh", 1)[1]
+            if "## Co bych teď sledoval" in part:
+                part = part.split("## Co bych teď sledoval", 1)[0]
+            lines = [x.strip() for x in part.splitlines() if x.strip()]
+            title = lines[0].strip("*# ") if lines else "Nejasný / smíšený příběh"
+            return title, part.strip()
+    return "Nejasný / smíšený příběh", "Pracovní příběh nebyl mechanicky dopočítán, protože AI syntéza nebyla dostupná."
 
-
-def _analyst_story_hypothesis_fallback(q, annual, quarterly, news, sec):
-    rev=q.get("revenue_growth",np.nan); earn=q.get("earnings_growth",np.nan); pe=q.get("pe",np.nan); fpe=q.get("forward_pe",np.nan); roe=q.get("roe",np.nan)
-    primary="Nejasný / smíšený příběh"; why="Dostupné údaje zatím neukazují jednu dominantní ekonomickou změnu."
-    if not pd.isna(rev) and not pd.isna(earn) and rev>8 and earn>12:
-        primary="Růst za rozumnou cenu" if pd.isna(fpe) or fpe<30 else "Vysoký růst / dražší příběh"; why="Růst tržeb i zisku je výrazný; hlavní otázkou je, zda tempo růstu dokáže ospravedlnit očekávání v ceně."
-    elif not pd.isna(roe) and roe>15 and not pd.isna(rev) and rev>3:
-        primary="Kvalita za rozumnou cenu" if pd.isna(pe) or pe<30 else "Kvalitní růst"; why="Rentabilita a růst naznačují kvalitní ekonomiku; valuace rozhoduje o tom, kolik této kvality je již započteno."
-    elif not pd.isna(earn) and earn>10 and not pd.isna(rev) and rev>-2:
-        primary="Provozní zlepšení"; why="Zisk se zlepšuje rychleji než tržby, což může odpovídat zlepšení marží nebo normalizaci nákladů."
-    elif not pd.isna(pe) and 0<pe<12:
-        primary="Value / levná firma"; why="Ocenění je nízké; je ale nutné ověřit, zda nejde o strukturálně slabý podnik."
-    return primary,why
 
 def analyst_render(ticker_input):
     st.title("🔎 Analytik")
     st.caption("Nezávislé výzkumné jádro · Analytik nevidí Screener ani důvod, proč byl titul vybrán.")
 
-    c1,c2=st.columns([3,1])
+    c1, c2 = st.columns([3, 1])
     with c1:
-        ticker_input=st.text_input("Ticker",value=ticker_input,placeholder="např. SHL, GOOGL, ONC, AT1.DE")
+        ticker_input = st.text_input("Ticker", value=ticker_input, placeholder="např. SHL, GOOGL, ONC, AT1.DE")
     with c2:
-        default_ex=2 if str(ticker_input).upper().endswith(".DE") else 0
-        exchange=st.selectbox("Trh",["NASDAQ","NYSE","XETRA"],index=default_ex)
-    analyse=st.button("🔬 Spustit analytické jádro",type="primary")
+        default_ex = 2 if str(ticker_input).upper().endswith(".DE") else 0
+        exchange = st.selectbox("Trh", ["NASDAQ", "NYSE", "XETRA"], index=default_ex)
+
+    analyse = st.button("🔬 Spustit analytické jádro", type="primary")
     if not analyse:
-        st.info("Zadej ticker. Pro první test doporučuji například SHL na XETRA, protože na něm dobře uvidíme, zda Analytik dokáže oddělit skutečné firemní změny od šumu.")
+        st.info("Zadej ticker a spusť analytické jádro. Analytik je nezávislý na Screeneru.")
         return
 
-    ticker=clean_text(ticker_input).upper()
+    ticker = clean_text(ticker_input).upper()
     if not ticker:
         st.warning("Zadej ticker.")
         return
-    yahoo_ticker=analyst_yahoo_ticker(ticker,exchange)
-    status=st.empty()
+
+    yahoo_ticker = analyst_yahoo_ticker(ticker, exchange)
+    status = st.empty()
     status.info("1/5 Ověřuji identitu firmy a načítám veřejná data…")
-    q=analyst_get_quote_data(yahoo_ticker)
-    company=q.get("name") or ""
+    q = analyst_get_quote_data(yahoo_ticker)
+    company = q.get("name") or ""
     if not company:
         st.error(f"Ticker {ticker} se nepodařilo jednoznačně načíst přes Yahoo Finance ({yahoo_ticker}).")
         return
 
-    status.info("2/5 Sestavuji dlouhodobý finanční trend, poslední kvartály a cenový kontext…")
-    annual=analyst_get_financial_history(yahoo_ticker)
-    quarterly=analyst_get_quarterly_history(yahoo_ticker)
-    price=analyst_price_history(yahoo_ticker)
-    sec=analyst_sec_filings(ticker) if exchange in ("NASDAQ","NYSE") else pd.DataFrame()
+    status.info("2/5 Sestavuji dlouhodobý finanční trend, poslední kvartály a cenu…")
+    annual = analyst_get_financial_history(yahoo_ticker)
+    quarterly = analyst_get_quarterly_history(yahoo_ticker)
+    price = analyst_price_history(yahoo_ticker)
+    sec = analyst_sec_filings(ticker) if exchange in ("NASDAQ", "NYSE") else pd.DataFrame()
 
-    status.info("3/5 Hledám firemně relevantní aktuální události a filtruji kolize tickeru…")
-    news=analyst_google_news(company,ticker,q.get("ir_website") or q.get("website"))
+    status.info("3/5 Hledám aktuální firemně relevantní události…")
+    news = analyst_google_news(company, ticker, q.get("ir_website") or q.get("website"))
 
-    status.info("4/5 AI propojuje události, finanční vývoj a ekonomiku firmy…")
-    ai_result=analyst_ai_synthesis(company,ticker,exchange,q,annual,quarterly,news,sec)
-    current=analyst_current_developments(company,q,annual,quarterly,news,sec,ticker,exchange)
-    primary,story_reason=analyst_story_hypothesis(q,annual,quarterly,news,sec,ai_result)
-    price_comment=analyst_price_commentary(price)
+    status.info("4/5 Stavím důkazní balíček a provádím AI syntézu…")
+    ai_result = analyst_ai_synthesis(company, ticker, exchange, q, annual, quarterly, news, sec, price)
+    current = analyst_current_developments(company, q, annual, quarterly, news, sec, ticker, exchange, price)
+    primary, story_reason = analyst_story_hypothesis(q, annual, quarterly, news, sec, ai_result)
+    price_comment = analyst_price_commentary(price)
     status.success("5/5 Analytické jádro dokončeno.")
 
     st.markdown(f"## {company}")
     st.caption(f"Ticker **{ticker}** · Yahoo **{yahoo_ticker}** · {exchange} · načteno {datetime.now().strftime('%d.%m.%Y %H:%M')}")
 
-    m1,m2,m3,m4=st.columns(4)
-    price_txt=analyst_human_number(q.get("price"),2)
-    m1.metric("Cena",f"{price_txt} {q.get('currency','')}")
-    m2.metric("Tržní kapitalizace",analyst_human_number(q.get("market_cap")))
-    m3.metric("P/E",analyst_human_number(q.get("pe"),1))
-    roe=safe_float(q.get("roe"))
-    m4.metric("ROE","—" if pd.isna(roe) else f"{roe*100:.1f} %".replace(".",","))
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Cena", f"{analyst_human_number(q.get('price'), 2)} {q.get('currency', '')}")
+    m2.metric("Tržní kapitalizace", analyst_human_number(q.get("market_cap")))
+    m3.metric("P/E", analyst_human_number(q.get("pe"), 1))
+    roe = safe_float(q.get("roe"))
+    m4.metric("ROE", "—" if pd.isna(roe) else f"{roe * 100:.1f} %".replace(".", ","))
 
-    with st.expander("🏢 1. Základní profil a obchodní model",expanded=True):
-        if q.get("sector") or q.get("industry"):
-            st.write(f"**Sektor:** {q.get('sector') or '—'} · **Odvětví:** {q.get('industry') or '—'}")
+    with st.expander("🏢 1. Základní profil a obchodní model", expanded=True):
+        st.write(f"**Sektor:** {q.get('sector') or '—'} · **Odvětví:** {q.get('industry') or '—'}")
         if q.get("country"):
-            st.write(f"**Sídlo / země:** {q.get('country')}")
+            st.write(f"**Země:** {q.get('country')}")
         if q.get("summary"):
             st.write(q["summary"])
 
-    with st.expander("🧠 Jádro testu – co se ve firmě mění",expanded=True):
-        st.markdown(current)
-        if news is not None and not news.empty:
-            with st.expander("📚 Podklady použité AI syntézou",expanded=False):
-                for _,n in news.head(12).iterrows():
-                    date=clean_text(n.get("Datum")); source=clean_text(n.get("Zdroj")); link=clean_text(n.get("Odkaz")); meta=" · ".join(x for x in [date,source] if x); title=clean_text(n.get("Název"))
-                    if link: st.markdown(f"- [{title}]({link})" + (f" · {meta}" if meta else ""))
-                    else: st.markdown(f"- {title}" + (f" · {meta}" if meta else ""))
+    with st.expander("🧠 2. Co se ve firmě právě mění", expanded=True):
+        if ai_result.get("ok"):
+            st.markdown(current)
         else:
-            st.warning("Nebyly nalezeny dostatečně relevantní firemní zprávy. AI v takovém případě nesmí doplňovat domněnky.")
+            st.error(ai_result.get("error", "AI syntéza není dostupná."))
 
-    with st.expander("📊 2. Finanční vývoj – trend, ne snapshot",expanded=True):
-        st.write(analyst_financial_summary(annual,quarterly))
+    with st.expander("📚 3. Důkazní balíček použitý AI", expanded=False):
+        pack = analyst_build_evidence_pack(company, ticker, exchange, q, annual, quarterly, news, sec)
+        st.caption(f"AI dostala {len(pack)} evidence položek.")
+        for i, item in enumerate(pack, 1):
+            st.markdown(f"**[E{i}] {item['source']}** · {item['date']}")
+            st.write(item["claim"])
+            if item.get("url"):
+                st.markdown(f"[Zdroj]({item['url']})")
+
+    with st.expander("📊 4. Finanční vývoj – trend, ne snapshot", expanded=True):
+        st.write(analyst_financial_summary(annual, quarterly))
         if not annual.empty:
             st.markdown("**Celé účetní roky dostupné přes Yahoo Finance**")
-            d=annual.copy()
-            for c in d.columns[1:]:
-                d[c]=d[c].map(lambda x: "—" if pd.isna(safe_float(x)) else (f"{safe_float(x):.1f} %".replace(".",",") if c.endswith("%") else analyst_human_number(x)))
-            st.dataframe(d,use_container_width=True,hide_index=True)
+            st.dataframe(annual, use_container_width=True, hide_index=True)
         if not quarterly.empty:
             st.markdown("**Posledních dostupných 8 čtvrtletí**")
-            d=quarterly.copy()
-            for c in d.columns[1:]:
-                d[c]=d[c].map(lambda x: "—" if pd.isna(safe_float(x)) else (f"{safe_float(x):.1f} %".replace(".",",") if c.endswith("%") else analyst_human_number(x)))
-            st.dataframe(d,use_container_width=True,hide_index=True)
-            ttm=analyst_ttm_from_quarters(quarterly)
-            if not ttm.empty:
-                st.markdown("**TTM – poslední čtyři dostupná čtvrtletí**")
-                d=ttm.copy()
-                for c in d.columns[1:]:
-                    d[c]=d[c].map(lambda x: "—" if pd.isna(safe_float(x)) else (f"{safe_float(x):.1f} %".replace(".",",") if c.endswith("%") else analyst_human_number(x)))
-                st.dataframe(d,use_container_width=True,hide_index=True)
+            st.dataframe(quarterly, use_container_width=True, hide_index=True)
+        ttm = analyst_ttm_from_quarters(quarterly)
+        if not ttm.empty:
+            st.markdown("**TTM – poslední čtyři dostupná čtvrtletí**")
+            st.dataframe(ttm, use_container_width=True, hide_index=True)
 
-    with st.expander("💰 3. Valuace – jaká očekávání jsou v ceně",expanded=False):
-        vals=[]
-        for k,v in [("P/E",q.get("pe")),("Forward P/E",q.get("forward_pe")),("P/S",q.get("ps")),("P/B",q.get("pb"))]:
-            if not pd.isna(safe_float(v)): vals.append(f"**{k}:** {analyst_human_number(v,1)}")
+    with st.expander("💰 5. Valuace – jaká očekávání jsou v ceně", expanded=False):
+        vals = []
+        for k, v in [("P/E", q.get("pe")), ("Forward P/E", q.get("forward_pe")), ("P/S", q.get("ps")), ("P/B", q.get("pb"))]:
+            if not pd.isna(safe_float(v)):
+                vals.append(f"**{k}:** {analyst_human_number(v, 1)}")
         st.write(" · ".join(vals) if vals else "Valuační data nejsou dostupná.")
-        st.caption("Cílem není vyrábět falešně přesnou férovou cenu, ale zjistit, jaké očekávání může být v ocenění obsaženo.")
+        st.caption("Valuace je zde kontext očekávání, nikoli výpočet falešně přesné férové ceny.")
 
-    with st.expander("🛡️ 4. Konkurenční prostředí a MOAT",expanded=False):
-        st.caption("Tato část bude doplněna až po ověření, že výzkumné jádro správně identifikuje firmu a její skutečné aktuální změny.")
-    with st.expander("🌍 5. Perspektiva odvětví",expanded=False):
-        st.caption("Zatím záměrně bez automatického výkladu. Nechceme přidávat obecné sektorové fráze dříve, než funguje jádro.")
-    with st.expander("👔 6. Management a jeho důvěryhodnost",expanded=False):
-        st.caption("Další fáze bude sledovat sliby vedení versus realitu, změny guidance, kapitálovou alokaci a změny komunikace v čase.")
-
-    with st.expander("🧩 7. Investiční příběh – pracovní hypotéza",expanded=True):
+    with st.expander("🧩 6. Pracovní investiční příběh", expanded=True):
         st.markdown(f"### {primary}")
         st.markdown(story_reason)
-        st.caption("Pracovní interpretace je nezávislá na Screeneru; pokud AI nebyla dostupná, je použit pouze záložní kvantitativní výklad.")
+        st.caption("Pracovní hypotéza, nikoli investiční doporučení.")
 
-    with st.expander("🧭 8. Cenový kontext",expanded=True):
+    with st.expander("🧭 7. Cenový kontext", expanded=True):
         st.write(price_comment)
 
-    with st.expander("🎯 9. Co má smysl dále ověřit",expanded=True):
-        if ai_result.get("ok") and "## Co bych teď sledoval" in ai_result.get("text",""):
-            st.markdown(ai_result["text"].split("## Co bych teď sledoval",1)[1].strip())
+    with st.expander("🎯 8. Co má smysl dále ověřit", expanded=True):
+        if ai_result.get("ok") and "## Co bych teď sledoval" in ai_result.get("text", ""):
+            st.markdown(ai_result["text"].split("## Co bych teď sledoval", 1)[1].strip())
         else:
-            st.markdown("- Je hlavní změna **strukturální, cyklická, nebo pouze dočasná**?")
-            st.markdown("- Promítá se už do **tržeb, marží a cash flow**, nebo zatím jen do očekávání?")
-            st.markdown("- Jak na změnu reaguje **management** a odpovídají jeho kroky komunikaci?")
-            st.markdown("- Co by v dalších výsledcích **potvrdilo** hlavní hypotézu a co by ji **vyvrátilo**?")
+            st.write("AI neposkytla samostatnou sekci pro další ověření.")
 
-    with st.expander("📚 Zdroje a diagnostika",expanded=False):
+    with st.expander("📚 9. Zdroje a diagnostika", expanded=False):
         st.write(f"Yahoo Finance: {yahoo_ticker}")
-        st.write(f"Relevantních zpráv po filtrování identity: {len(news) if news is not None else 0}")
-        st.write(f"AI syntéza: {"OK" if ai_result.get("ok") else "nedostupná"} {ai_result.get("model","")}")
-        if not ai_result.get("ok"): st.caption(ai_result.get("error", ""))
-        if exchange in ("NASDAQ","NYSE"):
-            st.write(f"SEC poslední podání načtena: {len(sec) if sec is not None else 0}")
-        st.caption("Analytik používá pouze veřejně dostupné zdroje. Pokud důkaz chybí, výstup jej nemá nahrazovat domněnkou.")
+        st.write(f"Relevantních zpráv: {len(news) if news is not None else 0}")
+        st.write(f"Evidence položek: {ai_result.get('evidence_count', '—')}")
+        st.write(f"AI model: {ai_result.get('model', '—')}")
+        if not ai_result.get("ok"):
+            st.error(ai_result.get("error", ""))
+        if exchange in ("NASDAQ", "NYSE"):
+            st.write(f"SEC podání načtena: {len(sec) if sec is not None else 0}")
 
 
-# Page navigation. Analytik is deliberately isolated from the Screener execution path.
-st.sidebar.markdown("## 🧭 Modul")
-app_page = st.sidebar.radio("", ["📊 Screener", "🔎 Analytik"], index=0, label_visibility="collapsed")
-if app_page == "🔎 Analytik":
-    analyst_render("")
-    st.stop()
 
-
-# Sidebar
-st.sidebar.header("⚙️ Nastavení")
-universe_choice = st.sidebar.radio(
-    "Univerzum / burza",
-    ["Všechny burzy", "NASDAQ", "NYSE", "XETRA"],
-    index=0,
-    help="Pro rychlejší a cílenější screening zvol jednu burzu. Režim Všechny burzy zachová prohledání celého univerza."
-)
-selected_exchanges = ["NASDAQ", "NYSE", "XETRA"] if universe_choice == "Všechny burzy" else [universe_choice]
-min_cap_b = st.sidebar.number_input("Min. Market Cap (mld.)", min_value=0.0, value=1.0, step=0.5)
-max_candidates = st.sidebar.slider("Max. titulů pro fundamentální fázi", 100, 600, 350, 50)
-max_text_candidates = st.sidebar.slider("Max. titulů pro textovou fázi", 0, 60, 40, 5)
-max_price_candidates = st.sidebar.slider("Max. titulů pro cenovou fázi", 0, 60, 40, 5)
-max_stage1 = st.sidebar.slider("Max. titulů z univerza do předvýběru", 200, 1500, 800, 100)
-
-st.sidebar.markdown("---")
-st.sidebar.subheader("🎯 Jaký příběh hledám?")
-story_options = [
-    "🏆 Quality Compounder",
-    "💎 Kvalita za rozumnou cenu",
-    "🚀 Růst za rozumnou cenu",
-    "💰 Value / levná firma",
-    "🔄 Operating turnaround",
-    "🔄 Recovery candidate",
-    "🌐 Cyclical / commodity recovery",
-    "🏗️ Asset / financial recovery",
-    "🏢 Real-estate value",
-    "🛠️ Operational improvement",
-    "🚀 Growth / recovery",
-    "🔥 High Growth / dražší příběh",
-    "🪤 Value Trap – varování",
-]
-selected_stories = st.sidebar.multiselect("Příběhy", story_options, default=story_options[:9], help="Neatraktivní příběhy nemusíš hledat; Value Trap zde slouží jako výjimka – upozornění na levnou firmu se slabými základy.")
-min_data = st.sidebar.slider("Min. počet dostupných parametrů", 3, len(PARAMS), 7, 1)
-min_story_fit = st.sidebar.slider("Min. shoda s příběhem", 0, 100, 60, 5, help="Určuje, jak dobře musí titul odpovídat hledanému příběhu, aby se dostal mezi kandidáty. Nejde o investiční doporučení.")
-
-with st.sidebar.expander("⚙️ Klasické filtry (volitelné)"):
-    use_classic = st.checkbox("Použít klasické filtry", value=False)
-    max_pe = st.number_input("Max. P/E", min_value=0.0, value=25.0, step=1.0)
-    max_fpe = st.number_input("Max. Forward P/E", min_value=0.0, value=20.0, step=1.0)
-    min_roe = st.number_input("Min. ROE (%)", value=10.0, step=1.0)
-    min_rev_growth = st.number_input("Min. Revenue Growth (%)", value=0.0, step=1.0)
-    min_earn_growth = st.number_input("Min. Earnings Growth (%)", value=0.0, step=1.0)
-    min_fcf_m = st.number_input("Min. FCF (mil.)", value=0.0, step=50.0)
-    max_de = st.number_input("Max. Debt/Equity (%)", value=150.0, step=25.0)
-
-run = st.sidebar.button("🚀 Spustit screening", type="primary")
-clear = st.sidebar.button("🧹 Vyčistit výsledky")
-refresh = st.sidebar.button("🔄 Obnovit zdroje")
-fresh_run = st.sidebar.checkbox("🧪 Čerstvý běh bez cache", value=False, help="Vymaže Streamlit cache před spuštěním. Použij při diagnostice rozdílů mezi běhy.")
-
-if refresh:
-    st.cache_data.clear(); st.rerun()
-if clear:
-    st.session_state.pop("screening_results", None); st.rerun()
-if not selected_exchanges:
-    st.warning("Vyber alespoň jednu burzu."); st.stop()
-
-st.info("Načítám aktuální seznam titulů z oficiálních zdrojů…")
-try:
-    universe = load_universe(selected_exchanges)
-except Exception as e:
-    st.error(f"Chyba při načtení univerza: {e}"); st.stop()
-
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Celkem v univerzu", f"{len(universe):,}".replace(",", " "))
-for i, ex in enumerate(selected_exchanges[:3], start=2):
-    [c2, c3, c4][i-2].metric(ex, f"{int((universe['Exchange'] == ex).sum()):,}".replace(",", " "))
-if universe_choice != "Všechny burzy":
-    st.caption(f"🎯 Zvoleno cílené univerzum: **{universe_choice}** · {len(universe):,} titulů. Další fáze budou pracovat pouze s tímto trhem.")
-
-st.markdown("### 🌍 Univerzum")
-st.caption("NASDAQ/NYSE jsou získávány z Nasdaq Trader; XETRA z oficiálního seznamu Deutsche Börse. XETRA je omezeno na Instrument Type = CS (Common Stock / Equity).")
-
-if not run and "screening_results" not in st.session_state:
-    runtime = get_runtime_state()
-    if runtime.get("status") in ("running", "error"):
-        icon = "🟠" if runtime.get("status") == "running" else "🔴"
-        st.warning(
-            f"{icon} **Poslední screening nemá v této relaci uložený výsledek.** "
-            f"Poslední zaznamenaná fáze: **{runtime.get('stage','—')}** · "
-            f"{runtime.get('message','')} · {runtime.get('updated_at','')}"
-        )
-        if runtime.get("last_error"):
-            st.code(runtime.get("last_error"), language="text")
-        st.caption("Pokud byl běh přerušen, běžné cache výsledků umožní při novém spuštění přeskočit již načtené fundamenty a předselekci znovu použít.")
-    st.info("Nastav příběhy a stiskni **🚀 Spustit screening**."); st.stop()
-
-if run:
-    run_id = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + hashlib.md5(str(time.time_ns()).encode()).hexdigest()[:6]
-    update_runtime(status="running", stage="1/6", message=f"Screening spuštěn · univerzum: {universe_choice} · {len(universe):,} titulů", error="", run_id=run_id)
-    if fresh_run:
-        st.cache_data.clear()
-        st.session_state["screening_fresh_run"] = True
-    else:
-        st.session_state["screening_fresh_run"] = False
-    st.info(f"🔄 **Screening běží.** Průběh se aktualizuje po každé dávce. **Stránku během běhu neobnovuj.**")
-    stage_status = st.empty()
-    stage_progress = st.progress(0, text="🔄 1/6 Předselekce trhu: připravuji…")
-
-    def update_stage1_progress(value, message):
-        update_runtime(status="running", stage="1/6", message=message, run_id=run_id)
-        stage_progress.progress(max(0.0, min(1.0, float(value))), text=f"🔄 1/6 Předselekce trhu · {message}")
-
-    effective_stage1 = min(int(max_stage1), int(len(universe)))
-    stage_status.write(f"🔄 **1/6 Předselekce trhu:** zpracovávám univerzum **{universe_choice}** ({len(universe):,} titulů)…")
-    stage1 = prefilter_by_market_data(universe, effective_stage1, _progress_callback=update_stage1_progress)
-    update_runtime(status="running", stage="2/6", message=f"Předselekce dokončena · {universe_choice}: {len(stage1):,} titulů", run_id=run_id)
-    st.session_state["screening_run_id"] = run_id
-    stage_progress.progress(1.0, text=f"✅ 1/6 Předselekce trhu dokončena · {len(stage1):,} titulů")
-    stage_status.write(f"✅ **1/6 dokončeno:** {len(stage1):,} titulů pokračuje do fundamentální fáze.")
-    candidates = build_stage1_candidates(stage1, max_candidates)
-    st.session_state["screening_stage1_tickers"] = stage1["Ticker"].astype(str).tolist() if "Ticker" in stage1.columns else []
-    st.session_state["screening_fundamental_tickers"] = candidates["Ticker"].astype(str).tolist() if "Ticker" in candidates.columns else []
-    rows = []
-    status_text = st.empty()
-    for i, row in candidates.iterrows():
-        msg = f"{i+1}/{len(candidates)} · aktuálně {row['Ticker']}"
-        update_runtime(status="running", stage="2/6", message=msg, run_id=run_id)
-        status_text.write(f"🔄 **2/6 Fundamentální data:** {i+1}/{len(candidates)} · aktuálně **{row['Ticker']}**")
-        try:
-            result_row = fetch_fundamentals(row["Ticker"], row["Exchange"], row.get("Name", ""), row.get("ISIN", ""))
-            rows.append(result_row)
-        except Exception as exc:
-            update_runtime(status="error", stage="2/6", message=msg, error=repr(exc), run_id=run_id)
-            status_text.error(f"🔴 Chyba u {row['Ticker']}: {exc}")
-            raise
-        if (i + 1) % 10 == 0 or i + 1 == len(candidates):
-            st.session_state["screening_checkpoint"] = {
-                "run_id": run_id, "stage": "2/6", "done": int(i + 1),
-                "total": int(len(candidates)), "last_ticker": str(row["Ticker"]),
-                "rows": pd.DataFrame(rows).copy(),
-            }
-        stage_progress.progress((i+1)/max(1,len(candidates)), text=f"🔄 2/6 Fundamentální data · {i+1}/{len(candidates)} · {row['Ticker']}")
-    update_runtime(status="running", stage="3/6", message=f"Fundamentální data dokončena: {len(rows)} titulů", run_id=run_id)
-    status_text.write(f"✅ **2/6 Fundamentální data dokončena:** {len(rows)} titulů.")
-    st.session_state["screening_results"] = pd.DataFrame(rows)
-    st.session_state["screening_raw_results"] = pd.DataFrame(rows).copy()
-    st.session_state["screening_pipeline_counts"] = {
-        "Univerzum": universe_choice,
-        "Celé univerzum": int(len(universe)),
-        "Předselekce trhu": int(len(stage1)),
-        "Fundamentální fáze": int(len(candidates)),
-        "Načtené fundamenty": int(len(rows)),
-    }
-
-results_df = st.session_state.get("screening_results", pd.DataFrame())
-if results_df.empty:
-    st.warning("Pro vybrané nastavení nebyla načtena žádná data."); st.stop()
-
-# Scores and stories
-stage_progress.progress(0, text="🔄 3/6 Charakter + recovery + investiční příběh: vyhodnocuji…")
-stage_status.write("🔄 **3/6 Charakter + recovery + investiční příběh:** vyhodnocuji fundamentální obraz…")
-# Keep raw screening data separate from derived/evidence layers. Streamlit reruns
-# (for example when changing the selected candidate) must not re-append columns.
-raw_results = st.session_state.get("screening_raw_results")
-if raw_results is None or raw_results.empty:
-    raw_results = results_df.copy()
-
-derived_cols = [
-    "Value Score", "Quality Score", "Growth Score", "Company Archetype", "Company Type",
-    "Fundamental Direction", "Fundamental Trend Score", "Fundamental Evidence",
-    "Turnaround Score", "Turnaround Evidence", "Story", "Shoda s příběhem", "Potenciální shoda s příběhem", "Investiční atraktivita", "Story Priority",
-    "Available Params", "Potenciální shoda s příběhem", "Pass", "Story Selected", "Eligible",
-    "Text Score", "Text Evidence", "Text Positive", "Text Negative", "Text Support",
-    "Text Warnings", "Text Sources", "Skóre ceny", "Price View", "Drawdown 3Y",
-    "Drawdown 5Y", "Recovery from 3Y Low", "Recovery from 5Y Low", "6M Return",
-    "12M Return", "Days Since 3Y Low", "MA50 vs MA200", "Higher Low", "Higher High",
-    "Price Trend", "Price Evidence", "Final Confidence", "Market / Fundamental View"
-]
-raw_results = raw_results.drop(columns=[c for c in derived_cols if c in raw_results.columns], errors="ignore").copy()
-results_df = raw_results.copy()
-
-scores = results_df.apply(calc_scores, axis=1, result_type="expand")
-scores.columns = ["Value Score", "Quality Score", "Growth Score"]
-results_df = pd.concat([results_df.reset_index(drop=True), scores.reset_index(drop=True)], axis=1)
-results_df["Company Archetype"] = results_df.apply(company_archetype, axis=1)
-results_df["Company Type"] = results_df["Company Archetype"]
-dirs = results_df.apply(fundamental_direction, axis=1, result_type="expand")
-dirs.columns = ["Fundamental Direction", "Fundamental Trend Score", "Fundamental Evidence"]
-results_df = pd.concat([results_df, dirs], axis=1)
-gates = results_df.apply(recovery_gates, axis=1, result_type="expand")
-gates.columns = ["Posouzení zotavení", "Skóre zotavení", "Recovery Gates"]
-results_df = pd.concat([results_df, gates], axis=1)
-turns = results_df.apply(turnaround_score, axis=1, result_type="expand")
-turns.columns = ["Turnaround Score", "Turnaround Evidence"]
-results_df = pd.concat([results_df, turns], axis=1)
-results_df["Story"] = results_df.apply(classify_story, axis=1)
-results_df["Investiční atraktivita"] = results_df.apply(investment_attractiveness, axis=1)
-results_df["Available Params"] = results_df[PARAMS].notna().sum(axis=1)
 def best_selected_story_fit(r):
     if not selected_stories:
         return np.nan
