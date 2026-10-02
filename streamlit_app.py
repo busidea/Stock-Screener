@@ -2212,6 +2212,42 @@ def _analyst_price_evidence(price):
 
 
 @st.cache_data(ttl=900, show_spinner=False)
+@st.cache_data(ttl=60, show_spinner=False)
+def groq_connection_diagnostics(api_key, model="openai/gpt-oss-120b"):
+    results = []
+    base = "https://api.groq.com"
+    headers = {"Authorization": f"Bearer {api_key}", "User-Agent": "Stock-Screener/6.15"}
+
+    # 1) Basic reachability. A 404/405 still proves that the host was reached.
+    try:
+        r = requests.get(base + "/", headers={"User-Agent": "Stock-Screener/6.15"}, timeout=12)
+        results.append({"test": "api.groq.com – základní dostupnost", "status": r.status_code, "detail": r.text[:300]})
+    except Exception as e:
+        results.append({"test": "api.groq.com – základní dostupnost", "status": "ERROR", "detail": f"{type(e).__name__}: {e}"})
+
+    # 2) Authenticated models endpoint distinguishes network blocking from a bad key.
+    try:
+        r = requests.get(base + "/openai/v1/models", headers=headers, timeout=15)
+        results.append({"test": "Groq /openai/v1/models", "status": r.status_code, "detail": r.text[:700]})
+    except Exception as e:
+        results.append({"test": "Groq /openai/v1/models", "status": "ERROR", "detail": f"{type(e).__name__}: {e}"})
+
+    # 3) Minimal chat request using the same endpoint/model as the Analyst.
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": "Reply only with OK."}],
+        "temperature": 0,
+        "max_tokens": 8
+    }
+    try:
+        r = requests.post(base + "/openai/v1/chat/completions", headers={**headers, "Content-Type": "application/json"}, json=payload, timeout=20)
+        results.append({"test": f"Groq Chat Completions – {model}", "status": r.status_code, "detail": r.text[:1000]})
+    except Exception as e:
+        results.append({"test": f"Groq Chat Completions – {model}", "status": "ERROR", "detail": f"{type(e).__name__}: {e}"})
+
+    return results
+
+
 def analyst_ai_synthesis(company, ticker, exchange, q, annual, quarterly, news, sec, price=None):
     try:
         api_key = st.secrets["GROQ_API_KEY"]
@@ -2328,7 +2364,7 @@ Proč tento příběh odpovídá důkazům: ... [E#]
     try:
         r = requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.15"},
             json=payload,
             timeout=90
         )
@@ -2378,6 +2414,25 @@ def analyst_render(ticker_input):
         exchange = st.selectbox("Trh", ["NASDAQ", "NYSE", "XETRA"], index=default_ex)
 
     analyse = st.button("🔬 Spustit analytické jádro", type="primary")
+    with st.expander("🧪 Diagnostika Groq připojení", expanded=False):
+        st.write("Tento test nic nemění na API klíči. Ověří pouze, zda Streamlit Cloud dokáže z tohoto serveru oslovit Groq a zda Groq přijme klíč i model.")
+        test_groq = st.button("Otestovat Groq připojení", key="groq_diag_button")
+        if test_groq:
+            try:
+                api_key = st.secrets["GROQ_API_KEY"]
+                diag = groq_connection_diagnostics(api_key)
+                for item in diag:
+                    st.markdown(f"**{item['test']}** → `{item['status']}`")
+                    st.code(item["detail"] or "(prázdná odpověď)")
+                statuses = [x["status"] for x in diag]
+                if 403 in statuses and any(x.get("status") == 403 and "Access denied" in x.get("detail", "") for x in diag):
+                    st.warning("Groq vrací HTTP 403 s hlášením Access denied. To silně ukazuje na blokaci síťového prostředí/IP, nikoli na chybu analytického promptu.")
+                elif 401 in statuses:
+                    st.warning("Groq vrací HTTP 401. Pravděpodobný problém je API klíč nebo jeho oprávnění.")
+                elif 200 in statuses:
+                    st.success("Groq odpovídá HTTP 200 alespoň na jednom rozhodujícím testu. Pokud Analytik přesto selhává, budeme hledat problém v konkrétním požadavku.")
+            except Exception as e:
+                st.error(f"Diagnostiku se nepodařilo spustit: {type(e).__name__}: {e}")
     if not analyse:
         st.info("Zadej ticker a spusť analytické jádro. Analytik je nezávislý na Screeneru.")
         return
