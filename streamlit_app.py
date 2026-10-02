@@ -53,7 +53,7 @@ def update_runtime(status=None, stage=None, message=None, error=None, run_id=Non
 
 
 st.title("📊 Stock-Screener")
-st.caption("V6.10.4 – Screener · samostatný modul Analytik je dostupný v menu vlevo")
+st.caption("V6.14 – Screener · samostatný modul Analytik je dostupný v menu vlevo")
 
 NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 NYSE_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
@@ -2491,6 +2491,205 @@ def analyst_render(ticker_input):
 
 
 
+
+# Page navigation. Analytik is deliberately isolated from the Screener execution path.
+st.sidebar.markdown("## 🧭 Modul")
+app_page = st.sidebar.radio("", ["📊 Screener", "🔎 Analytik"], index=0, label_visibility="collapsed")
+if app_page == "🔎 Analytik":
+    analyst_render("")
+    st.stop()
+
+
+# Sidebar
+st.sidebar.header("⚙️ Nastavení")
+universe_choice = st.sidebar.radio(
+    "Univerzum / burza",
+    ["Všechny burzy", "NASDAQ", "NYSE", "XETRA"],
+    index=0,
+    help="Pro rychlejší a cílenější screening zvol jednu burzu. Režim Všechny burzy zachová prohledání celého univerza."
+)
+selected_exchanges = ["NASDAQ", "NYSE", "XETRA"] if universe_choice == "Všechny burzy" else [universe_choice]
+min_cap_b = st.sidebar.number_input("Min. Market Cap (mld.)", min_value=0.0, value=1.0, step=0.5)
+max_candidates = st.sidebar.slider("Max. titulů pro fundamentální fázi", 100, 600, 350, 50)
+max_text_candidates = st.sidebar.slider("Max. titulů pro textovou fázi", 0, 60, 40, 5)
+max_price_candidates = st.sidebar.slider("Max. titulů pro cenovou fázi", 0, 60, 40, 5)
+max_stage1 = st.sidebar.slider("Max. titulů z univerza do předvýběru", 200, 1500, 800, 100)
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("🎯 Jaký příběh hledám?")
+story_options = [
+    "🏆 Quality Compounder",
+    "💎 Kvalita za rozumnou cenu",
+    "🚀 Růst za rozumnou cenu",
+    "💰 Value / levná firma",
+    "🔄 Operating turnaround",
+    "🔄 Recovery candidate",
+    "🌐 Cyclical / commodity recovery",
+    "🏗️ Asset / financial recovery",
+    "🏢 Real-estate value",
+    "🛠️ Operational improvement",
+    "🚀 Growth / recovery",
+    "🔥 High Growth / dražší příběh",
+    "🪤 Value Trap – varování",
+]
+selected_stories = st.sidebar.multiselect("Příběhy", story_options, default=story_options[:9], help="Neatraktivní příběhy nemusíš hledat; Value Trap zde slouží jako výjimka – upozornění na levnou firmu se slabými základy.")
+min_data = st.sidebar.slider("Min. počet dostupných parametrů", 3, len(PARAMS), 7, 1)
+min_story_fit = st.sidebar.slider("Min. shoda s příběhem", 0, 100, 60, 5, help="Určuje, jak dobře musí titul odpovídat hledanému příběhu, aby se dostal mezi kandidáty. Nejde o investiční doporučení.")
+
+with st.sidebar.expander("⚙️ Klasické filtry (volitelné)"):
+    use_classic = st.checkbox("Použít klasické filtry", value=False)
+    max_pe = st.number_input("Max. P/E", min_value=0.0, value=25.0, step=1.0)
+    max_fpe = st.number_input("Max. Forward P/E", min_value=0.0, value=20.0, step=1.0)
+    min_roe = st.number_input("Min. ROE (%)", value=10.0, step=1.0)
+    min_rev_growth = st.number_input("Min. Revenue Growth (%)", value=0.0, step=1.0)
+    min_earn_growth = st.number_input("Min. Earnings Growth (%)", value=0.0, step=1.0)
+    min_fcf_m = st.number_input("Min. FCF (mil.)", value=0.0, step=50.0)
+    max_de = st.number_input("Max. Debt/Equity (%)", value=150.0, step=25.0)
+
+run = st.sidebar.button("🚀 Spustit screening", type="primary")
+clear = st.sidebar.button("🧹 Vyčistit výsledky")
+refresh = st.sidebar.button("🔄 Obnovit zdroje")
+fresh_run = st.sidebar.checkbox("🧪 Čerstvý běh bez cache", value=False, help="Vymaže Streamlit cache před spuštěním. Použij při diagnostice rozdílů mezi běhy.")
+
+if refresh:
+    st.cache_data.clear(); st.rerun()
+if clear:
+    st.session_state.pop("screening_results", None); st.rerun()
+if not selected_exchanges:
+    st.warning("Vyber alespoň jednu burzu."); st.stop()
+
+st.info("Načítám aktuální seznam titulů z oficiálních zdrojů…")
+try:
+    universe = load_universe(selected_exchanges)
+except Exception as e:
+    st.error(f"Chyba při načtení univerza: {e}"); st.stop()
+
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("Celkem v univerzu", f"{len(universe):,}".replace(",", " "))
+for i, ex in enumerate(selected_exchanges[:3], start=2):
+    [c2, c3, c4][i-2].metric(ex, f"{int((universe['Exchange'] == ex).sum()):,}".replace(",", " "))
+if universe_choice != "Všechny burzy":
+    st.caption(f"🎯 Zvoleno cílené univerzum: **{universe_choice}** · {len(universe):,} titulů. Další fáze budou pracovat pouze s tímto trhem.")
+
+st.markdown("### 🌍 Univerzum")
+st.caption("NASDAQ/NYSE jsou získávány z Nasdaq Trader; XETRA z oficiálního seznamu Deutsche Börse. XETRA je omezeno na Instrument Type = CS (Common Stock / Equity).")
+
+if not run and "screening_results" not in st.session_state:
+    runtime = get_runtime_state()
+    if runtime.get("status") in ("running", "error"):
+        icon = "🟠" if runtime.get("status") == "running" else "🔴"
+        st.warning(
+            f"{icon} **Poslední screening nemá v této relaci uložený výsledek.** "
+            f"Poslední zaznamenaná fáze: **{runtime.get('stage','—')}** · "
+            f"{runtime.get('message','')} · {runtime.get('updated_at','')}"
+        )
+        if runtime.get("last_error"):
+            st.code(runtime.get("last_error"), language="text")
+        st.caption("Pokud byl běh přerušen, běžné cache výsledků umožní při novém spuštění přeskočit již načtené fundamenty a předselekci znovu použít.")
+    st.info("Nastav příběhy a stiskni **🚀 Spustit screening**."); st.stop()
+
+if run:
+    run_id = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + hashlib.md5(str(time.time_ns()).encode()).hexdigest()[:6]
+    update_runtime(status="running", stage="1/6", message=f"Screening spuštěn · univerzum: {universe_choice} · {len(universe):,} titulů", error="", run_id=run_id)
+    if fresh_run:
+        st.cache_data.clear()
+        st.session_state["screening_fresh_run"] = True
+    else:
+        st.session_state["screening_fresh_run"] = False
+    st.info(f"🔄 **Screening běží.** Průběh se aktualizuje po každé dávce. **Stránku během běhu neobnovuj.**")
+    stage_status = st.empty()
+    stage_progress = st.progress(0, text="🔄 1/6 Předselekce trhu: připravuji…")
+
+    def update_stage1_progress(value, message):
+        update_runtime(status="running", stage="1/6", message=message, run_id=run_id)
+        stage_progress.progress(max(0.0, min(1.0, float(value))), text=f"🔄 1/6 Předselekce trhu · {message}")
+
+    effective_stage1 = min(int(max_stage1), int(len(universe)))
+    stage_status.write(f"🔄 **1/6 Předselekce trhu:** zpracovávám univerzum **{universe_choice}** ({len(universe):,} titulů)…")
+    stage1 = prefilter_by_market_data(universe, effective_stage1, _progress_callback=update_stage1_progress)
+    update_runtime(status="running", stage="2/6", message=f"Předselekce dokončena · {universe_choice}: {len(stage1):,} titulů", run_id=run_id)
+    st.session_state["screening_run_id"] = run_id
+    stage_progress.progress(1.0, text=f"✅ 1/6 Předselekce trhu dokončena · {len(stage1):,} titulů")
+    stage_status.write(f"✅ **1/6 dokončeno:** {len(stage1):,} titulů pokračuje do fundamentální fáze.")
+    candidates = build_stage1_candidates(stage1, max_candidates)
+    st.session_state["screening_stage1_tickers"] = stage1["Ticker"].astype(str).tolist() if "Ticker" in stage1.columns else []
+    st.session_state["screening_fundamental_tickers"] = candidates["Ticker"].astype(str).tolist() if "Ticker" in candidates.columns else []
+    rows = []
+    status_text = st.empty()
+    for i, row in candidates.iterrows():
+        msg = f"{i+1}/{len(candidates)} · aktuálně {row['Ticker']}"
+        update_runtime(status="running", stage="2/6", message=msg, run_id=run_id)
+        status_text.write(f"🔄 **2/6 Fundamentální data:** {i+1}/{len(candidates)} · aktuálně **{row['Ticker']}**")
+        try:
+            result_row = fetch_fundamentals(row["Ticker"], row["Exchange"], row.get("Name", ""), row.get("ISIN", ""))
+            rows.append(result_row)
+        except Exception as exc:
+            update_runtime(status="error", stage="2/6", message=msg, error=repr(exc), run_id=run_id)
+            status_text.error(f"🔴 Chyba u {row['Ticker']}: {exc}")
+            raise
+        if (i + 1) % 10 == 0 or i + 1 == len(candidates):
+            st.session_state["screening_checkpoint"] = {
+                "run_id": run_id, "stage": "2/6", "done": int(i + 1),
+                "total": int(len(candidates)), "last_ticker": str(row["Ticker"]),
+                "rows": pd.DataFrame(rows).copy(),
+            }
+        stage_progress.progress((i+1)/max(1,len(candidates)), text=f"🔄 2/6 Fundamentální data · {i+1}/{len(candidates)} · {row['Ticker']}")
+    update_runtime(status="running", stage="3/6", message=f"Fundamentální data dokončena: {len(rows)} titulů", run_id=run_id)
+    status_text.write(f"✅ **2/6 Fundamentální data dokončena:** {len(rows)} titulů.")
+    st.session_state["screening_results"] = pd.DataFrame(rows)
+    st.session_state["screening_raw_results"] = pd.DataFrame(rows).copy()
+    st.session_state["screening_pipeline_counts"] = {
+        "Univerzum": universe_choice,
+        "Celé univerzum": int(len(universe)),
+        "Předselekce trhu": int(len(stage1)),
+        "Fundamentální fáze": int(len(candidates)),
+        "Načtené fundamenty": int(len(rows)),
+    }
+
+results_df = st.session_state.get("screening_results", pd.DataFrame())
+if results_df.empty:
+    st.warning("Pro vybrané nastavení nebyla načtena žádná data."); st.stop()
+
+# Scores and stories
+stage_progress.progress(0, text="🔄 3/6 Charakter + recovery + investiční příběh: vyhodnocuji…")
+stage_status.write("🔄 **3/6 Charakter + recovery + investiční příběh:** vyhodnocuji fundamentální obraz…")
+# Keep raw screening data separate from derived/evidence layers. Streamlit reruns
+# (for example when changing the selected candidate) must not re-append columns.
+raw_results = st.session_state.get("screening_raw_results")
+if raw_results is None or raw_results.empty:
+    raw_results = results_df.copy()
+
+derived_cols = [
+    "Value Score", "Quality Score", "Growth Score", "Company Archetype", "Company Type",
+    "Fundamental Direction", "Fundamental Trend Score", "Fundamental Evidence",
+    "Turnaround Score", "Turnaround Evidence", "Story", "Shoda s příběhem", "Potenciální shoda s příběhem", "Investiční atraktivita", "Story Priority",
+    "Available Params", "Potenciální shoda s příběhem", "Pass", "Story Selected", "Eligible",
+    "Text Score", "Text Evidence", "Text Positive", "Text Negative", "Text Support",
+    "Text Warnings", "Text Sources", "Skóre ceny", "Price View", "Drawdown 3Y",
+    "Drawdown 5Y", "Recovery from 3Y Low", "Recovery from 5Y Low", "6M Return",
+    "12M Return", "Days Since 3Y Low", "MA50 vs MA200", "Higher Low", "Higher High",
+    "Price Trend", "Price Evidence", "Final Confidence", "Market / Fundamental View"
+]
+raw_results = raw_results.drop(columns=[c for c in derived_cols if c in raw_results.columns], errors="ignore").copy()
+results_df = raw_results.copy()
+
+scores = results_df.apply(calc_scores, axis=1, result_type="expand")
+scores.columns = ["Value Score", "Quality Score", "Growth Score"]
+results_df = pd.concat([results_df.reset_index(drop=True), scores.reset_index(drop=True)], axis=1)
+results_df["Company Archetype"] = results_df.apply(company_archetype, axis=1)
+results_df["Company Type"] = results_df["Company Archetype"]
+dirs = results_df.apply(fundamental_direction, axis=1, result_type="expand")
+dirs.columns = ["Fundamental Direction", "Fundamental Trend Score", "Fundamental Evidence"]
+results_df = pd.concat([results_df, dirs], axis=1)
+gates = results_df.apply(recovery_gates, axis=1, result_type="expand")
+gates.columns = ["Posouzení zotavení", "Skóre zotavení", "Recovery Gates"]
+results_df = pd.concat([results_df, gates], axis=1)
+turns = results_df.apply(turnaround_score, axis=1, result_type="expand")
+turns.columns = ["Turnaround Score", "Turnaround Evidence"]
+results_df = pd.concat([results_df, turns], axis=1)
+results_df["Story"] = results_df.apply(classify_story, axis=1)
+results_df["Investiční atraktivita"] = results_df.apply(investment_attractiveness, axis=1)
+results_df["Available Params"] = results_df[PARAMS].notna().sum(axis=1)
 def best_selected_story_fit(r):
     if not selected_stories:
         return np.nan
