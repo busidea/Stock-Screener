@@ -3,20 +3,25 @@ import requests
 import streamlit as st
 
 st.set_page_config(
-    page_title="Groq AI Test",
+    page_title="Groq AI – evidence test",
     page_icon="🧪",
     layout="wide"
 )
 
-st.title("🧪 Groq AI – přímý test")
+st.title("🧪 Groq AI – evidence-based analytický test")
+
 st.caption(
-    "Izolovaný test přímého Groq API. "
-    "Hlavní Stock-Screener aplikace se tímto testem nemění."
+    "Testuje přímé Groq API a schopnost AI vytvářet analytickou syntézu "
+    "bez vymýšlení skutečností, které nejsou v podkladech."
 )
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 MODEL = "openai/gpt-oss-120b"
 
+
+# ============================================================
+# API
+# ============================================================
 
 def get_api_key():
     try:
@@ -58,9 +63,9 @@ def groq_chat(prompt, system_prompt=None):
         json={
             "model": MODEL,
             "messages": messages,
-            "temperature": 0.2
+            "temperature": 0.1
         },
-        timeout=90
+        timeout=120
     )
 
     elapsed = time.time() - started
@@ -68,7 +73,7 @@ def groq_chat(prompt, system_prompt=None):
     if not response.ok:
         raise RuntimeError(
             f"HTTP {response.status_code}: "
-            f"{response.text[:2000]}"
+            f"{response.text[:3000]}"
         )
 
     data = response.json()
@@ -83,9 +88,9 @@ def groq_chat(prompt, system_prompt=None):
     return elapsed, content, data
 
 
-# ------------------------------------------------------------
-# 1. Kontrola Secret
-# ------------------------------------------------------------
+# ============================================================
+# 1. SECRET
+# ============================================================
 
 st.subheader("1. Kontrola API klíče")
 
@@ -103,9 +108,9 @@ else:
     )
 
 
-# ------------------------------------------------------------
-# 2. Minimální test
-# ------------------------------------------------------------
+# ============================================================
+# 2. MINIMÁLNÍ KOMUNIKACE
+# ============================================================
 
 st.subheader("2. Minimální test komunikace")
 
@@ -117,127 +122,306 @@ if st.button("▶ Otestovat Groq", type="primary"):
         try:
             elapsed, content, raw = groq_chat(
                 "Odpověz pouze dvěma slovy: GROQ OK",
-                "Jsi jednoduchý diagnostický test AI API. "
-                "Dodrž přesně požadovaný formát odpovědi."
+                """
+Jsi diagnostický AI systém.
+Dodrž přesně požadovaný formát odpovědi.
+"""
             )
 
             st.success(
-                f"✅ Groq odpověděl. "
-                f"Čas: {elapsed:.1f} s"
+                f"✅ Groq odpověděl za {elapsed:.1f} s"
             )
 
             st.markdown("### Odpověď AI")
             st.info(content)
 
-            with st.expander("Technické informace"):
-                st.write(f"Model: `{MODEL}`")
-                st.write(f"Čas odpovědi: {elapsed:.2f} s")
-                st.write(
-                    f"Počet znaků odpovědi: {len(content)}"
-                )
-
         except Exception as e:
             st.error(f"❌ Groq test selhal: {e}")
 
 
-# ------------------------------------------------------------
-# 3. Skutečný analytický test SHL
-# ------------------------------------------------------------
+# ============================================================
+# 3. EVIDENCE-BASED SHL TEST
+# ============================================================
 
 st.divider()
-st.subheader("3. Skutečný analytický test – Siemens Healthineers")
 
-st.write(
-    "Tento test už neověřuje pouze spojení. "
-    "Ověří, zda model dokáže vytvořit analytickou syntézu."
+st.subheader(
+    "3. Evidence-based analytický test – Siemens Healthineers"
 )
 
+st.write(
+    "Toto je hlavní test. AI dostane pouze explicitně uvedené podklady. "
+    "Úkolem není zjistit další fakta z internetu, ale ukázat, "
+    "zda dokáže z dostupných faktů vytvořit kvalitní analytickou syntézu."
+)
+
+
 SHL_PROMPT = """
-Jsi seniorní akciový analytik. Analyzuj Siemens Healthineers (SHL.DE).
+ÚKOL
 
-Nechci seznam článků ani obecný profil firmy.
-Chci vlastní analytickou syntézu toho, co se ve společnosti skutečně mění.
+Jsi seniorní akciový analytik.
 
-Identifikuj 3 nejdůležitější probíhající změny.
+Analyzuj Siemens Healthineers pouze na základě podkladů uvedených níže.
 
-U každé změny vysvětli:
+Toto je TEST ANALYTICKÉ DISCIPLÍNY.
 
-1. Co se změnilo.
-2. Proč se to mění.
-3. Jaký může být ekonomický dopad.
-4. Zda jde především o strukturální, cyklickou,
-   dočasnou nebo jednorázovou změnu.
-5. Co pro tuto interpretaci mluví.
-6. Jaký je hlavní protiargument.
-7. Co by hypotézu v dalších výsledcích potvrdilo
-   nebo vyvrátilo.
+NESMÍŠ používat žádné jiné konkrétní skutečnosti, které nejsou
+obsaženy v podkladech.
 
-Propoj pokud možno změny s finančním vývojem.
+To znamená:
 
-Na závěr formuluj jeden pracovní investiční příběh:
-co je dnes hlavní změna oproti dřívějšímu příběhu firmy,
-co může být trhem špatně pochopeno a co je naopak
-rizikem této interpretace.
+- nevymýšlej údaje z výročních zpráv,
+- nevymýšlej data z výsledků jednotlivých kvartálů,
+- nevymýšlej výroky managementu,
+- nevymýšlej procenta,
+- nevymýšlej názvy restrukturalizačních programů,
+- nevymýšlej cíle úspor,
+- nevymýšlej změny zaměstnanosti,
+- nevymýšlej změny produktového mixu,
+- nevymýšlej konkrétní příčiny, pokud nejsou v podkladech,
+- nevymýšlej citace,
+- nepoužívej znalosti o Siemens Healthineers z vlastní paměti jako fakta.
 
-Nedávej doporučení BUY/SELL a nedávej číselné skóre.
+Pokud je pro nějaký závěr potřeba informace, která v podkladech není,
+napiš:
 
-Dostupné podklady:
+"Z dostupných podkladů to nelze potvrdit."
 
-- víceleté tržby: přibližně +24 %
-- víceletý čistý zisk: přibližně +12 %
-- víceletý FCF: přibližně -6 %
-- TTM tržby proti poslednímu uzavřenému roku: -25 %
+Můžeš samozřejmě vytvořit ANALYTICKOU INFERENCI.
+Takovou inferenci ale jasně označ jako:
+
+"Inference: ..."
+
+Nikdy nepředstavuj inferenci jako ověřený fakt.
+
+DŮLEŽITÉ:
+
+Údaj "-6 %" u FCF znamená změnu FCF v daném sledovaném období.
+Údaj "-18 %" u TTM FCF znamená změnu TTM FCF vůči poslednímu
+uzavřenému roku.
+
+Tyto údaje NEZNAMENAJÍ, že Siemens Healthineers má záporný FCF
+ve výši -6 % nebo -18 %.
+
+Stejnou disciplínu dodrž u všech ostatních čísel.
+
+
+ANALYTICKÝ ÚKOL
+
+Identifikuj 3 nejdůležitější změny, které lze z dostupných podkladů
+rozumně formulovat.
+
+U každé změny použij tuto strukturu:
+
+1. CO VÍME
+   Uveď pouze skutečnosti přímo obsažené v podkladech.
+
+2. CO SE PODLE TĚCHTO FAKTŮ MĚNÍ
+   Vysvětli vlastní analytickou interpretaci.
+
+3. PROČ BY TO MOHLO BÝT DŮLEŽITÉ
+   Popiš možný ekonomický dopad.
+
+4. CHARAKTER ZMĚNY
+   Zvaž:
+   - strukturální,
+   - cyklickou,
+   - dočasnou,
+   - jednorázovou,
+   - nebo kombinaci.
+   
+   Pokud to nelze z podkladů rozlišit, řekni to.
+
+5. CO HOVOŘÍ PRO TUTO INTERPRETACI
+
+6. CO HOVOŘÍ PROTI NÍ
+
+7. CO BY JI V BUDOUCNU POTVRDILO NEBO VYVRÁTILO
+
+8. CO NEVÍME
+   Uveď důležité informace, které by byly potřeba,
+   ale v současných podkladech nejsou.
+
+
+NA ZÁVĚR
+
+Vytvoř:
+
+A) "Pracovní investiční příběh"
+
+Maximálně 2–3 odstavce.
+
+Popiš:
+- co se podle dostupných informací ve firmě právě mění,
+- proč je to ekonomicky důležité,
+- jaká je hlavní pozitivní interpretace,
+- jaká je hlavní negativní interpretace,
+- kde je největší nejistota.
+
+B) "Co bychom měli zjistit dál"
+
+Uveď 5 konkrétních otázek / informací,
+které by podle tebe nejvíce pomohly pracovní příběh potvrdit
+nebo vyvrátit.
+
+NEDÁVEJ:
+- BUY / SELL,
+- cílovou cenu,
+- investiční skóre,
+- celkové hodnocení akcie.
+
+
+------------------------------------------------------------
+DODANÉ PODKLADY
+------------------------------------------------------------
+
+[F1] DLOUHODOBÝ VÝVOJ
+
+Za dostupné víceleté období:
+
+- tržby: přibližně +24 %
+- čistý zisk: přibližně +12 %
+- FCF: přibližně -6 %
+
+Tyto údaje jsou relativní změny za sledované období.
+
+
+[F2] AKTUÁLNÍ TTM VÝVOJ
+
+Ve srovnání s posledním uzavřeným rokem:
+
+- TTM tržby: -25 %
 - TTM čistý zisk: -16 %
 - TTM FCF: -18 %
-- v roce 2026 je tlak na výhled zejména kvůli čínskému trhu
-- současně jsou patrné známky silnějších marží
-- některé části podnikání pokračují v růstu
-- hlavní oblasti: Imaging, Diagnostics, Varian,
-  Advanced Therapies
-- akcie přibližně -17 % za 12 měsíců
-- akcie přibližně -22 % za 3 roky
 
-Důležité:
-Nesnaž se pouze zopakovat podklady.
-Pokud z nich nelze určit některou skutečnost,
-výslovně řekni, že podklady ji nepotvrzují.
+Tyto údaje znamenají relativní změnu.
+Neznamenají, že příslušná absolutní hodnota je záporná.
+
+
+[F3] TRŽNÍ VÝVOJ
+
+Akcie:
+
+- přibližně -17 % za posledních 12 měsíců
+- přibližně -22 % za 3 roky
+
+
+[F4] AKTUÁLNÍ PROBLÉM
+
+V roce 2026 je uváděn tlak na výhled firmy
+v souvislosti s čínským trhem.
+
+
+[F5] POZITIVNÍ SIGNÁLY
+
+Současně jsou k dispozici informace o:
+
+- silnějších maržích,
+- pokračujícím růstu v některých částech podnikání.
+
+
+[F6] PODNIKATELSKÉ OBLASTI
+
+Siemens Healthineers působí zejména v oblastech:
+
+- Imaging
+- Diagnostics
+- Varian
+- Advanced Therapies
+
+
+------------------------------------------------------------
+PRAVIDLA DŮVĚRYHODNOSTI
+------------------------------------------------------------
+
+U každého konkrétního faktického tvrzení si interně polož otázku:
+
+"Je toto tvrzení skutečně obsaženo v podkladech?"
+
+Pokud ANO:
+můžeš ho použít jako fakt.
+
+Pokud NE:
+nesmíš ho prezentovat jako fakt.
+
+Pokud jde o logický závěr z dostupných faktů:
+označ ho jako "Inference".
+
+Pokud nelze rozhodnout:
+řekni "Z dostupných podkladů to nelze potvrdit."
+
+Cílem není vytvořit co nejdelší text.
+Cílem je vytvořit co nejpřesnější analytickou syntézu
+s jasným oddělením FAKTŮ a INFERENCÍ.
 """
 
 
-if st.button("▶ Spustit skutečný SHL analytický test"):
+# ============================================================
+# SPUŠTĚNÍ HLAVNÍHO TESTU
+# ============================================================
+
+if st.button(
+    "▶ Spustit evidence-based SHL analýzu",
+    type="primary"
+):
 
     if not api_key:
-        st.error("Nejdříve musí být dostupný GROQ_API_KEY.")
+        st.error(
+            "Nejdříve musí být dostupný GROQ_API_KEY."
+        )
+
     else:
+
         try:
+
             with st.spinner(
-                "Groq analyzuje Siemens Healthineers..."
+                "Groq vytváří evidence-based analýzu SHL..."
             ):
+
                 elapsed, content, raw = groq_chat(
                     SHL_PROMPT,
                     """
 Jsi seniorní equity analytik.
+
 Piš česky.
-Buď kritický, konkrétní a věcný.
-Nesnaž se uživatele uklidňovat ani mu doporučovat nákup či prodej.
-Odděluj fakta, interpretaci a nejistotu.
+
+Tvým hlavním úkolem je analytické myšlení,
+nikoli produkce dlouhého textu.
+
+Striktně rozlišuj:
+1. ověřený fakt z dodaných podkladů,
+2. analytickou inferenci,
+3. informaci, kterou nelze z podkladů určit.
+
+Nikdy nevymýšlej konkrétní fakta,
+čísla, citace, události ani názory managementu.
+
+Pokud něco nevíš, je správná odpověď:
+"Z dostupných podkladů to nelze potvrdit."
+
+Buď kritický.
+Nesnaž se uživatele uklidňovat.
+Nedávej doporučení BUY/SELL.
 """
                 )
 
             st.success(
-                f"✅ Skutečná AI analýza dokončena za {elapsed:.1f} s"
+                f"✅ Analýza dokončena za {elapsed:.1f} s"
             )
 
-            st.markdown("### Analytická odpověď Groq")
+            st.markdown("## Analytická odpověď Groq")
 
             st.markdown(content)
 
             with st.expander("Technické informace"):
                 st.write(f"Model: `{MODEL}`")
                 st.write(f"Čas odpovědi: {elapsed:.2f} s")
-                st.write(f"Délka odpovědi: {len(content)} znaků")
+                st.write(
+                    f"Délka odpovědi: {len(content)} znaků"
+                )
 
         except Exception as e:
+
             st.error(
                 f"❌ SHL analytický test selhal: {e}"
             )
@@ -246,6 +430,6 @@ Odděluj fakta, interpretaci a nejistotu.
 st.divider()
 
 st.caption(
-    "Tento soubor je pouze diagnostický test. "
-    "Nenahrazuje ani nemění hlavní streamlit_app.py."
+    "Diagnostický test Groq. "
+    "Hlavní streamlit_app.py se tímto testem nemění."
 )
