@@ -2216,11 +2216,11 @@ def _analyst_price_evidence(price):
 def groq_connection_diagnostics(api_key, model="openai/gpt-oss-120b"):
     results = []
     base = "https://api.groq.com"
-    headers = {"Authorization": f"Bearer {api_key}", "User-Agent": "Stock-Screener/6.15"}
+    headers = {"Authorization": f"Bearer {api_key}", "User-Agent": "Stock-Screener/6.16"}
 
     # 1) Basic reachability. A 404/405 still proves that the host was reached.
     try:
-        r = requests.get(base + "/", headers={"User-Agent": "Stock-Screener/6.15"}, timeout=12)
+        r = requests.get(base + "/", headers={"User-Agent": "Stock-Screener/6.16"}, timeout=12)
         results.append({"test": "api.groq.com – základní dostupnost", "status": r.status_code, "detail": r.text[:300]})
     except Exception as e:
         results.append({"test": "api.groq.com – základní dostupnost", "status": "ERROR", "detail": f"{type(e).__name__}: {e}"})
@@ -2232,16 +2232,36 @@ def groq_connection_diagnostics(api_key, model="openai/gpt-oss-120b"):
     except Exception as e:
         results.append({"test": "Groq /openai/v1/models", "status": "ERROR", "detail": f"{type(e).__name__}: {e}"})
 
-    # 3) Minimal chat request using the same endpoint/model as the Analyst.
+    # 3) Realistic small completion. V6.15 used only 8 tokens, which can be
+    # consumed by GPT-OSS reasoning before it reaches the requested answer.
     payload = {
         "model": model,
-        "messages": [{"role": "user", "content": "Reply only with OK."}],
+        "messages": [{"role": "user", "content": "Reply exactly with the single word OK. Do not explain anything."}],
         "temperature": 0,
-        "max_tokens": 8
+        "reasoning_effort": "low",
+        "max_completion_tokens": 256
     }
     try:
         r = requests.post(base + "/openai/v1/chat/completions", headers={**headers, "Content-Type": "application/json"}, json=payload, timeout=20)
-        results.append({"test": f"Groq Chat Completions – {model}", "status": r.status_code, "detail": r.text[:1000]})
+        detail = r.text[:1800]
+        if r.status_code == 200:
+            try:
+                data = r.json()
+                choice = (data.get("choices") or [{}])[0]
+                msg = choice.get("message") or {}
+                usage = data.get("usage") or {}
+                detail = (
+                    f"HTTP 200\n"
+                    f"model: {data.get('model', model)}\n"
+                    f"finish_reason: {choice.get('finish_reason')}\n"
+                    f"content: {msg.get('content', '')!r}\n"
+                    f"reasoning: {msg.get('reasoning', '')!r}\n"
+                    f"completion_tokens: {usage.get('completion_tokens')}\n"
+                    f"reasoning_tokens: {(usage.get('completion_tokens_details') or {}).get('reasoning_tokens')}"
+                )
+            except Exception:
+                pass
+        results.append({"test": f"Groq Chat Completions – {model}", "status": r.status_code, "detail": detail})
     except Exception as e:
         results.append({"test": f"Groq Chat Completions – {model}", "status": "ERROR", "detail": f"{type(e).__name__}: {e}"})
 
@@ -2359,22 +2379,38 @@ Proč tento příběh odpovídá důkazům: ... [E#]
             {"role": "user", "content": user_prompt}
         ],
         "temperature": 0.15,
-        "max_tokens": 6000
+        "reasoning_effort": "medium",
+        "max_completion_tokens": 12000
     }
     try:
         r = requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.15"},
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.16"},
             json=payload,
             timeout=90
         )
         if r.status_code != 200:
             return {"ok": False, "error": f"Groq HTTP {r.status_code}: {r.text[:1200]}", "text": "", "model": "openai/gpt-oss-120b"}
         data = r.json()
-        text = clean_text(data.get("choices", [{}])[0].get("message", {}).get("content", ""))
+        choice = (data.get("choices") or [{}])[0]
+        message = choice.get("message") or {}
+        text = clean_text(message.get("content", ""))
+        finish_reason = choice.get("finish_reason")
+        usage = data.get("usage") or {}
+        completion_details = usage.get("completion_tokens_details") or {}
+        diagnostic = (
+            f"finish_reason={finish_reason}; "
+            f"completion_tokens={usage.get('completion_tokens')}; "
+            f"reasoning_tokens={completion_details.get('reasoning_tokens')}; "
+            f"content_chars={len(text)}"
+        )
         if len(text) < 400:
-            return {"ok": False, "error": "Groq vrátil příliš krátkou odpověď.", "text": text, "model": "openai/gpt-oss-120b"}
-        return {"ok": True, "error": "", "text": text, "model": "openai/gpt-oss-120b", "evidence_count": len(pack)}
+            if finish_reason == "length":
+                error = "Groq vyčerpal limit generovaných tokenů dříve, než dokončil text. " + diagnostic
+            else:
+                error = "Groq vrátil příliš krátkou odpověď. " + diagnostic
+            return {"ok": False, "error": error, "text": text, "model": "openai/gpt-oss-120b", "evidence_count": len(pack), "finish_reason": finish_reason, "usage": usage}
+        return {"ok": True, "error": "", "text": text, "model": "openai/gpt-oss-120b", "evidence_count": len(pack), "finish_reason": finish_reason, "usage": usage}
     except Exception as e:
         return {"ok": False, "error": f"{type(e).__name__}: {e}", "text": "", "model": "openai/gpt-oss-120b"}
 
@@ -2400,6 +2436,46 @@ def analyst_story_hypothesis(q, annual, quarterly, news, sec, ai_result=None):
             title = lines[0].strip("*# ") if lines else "Nejasný / smíšený příběh"
             return title, part.strip()
     return "Nejasný / smíšený příběh", "Pracovní příběh nebyl mechanicky dopočítán, protože AI syntéza nebyla dostupná."
+
+
+def groq_analyst_request_diagnostic(api_key, model="openai/gpt-oss-120b"):
+    """Ověří stejný typ requestu jako Analytik, ale s malým zkráceným promptem."""
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": "Jsi analytik. Pracuj pouze s dodanými důkazy. Odpověz česky stručně."},
+            {"role": "user", "content": "Důkaz [E1]: Tržby vzrostly meziročně o 10 %. Důkaz [E2]: Provozní marže klesla z 12 % na 10 %. Napiš přesně 3 krátké věty: co se změnilo, ekonomický význam a co sledovat dál. Uveď [E1] a [E2]."}
+        ],
+        "temperature": 0.15,
+        "reasoning_effort": "medium",
+        "max_completion_tokens": 1200
+    }
+    try:
+        r = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.16"},
+            json=payload,
+            timeout=30
+        )
+        if r.status_code != 200:
+            return {"ok": False, "status": r.status_code, "detail": r.text[:1600]}
+        data = r.json()
+        choice = (data.get("choices") or [{}])[0]
+        msg = choice.get("message") or {}
+        usage = data.get("usage") or {}
+        details = usage.get("completion_tokens_details") or {}
+        return {
+            "ok": True,
+            "status": 200,
+            "detail": (
+                f"finish_reason={choice.get('finish_reason')}\n"
+                f"completion_tokens={usage.get('completion_tokens')}\n"
+                f"reasoning_tokens={details.get('reasoning_tokens')}\n\n"
+                f"{clean_text(msg.get('content', ''))}"
+            )
+        }
+    except Exception as e:
+        return {"ok": False, "status": "ERROR", "detail": f"{type(e).__name__}: {e}"}
 
 
 def analyst_render(ticker_input):
@@ -2433,6 +2509,19 @@ def analyst_render(ticker_input):
                     st.success("Groq odpovídá HTTP 200 alespoň na jednom rozhodujícím testu. Pokud Analytik přesto selhává, budeme hledat problém v konkrétním požadavku.")
             except Exception as e:
                 st.error(f"Diagnostiku se nepodařilo spustit: {type(e).__name__}: {e}")
+
+        test_realistic = st.button("Otestovat malý analytický request", key="groq_realistic_diag_button")
+        if test_realistic:
+            try:
+                api_key = st.secrets["GROQ_API_KEY"]
+                diag2 = groq_analyst_request_diagnostic(api_key)
+                if diag2.get("ok"):
+                    st.success(f"Groq HTTP {diag2.get('status')} – stejný typ Chat Completions requestu funguje.")
+                else:
+                    st.error(f"Groq test selhal: HTTP {diag2.get('status')}")
+                st.code(diag2.get("detail", ""))
+            except Exception as e:
+                st.error(f"Test analytického requestu se nepodařilo spustit: {type(e).__name__}: {e}")
     if not analyse:
         st.info("Zadej ticker a spusť analytické jádro. Analytik je nezávislý na Screeneru.")
         return
