@@ -53,7 +53,7 @@ def update_runtime(status=None, stage=None, message=None, error=None, run_id=Non
 
 
 st.title("📊 Stock-Screener")
-st.caption("V6.14 – Screener · samostatný modul Analytik je dostupný v menu vlevo")
+st.caption("V6.17 – Screener · samostatný modul Analytik je dostupný v menu vlevo")
 
 NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 NYSE_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
@@ -1736,6 +1736,47 @@ def _analyst_get_statement(t, attr, getter_name, freq):
     return pd.DataFrame()
 
 
+def _analyst_period_labels(dates, annual_dates=None, quarterly=False):
+    """Creates fiscal-period labels from the actual statement end dates.
+    Never assumes that the fiscal year ends on 31 December.
+    """
+    dates = [pd.Timestamp(d) for d in dates if not pd.isna(pd.Timestamp(d))]
+    annual_ends = sorted(pd.Timestamp(d) for d in (annual_dates or []) if not pd.isna(pd.Timestamp(d)))
+    if not quarterly:
+        return [f"FY{d.year} (ended {d:%Y-%m-%d})" for d in dates]
+
+    # Assign each quarter to the nearest later annual year-end. This works for
+    # companies whose fiscal year closes in any month, not only December.
+    assignments = []
+    for d in dates:
+        candidates = [a for a in annual_ends if a >= d and (a - d).days <= 370]
+        fy_end = min(candidates, key=lambda a: (a-d).days) if candidates else None
+        assignments.append((d, fy_end))
+
+    counters = {}
+    for d, fy_end in assignments:
+        key = fy_end if fy_end is not None else pd.Timestamp(year=d.year, month=12, day=31)
+        counters[key] = counters.get(key, 0) + 1
+
+    # Determine quarter number in each fiscal year by chronological order.
+    groups = {}
+    for d, fy_end in assignments:
+        key = fy_end if fy_end is not None else pd.Timestamp(year=d.year, month=12, day=31)
+        groups.setdefault(key, []).append(d)
+    qnum = {}
+    for key, ds in groups.items():
+        for i, d in enumerate(sorted(ds), 1):
+            qnum[d] = i
+
+    labels = []
+    for d, fy_end in assignments:
+        if fy_end is not None:
+            labels.append(f"Q{qnum[d]} FY{fy_end.year} (ended {d:%Y-%m-%d})")
+        else:
+            labels.append(f"Q{qnum[d]} FY{d.year} (ended {d:%Y-%m-%d}; FY end unknown)")
+    return labels
+
+
 def _analyst_build_history(t, quarterly=False):
     freq = "quarterly" if quarterly else "yearly"
     income = _analyst_get_statement(t, "quarterly_income_stmt" if quarterly else "income_stmt", "get_income_stmt", freq)
@@ -1765,17 +1806,27 @@ def _analyst_build_history(t, quarterly=False):
     dates = sorted(set(dates))
     if not dates:
         return pd.DataFrame()
-    # Keep the most recent requested window, but do not fabricate missing years/quarters.
     dates = dates[-8:] if quarterly else dates[-5:]
+
+    # Annual statement dates are used only to identify the fiscal-year ending
+    # date. This prevents a December-calendar assumption for companies such as SHL.
+    annual_end_dates = []
+    if quarterly:
+        try:
+            ai = _analyst_statement_series(income, ["Total Revenue"])
+            annual_income = _analyst_get_statement(t, "income_stmt", "get_income_stmt", "yearly")
+            annual_rev = _analyst_statement_series(annual_income, ["Total Revenue", "Operating Revenue", "TotalRevenue"])
+            annual_end_dates = [d for d in pd.to_datetime(annual_rev.index, errors="coerce") if not pd.isna(d)] if not annual_rev.empty else []
+        except Exception:
+            annual_end_dates = []
+
     out = pd.DataFrame(index=dates)
     for name, s in cols.items():
         ss = s.copy()
         ss.index = pd.to_datetime(ss.index, errors="coerce")
         out[name] = ss.reindex(dates).values
-    if quarterly:
-        out.index = [f"{d.year} Q{d.quarter}" for d in out.index]
-    else:
-        out.index = [str(d.year) for d in out.index]
+
+    out.index = _analyst_period_labels(dates, annual_end_dates, quarterly=quarterly)
     if "Revenue" in out and "Net Income" in out:
         revs = pd.to_numeric(out["Revenue"], errors="coerce")
         nis = pd.to_numeric(out["Net Income"], errors="coerce")
@@ -1783,7 +1834,6 @@ def _analyst_build_history(t, quarterly=False):
     if "Operating Cash Flow" in out and "Capital Expenditure" in out:
         ocf_s = pd.to_numeric(out["Operating Cash Flow"], errors="coerce")
         cap_s = pd.to_numeric(out["Capital Expenditure"], errors="coerce")
-        # Yahoo generally reports capex as negative. Handle both conventions.
         out["FCF"] = np.where(cap_s <= 0, ocf_s + cap_s, ocf_s - cap_s)
     return out.reset_index(names="Období")
 
@@ -1802,7 +1852,8 @@ def analyst_ttm_from_quarters(quarterly):
     if quarterly is None or quarterly.empty or len(quarterly) < 4:
         return pd.DataFrame()
     q = quarterly.tail(4)
-    row = {"Období": "TTM"}
+    end_label = clean_text(q.iloc[-1].get("Období")) if not q.empty else ""
+    row = {"Období": f"TTM (4Q ended {end_label})" if end_label else "TTM"}
     for c in ["Revenue", "Net Income", "Operating Income", "Operating Cash Flow", "FCF"]:
         if c in q.columns:
             vals = pd.to_numeric(q[c], errors="coerce")
@@ -1934,7 +1985,7 @@ def _analyst_fmt_pct(v):
 
 
 def analyst_financial_summary(annual, quarterly):
-    """Interpret trends rather than merely displaying ratios."""
+    """Trend commentary that respects the company's actual fiscal periods."""
     if annual is None or annual.empty:
         return "Finanční trend se nepodařilo z veřejných dat spolehlivě sestavit."
     parts=[]
@@ -1946,27 +1997,34 @@ def analyst_financial_summary(annual, quarterly):
     for col,label in [("Revenue","tržby"),("Net Income","čistý zisk"),("FCF","volný cash flow")]:
         x=series_change(annual,col)
         if not pd.isna(x):
-            parts.append(f"Za dostupné víceleté období {label} {'rostou' if x>5 else 'klesají' if x<-5 else 'jsou zhruba stabilní'} ({analyst_pct(x,0)}).")
+            parts.append(f"Za dostupné fiskální období {label} {'rostou' if x>5 else 'klesají' if x<-5 else 'jsou zhruba stabilní'} ({analyst_pct(x,0)}).")
     if "Net Margin %" in annual.columns:
         s=pd.to_numeric(annual["Net Margin %"],errors="coerce").dropna()
         if len(s)>=2:
             d=s.iloc[-1]-s.iloc[0]
-            parts.append(f"Čistá marže se proti začátku sledovaného období změnila o {analyst_pct(d,1)} p. b.")
+            parts.append(f"Čistá marže se mezi nejstarším a nejnovějším dostupným FY změnila o {analyst_pct(d,1)} p. b.")
     if "Debt" in annual.columns:
         x=series_change(annual,"Debt")
-        if not pd.isna(x): parts.append(f"Dluh se ve stejném období změnil o {analyst_pct(x,0)}.")
+        if not pd.isna(x): parts.append(f"Dluh se ve stejném fiskálním období změnil o {analyst_pct(x,0)}.")
+
     if quarterly is not None and not quarterly.empty:
         ttm=analyst_ttm_from_quarters(quarterly)
-        if not ttm.empty and not annual.empty:
+        latest_q_label = clean_text(quarterly.iloc[-1].get("Období"))
+        latest_fy_label = clean_text(annual.iloc[-1].get("Období"))
+        # Direct TTM/FY comparison is meaningful only when both end on the same date.
+        q_date = re.search(r"ended (\d{4}-\d{2}-\d{2})", latest_q_label)
+        fy_date = re.search(r"ended (\d{4}-\d{2}-\d{2})", latest_fy_label)
+        if not ttm.empty and q_date and fy_date and q_date.group(1) == fy_date.group(1):
             for col,label in [("Revenue","tržby"),("Net Income","čistý zisk"),("FCF","FCF")]:
                 if col in ttm.columns and col in annual.columns:
-                    a=pd.to_numeric(annual[col],errors="coerce").dropna()
-                    v=safe_float(ttm.iloc[0].get(col))
-                    if len(a) and not pd.isna(v):
-                        delta=(v/a.iloc[-1]-1)*100 if a.iloc[-1] not in (0,np.nan) else np.nan
-                        if not pd.isna(delta): parts.append(f"TTM {label} jsou oproti poslednímu uzavřenému roku {analyst_pct(delta,0)}.")
-    if len(annual)<5: parts.append(f"Pozor: Yahoo Finance poskytlo pouze {len(annual)} celých účetních období, nikoli plných pět let.")
-    if quarterly is not None and len(quarterly)<8: parts.append(f"Čtvrtletní řada obsahuje pouze {len(quarterly)} období; TTM je proto {('dostupné' if len(quarterly)>=4 else 'nedostupné')}.")
+                    a=safe_float(annual.iloc[-1].get(col)); v=safe_float(ttm.iloc[0].get(col))
+                    if not pd.isna(a) and a != 0 and not pd.isna(v):
+                        parts.append(f"TTM {label} jsou oproti FY končícímu stejným datem {analyst_pct((v/a-1)*100,0)}.")
+        elif not ttm.empty:
+            parts.append("TTM je uvedeno samostatně; přímé srovnání s posledním FY nebylo použito, protože konce sledovaných období nejsou shodné nebo nejsou jednoznačně určitelné.")
+
+    if len(annual)<5: parts.append(f"Yahoo Finance poskytlo pouze {len(annual)} celých fiskálních období, nikoli plných pět let.")
+    if quarterly is not None and len(quarterly)<8: parts.append(f"Čtvrtletní řada obsahuje pouze {len(quarterly)} fiskálních období; TTM je {'dostupné' if len(quarterly)>=4 else 'nedostupné'}.")
     return " ".join(parts) if parts else "Trend nelze z dostupných údajů spolehlivě určit."
 
 
@@ -2072,18 +2130,29 @@ def _analyst_add_profile_evidence(pack, q):
 
 
 def _analyst_add_financial_evidence(pack, annual, quarterly):
-    def add_rows(df, extra):
+    """Add compact financial evidence, preserving actual fiscal-period labels."""
+    def add_selected(df, extra, limit=6):
         if df is None or df.empty:
             return
-        for _, row in df.iterrows():
+        # Only send the most recent periods plus the oldest available point.
+        work = df.copy()
+        rows = []
+        if len(work) > limit:
+            rows.append(work.iloc[0])
+            rows.extend([work.iloc[i] for i in range(max(1, len(work)-limit+1), len(work))])
+        else:
+            rows = [work.iloc[i] for i in range(len(work))]
+        seen = set()
+        for row in rows:
             period = clean_text(row.get("Období"))
+            if period in seen:
+                continue
+            seen.add(period)
             vals = []
             for col, label in [
                 ("Revenue", "Tržby"), ("Net Income", "Čistý zisk"),
-                ("Operating Income", "Provozní zisk"),
-                ("Operating Cash Flow", "Provozní cash flow"),
-                ("FCF", "FCF"), ("Debt", "Dluh"),
-                ("Equity", "Vlastní kapitál"),
+                ("Operating Income", "Provozní zisk"), ("FCF", "FCF"),
+                ("Debt", "Dluh"), ("Equity", "Vlastní kapitál"),
                 ("Net Margin %", "Čistá marže")
             ]:
                 if col not in df.columns:
@@ -2098,14 +2167,16 @@ def _analyst_add_financial_evidence(pack, annual, quarterly):
                     "financial", "Yahoo Finance / yfinance", period,
                     "; ".join(vals), period=period, extra=extra
                 ))
-    add_rows(annual, "Celý účetní rok")
-    add_rows(quarterly, "Čtvrtletní účetní období")
+
+    add_selected(annual, "Celý účetní rok; období je označeno podle skutečného data konce FY.", limit=5)
+    add_selected(quarterly, "Čtvrtletní účetní období; Q je určeno vůči skutečnému konci fiskálního roku, nikoli automaticky podle kalendáře.", limit=6)
 
     ttm = analyst_ttm_from_quarters(quarterly)
-    add_rows(ttm, "TTM = poslední čtyři dostupná čtvrtletí")
+    if not ttm.empty:
+        add_selected(ttm, "TTM = poslední čtyři dostupná čtvrtletí; není to automaticky kalendářní rok.", limit=1)
 
 
-def _analyst_add_news_evidence(pack, news, max_items=30):
+def _analyst_add_news_evidence(pack, news, max_items=10):
     if news is None or news.empty:
         return
     d = news.copy()
@@ -2115,25 +2186,35 @@ def _analyst_add_news_evidence(pack, news, max_items=30):
         d["_dt"] = pd.NaT
     if "Relevance" not in d.columns:
         d["Relevance"] = 0
-    d = d.sort_values(["_dt", "Relevance"], ascending=[False, False], na_position="last")
-    for _, row in d.head(max_items).iterrows():
+    d = d.sort_values(["Relevance", "_dt"], ascending=[False, False], na_position="last")
+
+    seen = set()
+    count = 0
+    for _, row in d.iterrows():
         title = clean_text(row.get("Název"))
         if not title:
             continue
+        key = re.sub(r"[^a-z0-9]+", " ", title.lower()).strip()
+        if key in seen:
+            continue
+        seen.add(key)
         desc = clean_text(row.get("Popis"))
-        claim = title + (f" | Popis zdroje: {desc[:1200]}" if desc else "")
+        claim = title + (f" | Popis zdroje: {desc[:500]}" if desc else "")
         pack.append(_analyst_source_item(
             "news", clean_text(row.get("Zdroj")) or "Google News",
             clean_text(row.get("Datum")), claim,
             url=clean_text(row.get("Odkaz")),
             extra="Externí zpráva; titulek/popisek je claim zdroje, nikoli automaticky ověřený fakt"
         ))
+        count += 1
+        if count >= max_items:
+            break
 
 
 def _analyst_add_sec_evidence(pack, sec):
     if sec is None or sec.empty:
         return
-    for _, row in sec.head(20).iterrows():
+    for _, row in sec.head(6).iterrows():
         form = clean_text(row.get("Formulář"))
         date = clean_text(row.get("Datum"))
         report = clean_text(row.get("Datum výkazu"))
@@ -2161,38 +2242,43 @@ def analyst_build_evidence_pack(company, ticker, exchange, q, annual, quarterly,
     return pack
 
 
-def _analyst_evidence_text(pack, max_chars=36000):
+def _analyst_evidence_text(pack, max_chars=12000):
     rows = []
     for i, item in enumerate(pack, 1):
         line = (
-            f"[E{i}] TYP={item['type']} | ZDROJ={item['source']} | "
-            f"DATUM={item['date']} | OBDOBÍ={item['period']} | "
-            f"CLAIM/FAKT={item['claim']}"
+            f"[E{i}] {item['type']} | {item['source']} | {item['date']} | "
+            f"{item['period']} | {item['claim']}"
         )
         if item.get("extra"):
-            line += f" | POZNÁMKA={item['extra']}"
-        if item.get("url"):
-            line += f" | URL={item['url']}"
+            line += f" | {item['extra']}"
         rows.append(line)
-    return "\n".join(rows)[:max_chars]
+    text = "\n".join(rows)
+    return text[:max_chars]
 
 
 def _analyst_financial_change_summary(annual, quarterly):
     parts = []
     if annual is not None and not annual.empty:
+        parts.append(f"Dostupná roční řada: {len(annual)} fiskálních období; období jsou označena skutečným datem konce FY.")
         for col, label in [("Revenue", "tržby"), ("Net Income", "čistý zisk"), ("FCF", "FCF"), ("Debt", "dluh")]:
             if col not in annual.columns:
                 continue
             s = pd.to_numeric(annual[col], errors="coerce").dropna()
             if len(s) >= 2 and s.iloc[0] != 0:
-                parts.append(f"V dostupné roční řadě se {label} změnil z {analyst_human_number(s.iloc[0])} na {analyst_human_number(s.iloc[-1])}.")
+                change = (s.iloc[-1] / s.iloc[0] - 1) * 100
+                parts.append(f"{label}: {change:+.1f} % mezi nejstarším a nejnovějším dostupným FY.")
     if quarterly is not None and not quarterly.empty:
+        parts.append(f"Dostupná kvartální řada: {len(quarterly)} fiskálních kvartálů; označení Q vychází z fiskálního roku.")
         for col, label in [("Revenue", "tržby"), ("Net Income", "čistý zisk"), ("FCF", "FCF")]:
             if col not in quarterly.columns:
                 continue
             s = pd.to_numeric(quarterly[col], errors="coerce").dropna()
-            if len(s) >= 2:
-                parts.append(f"V dostupné kvartální řadě se {label} změnil z {analyst_human_number(s.iloc[0])} na {analyst_human_number(s.iloc[-1])}.")
+            if len(s) >= 2 and s.iloc[0] != 0:
+                change = (s.iloc[-1] / s.iloc[0] - 1) * 100
+                parts.append(f"{label}: {change:+.1f} % mezi nejstarším a nejnovějším dostupným kvartálem.")
+    ttm = analyst_ttm_from_quarters(quarterly)
+    if not ttm.empty:
+        parts.append("TTM je součet posledních čtyř dostupných kvartálů; není vydáváno za samostatný fiskální rok.")
     return "\n".join(parts)
 
 
@@ -2211,39 +2297,32 @@ def _analyst_price_evidence(price):
     return "; ".join(parts)
 
 
-@st.cache_data(ttl=900, show_spinner=False)
 @st.cache_data(ttl=60, show_spinner=False)
 def groq_connection_diagnostics(api_key, model="openai/gpt-oss-120b"):
     results = []
     base = "https://api.groq.com"
-    headers = {"Authorization": f"Bearer {api_key}", "User-Agent": "Stock-Screener/6.16"}
-
-    # 1) Basic reachability. A 404/405 still proves that the host was reached.
+    headers = {"Authorization": f"Bearer {api_key}", "User-Agent": "Stock-Screener/6.17"}
     try:
-        r = requests.get(base + "/", headers={"User-Agent": "Stock-Screener/6.16"}, timeout=12)
+        r = requests.get(base + "/", headers={"User-Agent": "Stock-Screener/6.17"}, timeout=12)
         results.append({"test": "api.groq.com – základní dostupnost", "status": r.status_code, "detail": r.text[:300]})
     except Exception as e:
         results.append({"test": "api.groq.com – základní dostupnost", "status": "ERROR", "detail": f"{type(e).__name__}: {e}"})
-
-    # 2) Authenticated models endpoint distinguishes network blocking from a bad key.
     try:
         r = requests.get(base + "/openai/v1/models", headers=headers, timeout=15)
         results.append({"test": "Groq /openai/v1/models", "status": r.status_code, "detail": r.text[:700]})
     except Exception as e:
         results.append({"test": "Groq /openai/v1/models", "status": "ERROR", "detail": f"{type(e).__name__}: {e}"})
-
-    # 3) Realistic small completion. V6.15 used only 8 tokens, which can be
-    # consumed by GPT-OSS reasoning before it reaches the requested answer.
     payload = {
         "model": model,
-        "messages": [{"role": "user", "content": "Reply exactly with the single word OK. Do not explain anything."}],
+        "messages": [{"role": "user", "content": "Reply exactly with three short lines: OK / MODEL / READY."}],
         "temperature": 0,
+        "max_completion_tokens": 600,
         "reasoning_effort": "low",
-        "max_completion_tokens": 256
+        "include_reasoning": False
     }
     try:
-        r = requests.post(base + "/openai/v1/chat/completions", headers={**headers, "Content-Type": "application/json"}, json=payload, timeout=20)
-        detail = r.text[:1800]
+        r = requests.post(base + "/openai/v1/chat/completions", headers={**headers, "Content-Type": "application/json"}, json=payload, timeout=30)
+        detail = r.text[:1600]
         if r.status_code == 200:
             try:
                 data = r.json()
@@ -2251,23 +2330,20 @@ def groq_connection_diagnostics(api_key, model="openai/gpt-oss-120b"):
                 msg = choice.get("message") or {}
                 usage = data.get("usage") or {}
                 detail = (
-                    f"HTTP 200\n"
-                    f"model: {data.get('model', model)}\n"
-                    f"finish_reason: {choice.get('finish_reason')}\n"
-                    f"content: {msg.get('content', '')!r}\n"
-                    f"reasoning: {msg.get('reasoning', '')!r}\n"
-                    f"completion_tokens: {usage.get('completion_tokens')}\n"
-                    f"reasoning_tokens: {(usage.get('completion_tokens_details') or {}).get('reasoning_tokens')}"
+                    f"finish_reason={choice.get('finish_reason')}\n"
+                    f"completion_tokens={usage.get('completion_tokens')}\n"
+                    f"reasoning_tokens={usage.get('reasoning_tokens')}\n\n"
+                    f"{clean_text(msg.get('content')) or '(prázdný content)'}"
                 )
             except Exception:
                 pass
         results.append({"test": f"Groq Chat Completions – {model}", "status": r.status_code, "detail": detail})
     except Exception as e:
         results.append({"test": f"Groq Chat Completions – {model}", "status": "ERROR", "detail": f"{type(e).__name__}: {e}"})
-
     return results
 
 
+@st.cache_data(ttl=900, show_spinner=False)
 def analyst_ai_synthesis(company, ticker, exchange, q, annual, quarterly, news, sec, price=None):
     try:
         api_key = st.secrets["GROQ_API_KEY"]
@@ -2275,7 +2351,7 @@ def analyst_ai_synthesis(company, ticker, exchange, q, annual, quarterly, news, 
         return {"ok": False, "error": "Chybí GROQ_API_KEY ve Streamlit Secrets.", "text": "", "model": "openai/gpt-oss-120b"}
 
     pack = analyst_build_evidence_pack(company, ticker, exchange, q, annual, quarterly, news, sec)
-    evidence = _analyst_evidence_text(pack)
+    evidence = _analyst_evidence_text(pack, max_chars=12000)
     fin = _analyst_financial_change_summary(annual, quarterly)
     price_ctx = _analyst_price_evidence(price)
 
@@ -2287,132 +2363,90 @@ def analyst_ai_synthesis(company, ticker, exchange, q, annual, quarterly, news, 
         "Nejasný / smíšený příběh"
     ]
 
-    system_prompt = f"""
-Jsi seniorní analytik jedné veřejně obchodované společnosti.
+    prompt = f"""Jsi seniorní analytik veřejně obchodované společnosti {company} ({ticker}, {exchange}).
+ÚKOL: Z dostupné evidence zjisti nejvýše 4 skutečně odlišné změny, které právě mění ekonomiku firmy a její pracovní investiční příběh.
 
-HLAVNÍ ÚKOL: zjistit, CO SE VE FIRMĚ PRÁVĚ MĚNÍ a jak se tím mění ekonomika firmy a pracovní investiční příběh.
+PŘÍSNÁ PRAVIDLA:
+- Používej pouze níže uvedenou evidenci. Nevymýšlej čísla, události, výroky, zdroje ani odkazy.
+- Faktická tvrzení označ [E#]. News headline/popisek je pouze claim zdroje.
+- Logickou interpretaci označ **Inference:**; chybějící informace **Neznáme:**.
+- Pokud zdroje odporují, ukaž konflikt.
+- Nikdy nepřisuzuj růst/pokles konkrétnímu segmentu bez přímé evidence.
+- Nepředpokládej, že fiskální rok končí 31.12. Respektuj označení období a skutečná data konce FY.
+- TTM je posledních 4 dostupných kvartálů, nikoli automaticky kalendářní rok.
+- Nezaměňuj procentní změnu za absolutní hodnotu.
+- Opakované články o stejné události slouč do jednoho tématu.
+- Žádné Buy/Hold/Sell, skóre, pořadí nebo doporučení.
 
-PRACUJEŠ VÝHRADNĚ S EVIDENCE PACKEM.
+POVOLENÉ NÁZVY PŘÍBĚHU: {'; '.join(allowed_stories)}
 
-PRAVIDLA:
-- Nevymýšlej žádná čísla, události, management výroky, výsledky, úspory, CAPEX, tržní podíly, zdroje ani odkazy.
-- Každý významný fakt označ [E#].
-- News headline/popisek je claim zdroje, ne automaticky ověřený fakt.
-- Pokud jde o logickou interpretaci, označ ji **Inference:**.
-- Pokud něco z dat nevíme, označ **Neznáme:**.
-- Pokud se zdroje rozcházejí, ukaž konflikt.
-- Neříkej, že konkrétní segment rostl/klesal, pokud to evidence výslovně neříká.
-- Nepoužívej obecné znalosti odvětví jako fakta o této firmě.
-- Nezaměňuj změnu o -18 % za hodnotu -18.
-- Neopakuj pouze tržby, zisk a cenu. Hledej ekonomickou změnu za nimi, ale jen pokud ji důkazy podporují.
-- Vyber nejvýše 4 skutečně odlišná témata. Pokud existují jen 2, napiš 2.
-- Žádné Buy/Hold/Sell, žádné skóre, žádné pořadí.
-- Pracovní příběh je hypotéza, ne doporučení.
-
-POVOLENÉ NÁZVY PRACOVNÍHO PŘÍBĚHU:
-{'; '.join(allowed_stories)}
-"""
-
-    user_prompt = f"""
 FIRMA: {company}
-TICKER: {ticker}
-BURZA: {exchange}
-SEKTOR: {clean_text(q.get('sector'))}
-ODVĚTVÍ: {clean_text(q.get('industry'))}
+SEKTOR: {clean_text(q.get('sector'))} | ODVĚTVÍ: {clean_text(q.get('industry'))}
 
-STRUČNÝ POPIS Z YAHOO FINANCE:
-{clean_text(q.get('summary'))[:5000]}
-
-DETERMINISTICKÝ FINANČNÍ KONTEXT:
+FINANČNÍ KONTEXT:
 {fin or 'Není k dispozici.'}
 
 CENOVÝ KONTEXT:
 {price_ctx or 'Není k dispozici.'}
 
-EVIDENCE PACK:
-{evidence}
+EVIDENCE:
+{evidence or 'Není k dispozici.'}
 
-Vytvoř výstup přesně v této logice:
-
+VÝSTUP:
 ## Co se ve firmě právě mění
-
-### 1. [název skutečné změny]
+Pro každé téma:
+### 1. [konkrétní změna]
 **Co víme:** ... [E#]
-**Co se podle toho mění:** ...
+**Co se mění:** ...
 **Ekonomický dopad:** ...
 **Inference:** ...
 **Neznáme:** ...
 **Charakter změny:** strukturální / cyklická / dočasná / jednorázová / nejasná
-**Co by změnu potvrdilo nebo vyvrátilo:** ...
-
-### 2. ...
-Stejná struktura.
-
-### 3. ...
-Pouze pokud existuje třetí odlišné významné téma.
-
-### 4. ...
-Pouze pokud existuje čtvrté odlišné významné téma.
+**Co by ji potvrdilo nebo vyvrátilo:** ...
 
 ## Vztah k finančním výsledkům
 **Co vidíme v číslech:** ...
-**Co čísla mohou znamenat:** ...
+**Co to může znamenat:** ...
 **Co z čísel nelze zjistit:** ...
 
 ## Co si navzájem potvrzují nebo odporují zdroje
-Pouze skutečné vazby a konflikty.
+Jen skutečné vazby nebo konflikty.
 
 ## Pracovní investiční příběh
 **[jeden povolený název]**
-Proč tento příběh odpovídá důkazům: ... [E#]
+Proč: ... [E#]
 **Protiargument:** ...
 **Alternativní interpretace:** ...
 
 ## Co bych teď sledoval
-3–5 konkrétních ověřitelných věcí navázaných na dosud nevyřešené otázky.
+3–5 konkrétních ověřitelných věcí.
 """
 
     payload = {
         "model": "openai/gpt-oss-120b",
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ],
-        "temperature": 0.15,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.2,
+        "max_completion_tokens": 3200,
         "reasoning_effort": "medium",
-        "max_completion_tokens": 12000
+        "include_reasoning": False
     }
     try:
         r = requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.16"},
-            json=payload,
-            timeout=90
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.17"},
+            json=payload, timeout=90
         )
         if r.status_code != 200:
-            return {"ok": False, "error": f"Groq HTTP {r.status_code}: {r.text[:1200]}", "text": "", "model": "openai/gpt-oss-120b"}
+            return {"ok": False, "error": f"Groq HTTP {r.status_code}: {r.text[:1200]}", "text": "", "model": "openai/gpt-oss-120b", "evidence_count": len(pack)}
         data = r.json()
         choice = (data.get("choices") or [{}])[0]
-        message = choice.get("message") or {}
-        text = clean_text(message.get("content", ""))
-        finish_reason = choice.get("finish_reason")
-        usage = data.get("usage") or {}
-        completion_details = usage.get("completion_tokens_details") or {}
-        diagnostic = (
-            f"finish_reason={finish_reason}; "
-            f"completion_tokens={usage.get('completion_tokens')}; "
-            f"reasoning_tokens={completion_details.get('reasoning_tokens')}; "
-            f"content_chars={len(text)}"
-        )
+        text = clean_text((choice.get("message") or {}).get("content"))
+        finish = choice.get("finish_reason")
         if len(text) < 400:
-            if finish_reason == "length":
-                error = "Groq vyčerpal limit generovaných tokenů dříve, než dokončil text. " + diagnostic
-            else:
-                error = "Groq vrátil příliš krátkou odpověď. " + diagnostic
-            return {"ok": False, "error": error, "text": text, "model": "openai/gpt-oss-120b", "evidence_count": len(pack), "finish_reason": finish_reason, "usage": usage}
-        return {"ok": True, "error": "", "text": text, "model": "openai/gpt-oss-120b", "evidence_count": len(pack), "finish_reason": finish_reason, "usage": usage}
+            return {"ok": False, "error": f"Groq vrátil příliš krátkou odpověď (finish_reason={finish}).", "text": text, "model": "openai/gpt-oss-120b", "evidence_count": len(pack)}
+        return {"ok": True, "error": "", "text": text, "model": "openai/gpt-oss-120b", "evidence_count": len(pack), "finish_reason": finish, "usage": data.get("usage", {})}
     except Exception as e:
-        return {"ok": False, "error": f"{type(e).__name__}: {e}", "text": "", "model": "openai/gpt-oss-120b"}
+        return {"ok": False, "error": f"{type(e).__name__}: {e}", "text": "", "model": "openai/gpt-oss-120b", "evidence_count": len(pack)}
 
 
 def analyst_current_developments(company, q, annual, quarterly, news, sec, ticker="", exchange="", price=None):
@@ -2436,46 +2470,6 @@ def analyst_story_hypothesis(q, annual, quarterly, news, sec, ai_result=None):
             title = lines[0].strip("*# ") if lines else "Nejasný / smíšený příběh"
             return title, part.strip()
     return "Nejasný / smíšený příběh", "Pracovní příběh nebyl mechanicky dopočítán, protože AI syntéza nebyla dostupná."
-
-
-def groq_analyst_request_diagnostic(api_key, model="openai/gpt-oss-120b"):
-    """Ověří stejný typ requestu jako Analytik, ale s malým zkráceným promptem."""
-    payload = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": "Jsi analytik. Pracuj pouze s dodanými důkazy. Odpověz česky stručně."},
-            {"role": "user", "content": "Důkaz [E1]: Tržby vzrostly meziročně o 10 %. Důkaz [E2]: Provozní marže klesla z 12 % na 10 %. Napiš přesně 3 krátké věty: co se změnilo, ekonomický význam a co sledovat dál. Uveď [E1] a [E2]."}
-        ],
-        "temperature": 0.15,
-        "reasoning_effort": "medium",
-        "max_completion_tokens": 1200
-    }
-    try:
-        r = requests.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.16"},
-            json=payload,
-            timeout=30
-        )
-        if r.status_code != 200:
-            return {"ok": False, "status": r.status_code, "detail": r.text[:1600]}
-        data = r.json()
-        choice = (data.get("choices") or [{}])[0]
-        msg = choice.get("message") or {}
-        usage = data.get("usage") or {}
-        details = usage.get("completion_tokens_details") or {}
-        return {
-            "ok": True,
-            "status": 200,
-            "detail": (
-                f"finish_reason={choice.get('finish_reason')}\n"
-                f"completion_tokens={usage.get('completion_tokens')}\n"
-                f"reasoning_tokens={details.get('reasoning_tokens')}\n\n"
-                f"{clean_text(msg.get('content', ''))}"
-            )
-        }
-    except Exception as e:
-        return {"ok": False, "status": "ERROR", "detail": f"{type(e).__name__}: {e}"}
 
 
 def analyst_render(ticker_input):
@@ -2509,19 +2503,6 @@ def analyst_render(ticker_input):
                     st.success("Groq odpovídá HTTP 200 alespoň na jednom rozhodujícím testu. Pokud Analytik přesto selhává, budeme hledat problém v konkrétním požadavku.")
             except Exception as e:
                 st.error(f"Diagnostiku se nepodařilo spustit: {type(e).__name__}: {e}")
-
-        test_realistic = st.button("Otestovat malý analytický request", key="groq_realistic_diag_button")
-        if test_realistic:
-            try:
-                api_key = st.secrets["GROQ_API_KEY"]
-                diag2 = groq_analyst_request_diagnostic(api_key)
-                if diag2.get("ok"):
-                    st.success(f"Groq HTTP {diag2.get('status')} – stejný typ Chat Completions requestu funguje.")
-                else:
-                    st.error(f"Groq test selhal: HTTP {diag2.get('status')}")
-                st.code(diag2.get("detail", ""))
-            except Exception as e:
-                st.error(f"Test analytického requestu se nepodařilo spustit: {type(e).__name__}: {e}")
     if not analyse:
         st.info("Zadej ticker a spusť analytické jádro. Analytik je nezávislý na Screeneru.")
         return
@@ -2551,7 +2532,7 @@ def analyst_render(ticker_input):
 
     status.info("4/5 Stavím důkazní balíček a provádím AI syntézu…")
     ai_result = analyst_ai_synthesis(company, ticker, exchange, q, annual, quarterly, news, sec, price)
-    current = analyst_current_developments(company, q, annual, quarterly, news, sec, ticker, exchange, price)
+    current = analyst_current_developments(company, q, annual, quarterly, news, sec, ticker, exchange, price) if not ai_result.get("ok") else ai_result.get("text", "").split("## Pracovní investiční příběh", 1)[0].rstrip()
     primary, story_reason = analyst_story_hypothesis(q, annual, quarterly, news, sec, ai_result)
     price_comment = analyst_price_commentary(price)
     status.success("5/5 Analytické jádro dokončeno.")
@@ -2594,7 +2575,7 @@ def analyst_render(ticker_input):
             st.markdown("**Celé účetní roky dostupné přes Yahoo Finance**")
             st.dataframe(annual, use_container_width=True, hide_index=True)
         if not quarterly.empty:
-            st.markdown("**Posledních dostupných 8 čtvrtletí**")
+            st.markdown(f"**Posledních dostupných {len(quarterly)} fiskálních čtvrtletí**")
             st.dataframe(quarterly, use_container_width=True, hide_index=True)
         ttm = analyst_ttm_from_quarters(quarterly)
         if not ttm.empty:
