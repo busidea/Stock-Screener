@@ -2,221 +2,68 @@ import time
 import requests
 import streamlit as st
 
-
-# ============================================================
-# PAGE
-# ============================================================
-
 st.set_page_config(
-    page_title="AI Backend Test V2",
+    page_title="Groq AI Test",
+    page_icon="🧪",
     layout="wide"
 )
 
-st.title("🧪 AI Backend Test V2")
+st.title("🧪 Groq AI – přímý test")
 st.caption(
-    "Diagnostika skutečné dostupnosti AI backendů pro Stock-Screener."
+    "Izolovaný test přímého Groq API. "
+    "Hlavní Stock-Screener aplikace se tímto testem nemění."
 )
 
-
-# ============================================================
-# TEST PROMPTS
-# ============================================================
-
-MINIMAL_PROMPT = "Reply only with OK."
-
-SHL_PROMPT = """Jsi seniorní akciový analytik.
-
-Analyzuj Siemens Healthineers (SHL.DE).
-
-Nechci seznam článků ani obecný profil firmy. Chci vlastní analytickou
-syntézu toho, co se ve společnosti skutečně mění.
-
-Identifikuj 3 nejdůležitější probíhající změny.
-
-U každé vysvětli:
-
-1. co se změnilo
-2. proč se to děje
-3. jaký je ekonomický dopad
-4. zda jde spíše o strukturální, cyklickou nebo dočasnou změnu
-5. jak se to projevuje ve finančních datech
-6. hlavní protiargument
-
-Řekni také, co by tuto hypotézu v dalších kvartálech potvrdilo
-a co by ji naopak vyvrátilo.
-
-Na závěr formuluj jeden pracovní investiční příběh.
-
-Nedávej doporučení BUY / HOLD / SELL.
-
-Podklady:
-
-Tržby za víceleté období +24 %.
-Čistý zisk +12 %.
-FCF -6 %.
-
-TTM tržby proti poslednímu roku -25 %.
-TTM čistý zisk -16 %.
-TTM FCF -18 %.
-
-V roce 2026 existuje tlak na výhled kvůli čínskému trhu.
-Současně se objevují informace o silnějších maržích
-a pokračujícím růstu v některých částech podnikání.
-
-Firma působí v:
-- Imaging
-- Diagnostics
-- Varian
-- Advanced Therapies
-
-Akcie jsou přibližně:
--17 % za 12 měsíců
--22 % za 3 roky.
-
-Důležité:
-Neopakuj pouze vstupní údaje.
-Pokud z nich nelze některý závěr spolehlivě odvodit,
-výslovně to řekni.
-"""
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+MODEL = "openai/gpt-oss-120b"
 
 
-# ============================================================
-# ENDPOINTS
-# ============================================================
-
-ENDPOINTS = [
-    ("G4F / Groq", "https://g4f.space/api/groq"),
-    ("G4F / Gemini", "https://g4f.space/api/gemini"),
-    ("G4F / NVIDIA", "https://g4f.space/api/nvidia"),
-    ("G4F / Ollama", "https://g4f.space/api/ollama"),
-    ("G4F / Pollinations", "https://g4f.space/api/pollinations"),
-]
+def get_api_key():
+    try:
+        key = st.secrets.get("GROQ_API_KEY", "")
+        return key.strip() if key else ""
+    except Exception:
+        return ""
 
 
-HEADERS = {
-    "Content-Type": "application/json",
-    "User-Agent": "Stock-Screener-AI-Test/2.0",
-}
+def groq_chat(prompt, system_prompt=None):
+    api_key = get_api_key()
 
-
-# ============================================================
-# HELPERS
-# ============================================================
-
-def classify_error(exc):
-    text = str(exc).lower()
-
-    if "402" in text:
-        return "⚠️ HTTP 402 – provider vyžaduje credits / quota"
-
-    if "401" in text or "403" in text:
-        return "🔐 AUTH ERROR – autentizace / oprávnění"
-
-    if "timeout" in text:
-        return "⏱ TIMEOUT"
-
-    if "connection" in text:
-        return "🌐 CONNECTION ERROR"
-
-    return "❌ JINÁ CHYBA"
-
-
-def get_models(base):
-    start = time.time()
-
-    response = requests.get(
-        base + "/models",
-        timeout=15,
-        headers={
-            "User-Agent": HEADERS["User-Agent"]
-        },
-    )
-
-    elapsed = time.time() - start
-
-    if not response.ok:
+    if not api_key:
         raise RuntimeError(
-            f"HTTP {response.status_code}: "
-            f"{response.text[:1000]}"
+            "GROQ_API_KEY nebyl nalezen ve Streamlit Secrets."
         )
 
-    data = response.json()
+    messages = []
 
-    if isinstance(data, dict):
-        raw = data.get(
-            "data",
-            data.get("models", [])
-        )
-    else:
-        raw = data
+    if system_prompt:
+        messages.append({
+            "role": "system",
+            "content": system_prompt
+        })
 
-    models = []
+    messages.append({
+        "role": "user",
+        "content": prompt
+    })
 
-    for item in raw:
-        if isinstance(item, str):
-            models.append(item)
-
-        elif isinstance(item, dict):
-            model_id = item.get("id")
-
-            if model_id:
-                models.append(model_id)
-
-    return models, elapsed
-
-
-def choose_model(models):
-    """
-    Pokusí se vybrat rozumný model.
-    Pokud není známý model, použije první dostupný.
-    """
-
-    if not models:
-        return None
-
-    preferred_patterns = [
-        "gpt-oss-20b",
-        "llama-3.1-8b",
-        "llama-3.2-3b",
-        "gemini-2.0-flash",
-        "gemini-2.5-flash",
-        "qwen",
-        "mistral",
-    ]
-
-    lowered = [
-        (m, m.lower())
-        for m in models
-    ]
-
-    for pattern in preferred_patterns:
-        for original, low in lowered:
-            if pattern in low:
-                return original
-
-    return models[0]
-
-
-def chat_test(base, model, prompt, timeout=60):
-    start = time.time()
+    started = time.time()
 
     response = requests.post(
-        base + "/chat/completions",
-        timeout=timeout,
-        json={
-            "model": model,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": prompt,
-                }
-            ],
-            "temperature": 0.1,
+        GROQ_URL,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
         },
-        headers=HEADERS,
+        json={
+            "model": MODEL,
+            "messages": messages,
+            "temperature": 0.2
+        },
+        timeout=90
     )
 
-    elapsed = time.time() - start
+    elapsed = time.time() - started
 
     if not response.ok:
         raise RuntimeError(
@@ -227,370 +74,178 @@ def chat_test(base, model, prompt, timeout=60):
     data = response.json()
 
     try:
-        content = (
-            data["choices"][0]
-            ["message"]["content"]
-        )
+        content = data["choices"][0]["message"]["content"]
     except Exception:
         raise RuntimeError(
-            "HTTP 200, ale odpověď nemá očekávanou strukturu."
+            "Groq odpověděl, ale odpověď nemá očekávanou strukturu."
         )
 
-    return content, elapsed, data
+    return elapsed, content, data
 
 
-# ============================================================
-# HEADER
-# ============================================================
+# ------------------------------------------------------------
+# 1. Kontrola Secret
+# ------------------------------------------------------------
 
-st.markdown(
-    """
-### Co tento test ověřuje
+st.subheader("1. Kontrola API klíče")
 
-Test postupuje ve třech krocích:
+api_key = get_api_key()
 
-**1. Endpoint**
-→ odpovídá `/models`?
+if api_key:
+    st.success(
+        f"✅ GROQ_API_KEY je nalezen. "
+        f"Klíč má {len(api_key)} znaků a jeho hodnota se nezobrazuje."
+    )
+else:
+    st.error(
+        "❌ GROQ_API_KEY nebyl nalezen. "
+        "Zkontroluj Settings → Secrets této testovací aplikace."
+    )
 
-**2. Model**
-→ existuje použitelný model?
 
-**3. Skutečná inference**
-→ model skutečně odpoví na chat request?
+# ------------------------------------------------------------
+# 2. Minimální test
+# ------------------------------------------------------------
 
-Pouhé `/models OK` tedy není považováno za funkční AI backend.
-"""
+st.subheader("2. Minimální test komunikace")
+
+if st.button("▶ Otestovat Groq", type="primary"):
+
+    if not api_key:
+        st.error("Nejdříve musí být dostupný GROQ_API_KEY.")
+    else:
+        try:
+            elapsed, content, raw = groq_chat(
+                "Odpověz pouze dvěma slovy: GROQ OK",
+                "Jsi jednoduchý diagnostický test AI API. "
+                "Dodrž přesně požadovaný formát odpovědi."
+            )
+
+            st.success(
+                f"✅ Groq odpověděl. "
+                f"Čas: {elapsed:.1f} s"
+            )
+
+            st.markdown("### Odpověď AI")
+            st.info(content)
+
+            with st.expander("Technické informace"):
+                st.write(f"Model: `{MODEL}`")
+                st.write(f"Čas odpovědi: {elapsed:.2f} s")
+                st.write(
+                    f"Počet znaků odpovědi: {len(content)}"
+                )
+
+        except Exception as e:
+            st.error(f"❌ Groq test selhal: {e}")
+
+
+# ------------------------------------------------------------
+# 3. Skutečný analytický test SHL
+# ------------------------------------------------------------
+
+st.divider()
+st.subheader("3. Skutečný analytický test – Siemens Healthineers")
+
+st.write(
+    "Tento test už neověřuje pouze spojení. "
+    "Ověří, zda model dokáže vytvořit analytickou syntézu."
 )
 
-
-# ============================================================
-# RUN DIAGNOSTIC
-# ============================================================
-
-if st.button(
-    "🔎 Spustit kompletní diagnostiku",
-    type="primary"
-):
-
-    results = []
-
-    progress = st.progress(0)
-
-    for index, (name, base) in enumerate(ENDPOINTS):
-
-        st.divider()
-
-        st.subheader(name)
-
-        result = {
-            "name": name,
-            "base": base,
-            "models_ok": False,
-            "chat_ok": False,
-            "model": None,
-            "models": [],
-            "status": "",
-            "elapsed_models": None,
-            "elapsed_chat": None,
-            "response": None,
-            "raw": None,
-        }
-
-        # ----------------------------------------------------
-        # STEP 1 – MODELS
-        # ----------------------------------------------------
-
-        try:
-
-            models, elapsed = get_models(base)
-
-            result["models_ok"] = True
-            result["models"] = models
-            result["elapsed_models"] = elapsed
-
-            st.success(
-                f"✅ /models OK — "
-                f"{len(models)} modelů "
-                f"({elapsed:.1f} s)"
-            )
-
-            if models:
-
-                st.code(
-                    "\n".join(models[:20])
-                )
-
-            else:
-
-                st.warning(
-                    "⚠️ Endpoint odpověděl, "
-                    "ale seznam modelů je prázdný."
-                )
-
-        except Exception as exc:
-
-            result["status"] = classify_error(exc)
-
-            st.error(
-                f"{result['status']}\n\n"
-                f"{exc}"
-            )
-
-            results.append(result)
-
-            progress.progress(
-                (index + 1) / len(ENDPOINTS)
-            )
-
-            continue
-
-        # ----------------------------------------------------
-        # STEP 2 – CHOOSE MODEL
-        # ----------------------------------------------------
-
-        model = choose_model(models)
-
-        result["model"] = model
-
-        if not model:
-
-            result["status"] = (
-                "❌ Žádný použitelný model"
-            )
-
-            st.error(result["status"])
-
-            results.append(result)
-
-            progress.progress(
-                (index + 1) / len(ENDPOINTS)
-            )
-
-            continue
-
-        st.info(
-            f"Vybraný testovací model: `{model}`"
-        )
-
-        # ----------------------------------------------------
-        # STEP 3 – REAL CHAT
-        # ----------------------------------------------------
-
-        st.write(
-            "Odesílám minimální test: "
-            "`Reply only with OK.`"
-        )
-
-        try:
-
-            content, elapsed, raw = chat_test(
-                base,
-                model,
-                MINIMAL_PROMPT,
-                timeout=60,
-            )
-
-            result["chat_ok"] = True
-            result["elapsed_chat"] = elapsed
-            result["response"] = content
-            result["raw"] = raw
-            result["status"] = "OK"
-
-            st.success(
-                f"🟢 FUNGUJE — HTTP 200 — "
-                f"{elapsed:.1f} s"
-            )
-
-            st.write(
-                f"**Odpověď:** {content}"
-            )
-
-        except Exception as exc:
-
-            result["status"] = classify_error(exc)
-
-            st.error(
-                f"{result['status']}\n\n"
-                f"{exc}"
-            )
-
-        results.append(result)
-
-        progress.progress(
-            (index + 1) / len(ENDPOINTS)
-        )
-
-    st.session_state["diagnostic_results"] = results
-
-
-# ============================================================
-# SUMMARY
-# ============================================================
-
-if "diagnostic_results" in st.session_state:
-
-    results = st.session_state["diagnostic_results"]
-
-    st.divider()
-
-    st.header("📊 Výsledek diagnostiky")
-
-    for r in results:
-
-        if r["chat_ok"]:
-
-            st.success(
-                f"🟢 {r['name']} — FUNGUJE — "
-                f"model: `{r['model']}` — "
-                f"{r['elapsed_chat']:.1f} s"
-            )
-
-        elif r["models_ok"]:
-
-            st.warning(
-                f"🟠 {r['name']} — "
-                f"/models funguje, ale chat NEFUNGUJE — "
-                f"{r['status']}"
-            )
-
-        else:
-
-            st.error(
-                f"🔴 {r['name']} — "
-                f"{r['status']}"
-            )
-
-
-    # ========================================================
-    # TECHNICAL DETAILS
-    # ========================================================
-
-    with st.expander("🔧 Technické detaily"):
-
-        for r in results:
-
-            st.markdown(
-                f"### {r['name']}"
-            )
-
-            st.write(
-                f"Endpoint: `{r['base']}`"
-            )
-
-            st.write(
-                f"Status: **{r['status']}**"
-            )
-
-            if r["model"]:
-                st.write(
-                    f"Model: `{r['model']}`"
-                )
-
-            if r["elapsed_models"] is not None:
-                st.write(
-                    f"/models čas: "
-                    f"{r['elapsed_models']:.1f} s"
-                )
-
-            if r["elapsed_chat"] is not None:
-                st.write(
-                    f"Chat čas: "
-                    f"{r['elapsed_chat']:.1f} s"
-                )
-
-            if r["response"]:
-                st.write(
-                    f"Odpověď: {r['response']}"
-                )
-
-            if r["raw"]:
-                st.json(r["raw"])
-
-
-# ============================================================
-# SHL TEST
-# ============================================================
-
-if "diagnostic_results" in st.session_state:
-
-    working = [
-        r
-        for r in st.session_state["diagnostic_results"]
-        if r["chat_ok"]
-    ]
-
-    if working:
-
-        st.divider()
-
-        st.header(
-            "🧠 Druhý krok – skutečný analytický test"
-        )
-
-        st.write(
-            "Níže jsou pouze backendy, které "
-            "úspěšně prošly minimálním chat testem."
-        )
-
-        labels = [
-            f"{r['name']} · {r['model']}"
-            for r in working
-        ]
-
-        selected = st.selectbox(
-            "Vyber funkční backend",
-            labels,
-        )
-
-        selected_result = working[
-            labels.index(selected)
-        ]
-
-        if st.button(
-            "▶️ Spustit SHL analytický test"
-        ):
-
-            with st.spinner(
-                "AI zpracovává analytický úkol..."
-            ):
-
-                try:
-
-                    content, elapsed, raw = chat_test(
-                        selected_result["base"],
-                        selected_result["model"],
-                        SHL_PROMPT,
-                        timeout=180,
-                    )
-
-                    st.success(
-                        f"HTTP 200 · "
-                        f"{elapsed:.1f} s · "
-                        f"{len(content)} znaků"
-                    )
-
-                    st.markdown(
-                        "### Výstup AI"
-                    )
-
-                    st.markdown(content)
-
-                    with st.expander(
-                        "🔧 Technická odpověď"
-                    ):
-                        st.json(raw)
-
-                except Exception as exc:
-
-                    st.error(
-                        f"SHL test selhal:\n\n"
-                        f"{classify_error(exc)}\n\n"
-                        f"{exc}"
-                    )
-
+SHL_PROMPT = """
+Jsi seniorní akciový analytik. Analyzuj Siemens Healthineers (SHL.DE).
+
+Nechci seznam článků ani obecný profil firmy.
+Chci vlastní analytickou syntézu toho, co se ve společnosti skutečně mění.
+
+Identifikuj 3 nejdůležitější probíhající změny.
+
+U každé změny vysvětli:
+
+1. Co se změnilo.
+2. Proč se to mění.
+3. Jaký může být ekonomický dopad.
+4. Zda jde především o strukturální, cyklickou,
+   dočasnou nebo jednorázovou změnu.
+5. Co pro tuto interpretaci mluví.
+6. Jaký je hlavní protiargument.
+7. Co by hypotézu v dalších výsledcích potvrdilo
+   nebo vyvrátilo.
+
+Propoj pokud možno změny s finančním vývojem.
+
+Na závěr formuluj jeden pracovní investiční příběh:
+co je dnes hlavní změna oproti dřívějšímu příběhu firmy,
+co může být trhem špatně pochopeno a co je naopak
+rizikem této interpretace.
+
+Nedávej doporučení BUY/SELL a nedávej číselné skóre.
+
+Dostupné podklady:
+
+- víceleté tržby: přibližně +24 %
+- víceletý čistý zisk: přibližně +12 %
+- víceletý FCF: přibližně -6 %
+- TTM tržby proti poslednímu uzavřenému roku: -25 %
+- TTM čistý zisk: -16 %
+- TTM FCF: -18 %
+- v roce 2026 je tlak na výhled zejména kvůli čínskému trhu
+- současně jsou patrné známky silnějších marží
+- některé části podnikání pokračují v růstu
+- hlavní oblasti: Imaging, Diagnostics, Varian,
+  Advanced Therapies
+- akcie přibližně -17 % za 12 měsíců
+- akcie přibližně -22 % za 3 roky
+
+Důležité:
+Nesnaž se pouze zopakovat podklady.
+Pokud z nich nelze určit některou skutečnost,
+výslovně řekni, že podklady ji nepotvrzují.
+"""
+
+
+if st.button("▶ Spustit skutečný SHL analytický test"):
+
+    if not api_key:
+        st.error("Nejdříve musí být dostupný GROQ_API_KEY.")
     else:
+        try:
+            with st.spinner(
+                "Groq analyzuje Siemens Healthineers..."
+            ):
+                elapsed, content, raw = groq_chat(
+                    SHL_PROMPT,
+                    """
+Jsi seniorní equity analytik.
+Piš česky.
+Buď kritický, konkrétní a věcný.
+Nesnaž se uživatele uklidňovat ani mu doporučovat nákup či prodej.
+Odděluj fakta, interpretaci a nejistotu.
+"""
+                )
 
-        st.info(
-            "Zatím nebyl nalezen žádný backend, "
-            "který by úspěšně prošel skutečným chat testem."
-        )
+            st.success(
+                f"✅ Skutečná AI analýza dokončena za {elapsed:.1f} s"
+            )
+
+            st.markdown("### Analytická odpověď Groq")
+
+            st.markdown(content)
+
+            with st.expander("Technické informace"):
+                st.write(f"Model: `{MODEL}`")
+                st.write(f"Čas odpovědi: {elapsed:.2f} s")
+                st.write(f"Délka odpovědi: {len(content)} znaků")
+
+        except Exception as e:
+            st.error(
+                f"❌ SHL analytický test selhal: {e}"
+            )
+
+
+st.divider()
+
+st.caption(
+    "Tento soubor je pouze diagnostický test. "
+    "Nenahrazuje ani nemění hlavní streamlit_app.py."
+)
