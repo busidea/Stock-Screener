@@ -53,7 +53,7 @@ def update_runtime(status=None, stage=None, message=None, error=None, run_id=Non
 
 
 st.title("📊 Stock-Screener")
-st.caption("V6.19 – Screener · samostatný modul Analytik je dostupný v menu vlevo")
+st.caption("V6.20 – Screener · samostatný modul Analytik je dostupný v menu vlevo")
 
 NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 NYSE_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
@@ -2461,7 +2461,7 @@ Uveď pouze skutečné vazby nebo konflikty. Pokud evidence převážně souhlas
     try:
         r = requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.19"},
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.20"},
             json=payload, timeout=90
         )
         if r.status_code != 200:
@@ -2477,13 +2477,30 @@ Uveď pouze skutečné vazby nebo konflikty. Pokud evidence převážně souhlas
         return {"ok": False, "error": f"{type(e).__name__}: {e}", "text": "", "model": "openai/gpt-oss-120b", "evidence_count": len(pack)}
 
 
+def _analyst_extract_section(text, heading):
+    """Return one markdown H2 section without accidentally swallowing adjacent sections."""
+    if not text:
+        return ""
+    marker = f"## {heading}"
+    pos = text.find(marker)
+    if pos < 0:
+        return ""
+    start = pos + len(marker)
+    rest = text[start:]
+    m = re.search(r"(?m)^##\s+", rest)
+    if m:
+        rest = rest[:m.start()]
+    return rest.strip()
+
+
 def analyst_current_developments(company, q, annual, quarterly, news, sec, ticker="", exchange="", price=None):
     result = analyst_ai_synthesis(company, ticker, exchange, q, annual, quarterly, news, sec, price)
     if result.get("ok"):
         text = result.get("text", "")
-        if "## Pracovní investiční příběh" in text:
-            text = text.split("## Pracovní investiční příběh", 1)[0].rstrip()
-        return text
+        section = _analyst_extract_section(text, "Co se ve firmě právě mění")
+        if section:
+            return section
+        return "### ⚠️ AI neposkytla sekci „Co se ve firmě právě mění“.\n\nPracovní investiční příběh je dostupný v samostatné části níže."
     return "### ⚠️ AI syntéza není dostupná\n\n" + result.get("error", "Neznámá chyba.")
 
 
@@ -2492,9 +2509,7 @@ def analyst_story_hypothesis(q, annual, quarterly, news, sec, ai_result=None):
     if ai_result and ai_result.get("ok"):
         text = ai_result.get("text", "")
         if "## Pracovní investiční příběh" in text:
-            part = text.split("## Pracovní investiční příběh", 1)[1]
-            if "## Co bych teď sledoval" in part:
-                part = part.split("## Co bych teď sledoval", 1)[0]
+            part = _analyst_extract_section(text, "Pracovní investiční příběh")
             lines = [x.strip() for x in part.splitlines() if x.strip()]
             title = "Nejasný / smíšený příběh"
             for line in lines:
@@ -2585,7 +2600,7 @@ def analyst_render(ticker_input):
 
     status.info("4/5 Stavím důkazní balíček a provádím AI syntézu…")
     ai_result = analyst_ai_synthesis(company, ticker, exchange, q, annual, quarterly, news, sec, price)
-    current = analyst_current_developments(company, q, annual, quarterly, news, sec, ticker, exchange, price) if not ai_result.get("ok") else ai_result.get("text", "").split("## Pracovní investiční příběh", 1)[0].rstrip()
+    current = analyst_current_developments(company, q, annual, quarterly, news, sec, ticker, exchange, price)
     primary, story_reason = analyst_story_hypothesis(q, annual, quarterly, news, sec, ai_result)
     price_comment = analyst_price_commentary(price)
     status.success("5/5 Analytické jádro dokončeno.")
