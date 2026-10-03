@@ -2413,6 +2413,8 @@ DŮLEŽITÉ POŘADÍ:
 Pracovní investiční příběh musíš určit A VYPSAT JAKO PRVNÍ. Nenechávej jej až na konec odpovědi.
 Nejprve rozhodni, jaký dominantní ekonomický příběh evidence podporuje, a potom tento závěr dolož podrobnou analýzou.
 
+STORY: [jeden povolený název — tento řádek MUSÍ být první řádek odpovědi a musí být přesně ve tvaru STORY: Název]
+
 ## Pracovní investiční příběh
 **Základní charakter firmy:** [stručná ekonomická charakteristika, ne povolený štítek]
 **Aktuální stav:** [co se právě mění; např. růstové zpomalení, provozní zlepšení, restrukturalizace]
@@ -2461,7 +2463,7 @@ Uveď pouze skutečné vazby nebo konflikty. Pokud evidence převážně souhlas
     try:
         r = requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.20"},
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.21"},
             json=payload, timeout=90
         )
         if r.status_code != 200:
@@ -2505,39 +2507,53 @@ def analyst_current_developments(company, q, annual, quarterly, news, sec, ticke
 
 
 def analyst_story_hypothesis(q, annual, quarterly, news, sec, ai_result=None):
-    """Extract the structured working story without inventing a deterministic score."""
-    if ai_result and ai_result.get("ok"):
-        text = ai_result.get("text", "")
-        if "## Pracovní investiční příběh" in text:
-            part = _analyst_extract_section(text, "Pracovní investiční příběh")
-            lines = [x.strip() for x in part.splitlines() if x.strip()]
+    """Extract the AI-selected working story. Never invent a story from financial data."""
+    allowed = {
+        "Kvalitní compounder", "Kvalita za rozumnou cenu", "Růst za rozumnou cenu",
+        "Value / levná firma", "Provozní turnaround", "Cyklické zotavení",
+        "Aktivové / finanční zotavení", "Realitní hodnota", "Provozní zlepšení",
+        "Růstové zotavení", "Vysoký růst / dražší příběh", "Value trap – varování",
+        "Nejasný / smíšený příběh"
+    }
+    if not (ai_result and ai_result.get("ok")):
+        return "Nejasný / smíšený příběh", "AI syntéza nebyla dostupná; příběh proto nebyl dopočítáván z dat."
+
+    text = ai_result.get("text", "")
+    title = ""
+    # V6.21: machine-readable first line is the primary contract.
+    for line in text.splitlines()[:8]:
+        m = re.match(r"^\s*STORY\s*:\s*(.+?)\s*$", line, flags=re.I)
+        if m:
+            title = m.group(1).strip().strip("*#")
+            break
+
+    # Backward compatibility with V6.20/cached responses.
+    if not title:
+        part0 = _analyst_extract_section(text, "Pracovní investiční příběh")
+        for line in part0.splitlines():
+            m = re.search(r"Hlavní pracovní příběh\s*:\s*\*\*([^*]+)\*\*", line, flags=re.I)
+            if m:
+                title = m.group(1).strip()
+                break
+            m = re.search(r"Hlavní pracovní příběh\s*:\s*([^\n]+)", line, flags=re.I)
+            if m:
+                title = m.group(1).strip("*# ")
+                break
+        part = part0
+    else:
+        part = _analyst_extract_section(text, "Pracovní investiční příběh")
+
+    if title not in allowed:
+        for candidate in allowed:
+            if candidate.lower() in title.lower():
+                title = candidate
+                break
+        else:
             title = "Nejasný / smíšený příběh"
-            for line in lines:
-                m = re.search(r"Hlavní pracovní příběh\s*:\s*\*\*([^*]+)\*\*", line, flags=re.I)
-                if m:
-                    title = m.group(1).strip()
-                    break
-                m = re.search(r"Hlavní pracovní příběh\s*:\s*([^\n]+)", line, flags=re.I)
-                if m:
-                    title = m.group(1).strip("*# ")
-                    break
-            allowed = {
-                "Kvalitní compounder", "Kvalita za rozumnou cenu", "Růst za rozumnou cenu",
-                "Value / levná firma", "Provozní turnaround", "Cyklické zotavení",
-                "Aktivové / finanční zotavení", "Realitní hodnota", "Provozní zlepšení",
-                "Růstové zotavení", "Vysoký růst / dražší příběh", "Value trap – varování",
-                "Nejasný / smíšený příběh"
-            }
-            if title not in allowed:
-                # Backward-compatible fallback for older cached AI output.
-                for candidate in allowed:
-                    if candidate.lower() in title.lower():
-                        title = candidate
-                        break
-                else:
-                    title = "Nejasný / smíšený příběh"
-            return title, part.strip()
-    return "Nejasný / smíšený příběh", "Pracovní příběh nebyl mechanicky dopočítán, protože AI syntéza nebyla dostupná."
+
+    if not part:
+        part = f"**Hlavní pracovní příběh:** **{title}**\n\nAI dodala strukturovaný štítek příběhu, ale samostatná sekce s jeho zdůvodněním nebyla ve výstupu nalezena."
+    return title, part.strip()
 
 
 def analyst_render(ticker_input):
@@ -2667,10 +2683,11 @@ def analyst_render(ticker_input):
         st.write(price_comment)
 
     with st.expander("🎯 8. Co má smysl dále ověřit", expanded=True):
-        if ai_result.get("ok") and "## Co bych teď sledoval" in ai_result.get("text", ""):
-            st.markdown(ai_result["text"].split("## Co bych teď sledoval", 1)[1].strip())
+        if ai_result.get("ok"):
+            followup = _analyst_extract_section(ai_result.get("text", ""), "Co bych teď sledoval")
+            st.markdown(followup if followup else "AI neposkytla samostatnou sekci pro další ověření.")
         else:
-            st.write("AI neposkytla samostatnou sekci pro další ověření.")
+            st.write("AI syntéza nebyla dostupná, proto zde nejsou AI navržené kontrolní body.")
 
     with st.expander("📚 9. Zdroje a diagnostika", expanded=False):
         st.write(f"Yahoo Finance: {yahoo_ticker}")
