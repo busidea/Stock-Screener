@@ -53,7 +53,7 @@ def update_runtime(status=None, stage=None, message=None, error=None, run_id=Non
 
 
 st.title("📊 Stock-Screener")
-st.caption("V6.20 – Screener · samostatný modul Analytik je dostupný v menu vlevo")
+st.caption("V6.22 – Screener · samostatný modul Analytik je dostupný v menu vlevo")
 
 NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 NYSE_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
@@ -2105,6 +2105,14 @@ def _analyst_add_profile_evidence(pack, q):
                 f"{label}: {value}"
             ))
 
+    summary = clean_text(q.get("summary"))
+    if summary:
+        pack.append(_analyst_source_item(
+            "profile", "Yahoo Finance", "aktuální data",
+            f"Stručný popis obchodního modelu: {summary[:1800]}",
+            extra="Firemní profil z Yahoo Finance; používá se jako kontext, nikoli jako důkaz konkrétní aktuální změny"
+        ))
+
     vals = []
     for key, label in [
         ("pe", "P/E"), ("forward_pe", "Forward P/E"),
@@ -2378,6 +2386,11 @@ DŮLEŽITÉ: ANALYTICKÁ ODVAHA
 - „Inference:“ používej pro vlastní analytický závěr. Nemá být omluvou ani opakováním faktů.
 - Opatrnost používej hlavně tam, kde tvrdíš konkrétní kauzalitu, kterou evidence přímo nedokládá. Např. můžeš říct „pravděpodobně zvyšuje tlak na očekávání růstu“, ale ne tvrdit „způsobilo pokles akcie“, pokud to evidence nedokládá.
 - Když je ekonomický význam dostatečně zřejmý z čísel a firemních informací, formuluj závěr jasně.
+- Posuzuj také tři podpůrné dimenze pracovního příběhu: **konkurenční výhoda/moat, management a odvětví**.
+- U moat uváděj jen skutečně doložené mechanismy (např. switching costs, síťový efekt, nákladová výhoda, rozsah, regulace, značka, IP, data, distribuce, zákaznické vazby). Pokud evidence nestačí, napiš **Neznáme:**.
+- U managementu hledej pouze doložené signály: plnění/slib vs. skutečnost, změny guidance, konzistence komunikace, přiznání chyb, pobídky, vlastnictví akcií, SBC, insider aktivita nebo personální změny. Nepřisuzuj managementu motivy bez evidence.
+- U odvětví odděluj firemně specifické změny od změn celého sektoru. Pokud zdroj dokládá pouze sektorový trend, neprezentuj jej jako specifickou výhodu či problém firmy.
+- Sílu pracovního příběhu určuj nejen podle krátkodobého FCF a marží, ale také podle toho, zda dlouhodobou ekonomiku firmy podporují konkurenční výhoda, kvalita kapitálu a udržitelnost ziskovosti. Pokud tyto informace chybí, nesnižuj příběh automaticky na „Nejasný“, ale jasně označ, co zatím není prokázáno.
 
 PŘÍSNÁ EVIDENČNÍ PRAVIDLA
 - Používej pouze níže uvedenou evidenci. Nevymýšlej čísla, události, výroky, zdroje ani odkazy.
@@ -2412,8 +2425,6 @@ VÝSTUP
 DŮLEŽITÉ POŘADÍ:
 Pracovní investiční příběh musíš určit A VYPSAT JAKO PRVNÍ. Nenechávej jej až na konec odpovědi.
 Nejprve rozhodni, jaký dominantní ekonomický příběh evidence podporuje, a potom tento závěr dolož podrobnou analýzou.
-
-STORY: [jeden povolený název — tento řádek MUSÍ být první řádek odpovědi a musí být přesně ve tvaru STORY: Název]
 
 ## Pracovní investiční příběh
 **Základní charakter firmy:** [stručná ekonomická charakteristika, ne povolený štítek]
@@ -2463,18 +2474,17 @@ Uveď pouze skutečné vazby nebo konflikty. Pokud evidence převážně souhlas
     def _groq_call(current_payload):
         return requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.21.1"},
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.22"},
             json=current_payload, timeout=90
         )
 
     try:
         r = _groq_call(payload)
-        # Groq's 8K TPM limit can reject a request before generation. Retry once
-        # with a smaller evidence pack and shorter completion instead of failing
-        # the whole Analyst run.
+        # Groq free-tier context is limited. Retry once with a smaller evidence pack
+        # if the combined prompt + completion request is rejected as too large.
         if r.status_code == 413:
-            retry_evidence = _analyst_evidence_text(pack, max_chars=4800)
-            retry_prompt = prompt.replace(evidence, retry_evidence)
+            compact_evidence = _analyst_evidence_text(pack, max_chars=4800)
+            retry_prompt = prompt.replace(evidence, compact_evidence)
             retry_payload = dict(payload)
             retry_payload["messages"] = [{"role": "user", "content": retry_prompt}]
             retry_payload["max_completion_tokens"] = 1900
@@ -2520,53 +2530,140 @@ def analyst_current_developments(company, q, annual, quarterly, news, sec, ticke
 
 
 def analyst_story_hypothesis(q, annual, quarterly, news, sec, ai_result=None):
-    """Extract the AI-selected working story. Never invent a story from financial data."""
-    allowed = {
-        "Kvalitní compounder", "Kvalita za rozumnou cenu", "Růst za rozumnou cenu",
-        "Value / levná firma", "Provozní turnaround", "Cyklické zotavení",
-        "Aktivové / finanční zotavení", "Realitní hodnota", "Provozní zlepšení",
-        "Růstové zotavení", "Vysoký růst / dražší příběh", "Value trap – varování",
-        "Nejasný / smíšený příběh"
-    }
-    if not (ai_result and ai_result.get("ok")):
-        return "Nejasný / smíšený příběh", "AI syntéza nebyla dostupná; příběh proto nebyl dopočítáván z dat."
-
-    text = ai_result.get("text", "")
-    title = ""
-    # V6.21.1: machine-readable first line is the primary contract.
-    for line in text.splitlines()[:12]:
-        m = re.match(r"^\s*(?:[-*]\s*)?STORY\s*:\s*(.+?)\s*$", line, flags=re.I)
-        if m:
-            title = re.sub(r"[*_`#]", "", m.group(1)).strip()
-            break
-
-    # Backward compatibility with V6.20/cached responses.
-    if not title:
-        part0 = _analyst_extract_section(text, "Pracovní investiční příběh")
-        for line in part0.splitlines():
-            m = re.search(r"Hlavní pracovní příběh\s*:\s*\*\*([^*]+)\*\*", line, flags=re.I)
-            if m:
-                title = m.group(1).strip()
-                break
-            m = re.search(r"Hlavní pracovní příběh\s*:\s*([^\n]+)", line, flags=re.I)
-            if m:
-                title = m.group(1).strip("*# ")
-                break
-        part = part0
-    else:
-        part = _analyst_extract_section(text, "Pracovní investiční příběh")
-
-    if title not in allowed:
-        for candidate in allowed:
-            if candidate.lower() in title.lower():
-                title = candidate
-                break
-        else:
+    """Extract the structured working story without inventing a deterministic score."""
+    if ai_result and ai_result.get("ok"):
+        text = ai_result.get("text", "")
+        if "## Pracovní investiční příběh" in text:
+            part = _analyst_extract_section(text, "Pracovní investiční příběh")
+            lines = [x.strip() for x in part.splitlines() if x.strip()]
             title = "Nejasný / smíšený příběh"
+            for line in lines:
+                m = re.search(r"Hlavní pracovní příběh\s*:\s*\*\*([^*]+)\*\*", line, flags=re.I)
+                if m:
+                    title = m.group(1).strip()
+                    break
+                m = re.search(r"Hlavní pracovní příběh\s*:\s*([^\n]+)", line, flags=re.I)
+                if m:
+                    title = m.group(1).strip("*# ")
+                    break
+            allowed = {
+                "Kvalitní compounder", "Kvalita za rozumnou cenu", "Růst za rozumnou cenu",
+                "Value / levná firma", "Provozní turnaround", "Cyklické zotavení",
+                "Aktivové / finanční zotavení", "Realitní hodnota", "Provozní zlepšení",
+                "Růstové zotavení", "Vysoký růst / dražší příběh", "Value trap – varování",
+                "Nejasný / smíšený příběh"
+            }
+            if title not in allowed:
+                # Backward-compatible fallback for older cached AI output.
+                for candidate in allowed:
+                    if candidate.lower() in title.lower():
+                        title = candidate
+                        break
+                else:
+                    title = "Nejasný / smíšený příběh"
+            return title, part.strip()
+    return "Nejasný / smíšený příběh", "Pracovní příběh nebyl mechanicky dopočítán, protože AI syntéza nebyla dostupná."
 
-    if not part:
-        part = f"**Hlavní pracovní příběh:** **{title}**\n\nAI dodala pracovní příběh, ale samostatná sekce s jeho zdůvodněním nebyla ve výstupu nalezena."
-    return title, part.strip()
+
+
+def _analyst_czech_sector(value):
+    mapping = {
+        "Healthcare": "Zdravotnictví",
+        "Medical Devices": "Zdravotnické technologie",
+        "Diagnostics & Research": "Diagnostika a výzkum",
+        "Technology": "Technologie",
+        "Financial Services": "Finanční služby",
+        "Industrials": "Průmysl",
+        "Consumer Cyclical": "Spotřební cyklické zboží",
+        "Consumer Defensive": "Spotřební defenzivní zboží",
+        "Energy": "Energetika",
+        "Basic Materials": "Základní materiály",
+        "Communication Services": "Komunikační služby",
+        "Real Estate": "Nemovitosti",
+        "Utilities": "Síťová odvětví / utility",
+    }
+    return mapping.get(clean_text(value), clean_text(value) or "—")
+
+
+def _analyst_czech_country(value):
+    mapping = {
+        "Germany": "Německo", "United States": "USA", "United Kingdom": "Velká Británie",
+        "France": "Francie", "Netherlands": "Nizozemsko", "Switzerland": "Švýcarsko",
+        "Japan": "Japonsko", "China": "Čína", "Canada": "Kanada",
+    }
+    return mapping.get(clean_text(value), clean_text(value) or "—")
+
+
+def _analyst_story_profile_text(ai_result):
+    if not ai_result or not ai_result.get("ok"):
+        return ""
+    part = _analyst_extract_section(ai_result.get("text", ""), "Pracovní investiční příběh")
+    for line in part.splitlines():
+        if line.strip().lower().startswith("**základní charakter firmy:**"):
+            return re.sub(r"^\*\*Základní charakter firmy:\*\*\s*", "", line.strip(), flags=re.I).strip()
+    return ""
+
+
+def _analyst_display_financial_table(df):
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+    rename = {
+        "Období":"Období", "Revenue":"Tržby", "Net Income":"Čistý zisk",
+        "Operating Income":"Provozní zisk", "Operating Cash Flow":"Provozní cash flow",
+        "Capital Expenditure":"Kapitálové výdaje", "Debt":"Dluh",
+        "Equity":"Vlastní kapitál", "Net Margin %":"Čistá marže", "FCF":"FCF"
+    }
+    out = out.rename(columns=rename)
+    for col in out.columns:
+        if col == "Období":
+            continue
+        if "marže" in col.lower():
+            out[col] = out[col].apply(lambda x: "—" if pd.isna(safe_float(x)) else f"{safe_float(x):.1f} %".replace(".", ","))
+        else:
+            out[col] = out[col].apply(lambda x: analyst_human_number(x, 1))
+    def period_label(x):
+        x = clean_text(x)
+        m = re.search(r"FY(\d{4}).*?ended (\d{4})-(\d{2})-(\d{2})", x, re.I)
+        if m:
+            return f"FY {m.group(1)} (k {int(m.group(4))}. {int(m.group(3))}. {m.group(2)})"
+        m = re.search(r"(Q\d).*?FY(\d{4}).*?ended (\d{4})-(\d{2})-(\d{2})", x, re.I)
+        if m:
+            return f"{m.group(1)} FY {m.group(2)} (k {int(m.group(5))}. {int(m.group(4))}. {m.group(3)})"
+        if x.startswith("TTM"):
+            return x.replace("ended ", "k ")
+        return x
+    if "Období" in out.columns:
+        out["Období"] = out["Období"].map(period_label)
+    return out
+
+
+def _analyst_valuation_rows(q, price):
+    rows = []
+    labels = [("P/E", "pe"), ("Forward P/E", "forward_pe"), ("P/S", "ps"), ("P/B", "pb")]
+    for label, key in labels:
+        v = safe_float(q.get(key))
+        if not pd.isna(v):
+            rows.append({"Ukazatel": label, "Hodnota": analyst_human_number(v, 1) + "×"})
+    return pd.DataFrame(rows)
+
+
+def _analyst_valuation_comment(q, price):
+    pe, fpe = safe_float(q.get("pe")), safe_float(q.get("forward_pe"))
+    ps, pb = safe_float(q.get("ps")), safe_float(q.get("pb"))
+    bits = []
+    if not pd.isna(pe):
+        bits.append(f"P/E {analyst_human_number(pe,1)}× znamená, že trh firmě stále přisuzuje nezanedbatelnou kvalitu a očekávání")
+    if not pd.isna(fpe) and not pd.isna(pe):
+        if fpe < pe:
+            bits.append(f"Forward P/E {analyst_human_number(fpe,1)}× je nižší než současné P/E, takže ocenění předpokládá růst budoucího zisku")
+        elif fpe > pe:
+            bits.append(f"Forward P/E {analyst_human_number(fpe,1)}× je vyšší než současné P/E, což neukazuje na očekávané zlepšení zisku")
+    if not pd.isna(ps):
+        bits.append(f"P/S je {analyst_human_number(ps,1)}×")
+    if not pd.isna(pb):
+        bits.append(f"P/B je {analyst_human_number(pb,1)}×")
+    return ". ".join(bits) + "." if bits else "Valuační data nejsou dostatečná pro smysluplný komentář."
 
 
 def analyst_render(ticker_input):
@@ -2645,11 +2742,14 @@ def analyst_render(ticker_input):
     m4.metric("ROE", "—" if pd.isna(roe) else f"{roe * 100:.1f} %".replace(".", ","))
 
     with st.expander("🏢 1. Základní profil a obchodní model", expanded=True):
-        st.write(f"**Sektor:** {q.get('sector') or '—'} · **Odvětví:** {q.get('industry') or '—'}")
+        st.write(f"**Sektor:** {_analyst_czech_sector(q.get('sector'))} · **Odvětví:** {q.get('industry') or '—'}")
         if q.get("country"):
-            st.write(f"**Země:** {q.get('country')}")
-        if q.get("summary"):
-            st.write(q["summary"])
+            st.write(f"**Země:** {_analyst_czech_country(q.get('country'))}")
+        profile_text = _analyst_story_profile_text(ai_result)
+        if profile_text:
+            st.write(profile_text)
+        else:
+            st.info("Stručný český profil z AI není v tomto běhu dostupný.")
 
     with st.expander("🧠 2. Co se ve firmě právě mění", expanded=True):
         if ai_result.get("ok"):
@@ -2670,25 +2770,20 @@ def analyst_render(ticker_input):
         st.write(analyst_financial_summary(annual, quarterly))
         if not annual.empty:
             st.markdown("**Celé účetní roky dostupné přes Yahoo Finance**")
-            annual_display = annual.copy()
-            st.table(annual_display)
+            st.table(_analyst_display_financial_table(annual))
         if not quarterly.empty:
             st.markdown(f"**Posledních dostupných {len(quarterly)} fiskálních čtvrtletí**")
-            quarterly_display = quarterly.copy()
-            st.table(quarterly_display)
+            st.table(_analyst_display_financial_table(quarterly))
         ttm = analyst_ttm_from_quarters(quarterly)
         if not ttm.empty:
             st.markdown("**TTM – poslední čtyři dostupná čtvrtletí**")
-            st.table(ttm.copy())
+            st.table(_analyst_display_financial_table(ttm))
 
     with st.expander("💰 5. Valuace – jaká očekávání jsou v ceně", expanded=False):
-        valuation_rows = []
-        for k, v in [("P/E", q.get("pe")), ("Forward P/E", q.get("forward_pe")), ("P/S", q.get("ps")), ("P/B", q.get("pb"))]:
-            fv = safe_float(v)
-            if not pd.isna(fv):
-                valuation_rows.append({"Ukazatel": k, "Hodnota": analyst_human_number(v, 1)})
-        if valuation_rows:
-            st.table(pd.DataFrame(valuation_rows))
+        valuation_rows = _analyst_valuation_rows(q, price)
+        if not valuation_rows.empty:
+            st.table(valuation_rows)
+            st.write(_analyst_valuation_comment(q, price))
         else:
             st.write("Valuační data nejsou dostupná.")
         st.caption("Valuace je zde kontext očekávání, nikoli výpočet falešně přesné férové ceny.")
@@ -2702,11 +2797,14 @@ def analyst_render(ticker_input):
         st.write(price_comment)
 
     with st.expander("🎯 8. Co má smysl dále ověřit", expanded=True):
-        if ai_result.get("ok"):
-            followup = _analyst_extract_section(ai_result.get("text", ""), "Co bych teď sledoval")
-            st.markdown(followup if followup else "AI neposkytla samostatnou sekci pro další ověření.")
+        if ai_result.get("ok") and "## Co bych teď sledoval" in ai_result.get("text", ""):
+            follow = ai_result["text"].split("## Co bych teď sledoval", 1)[1].strip()
+            next_h2 = re.search(r"(?m)^##\s+", follow)
+            if next_h2:
+                follow = follow[:next_h2.start()].strip()
+            st.markdown(follow or "AI neuvedla konkrétní body ke sledování.")
         else:
-            st.write("AI syntéza nebyla dostupná, proto zde nejsou AI navržené kontrolní body.")
+            st.write("AI neposkytla samostatnou sekci pro další ověření.")
 
     with st.expander("📚 9. Zdroje a diagnostika", expanded=False):
         st.write(f"Yahoo Finance: {yahoo_ticker}")
