@@ -2351,7 +2351,7 @@ def analyst_ai_synthesis(company, ticker, exchange, q, annual, quarterly, news, 
         return {"ok": False, "error": "Chybí GROQ_API_KEY ve Streamlit Secrets.", "text": "", "model": "openai/gpt-oss-120b"}
 
     pack = analyst_build_evidence_pack(company, ticker, exchange, q, annual, quarterly, news, sec)
-    evidence = _analyst_evidence_text(pack, max_chars=12000)
+    evidence = _analyst_evidence_text(pack, max_chars=7000)
     fin = _analyst_financial_change_summary(annual, quarterly)
     price_ctx = _analyst_price_evidence(price)
 
@@ -2456,16 +2456,29 @@ Uveď pouze skutečné vazby nebo konflikty. Pokud evidence převážně souhlas
         "model": "openai/gpt-oss-120b",
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.15,
-        "max_completion_tokens": 3400,
+        "max_completion_tokens": 2400,
         "reasoning_effort": "medium",
         "include_reasoning": False
     }
-    try:
-        r = requests.post(
+    def _groq_call(current_payload):
+        return requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.21"},
-            json=payload, timeout=90
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.21.1"},
+            json=current_payload, timeout=90
         )
+
+    try:
+        r = _groq_call(payload)
+        # Groq's 8K TPM limit can reject a request before generation. Retry once
+        # with a smaller evidence pack and shorter completion instead of failing
+        # the whole Analyst run.
+        if r.status_code == 413:
+            retry_evidence = _analyst_evidence_text(pack, max_chars=4800)
+            retry_prompt = prompt.replace(evidence, retry_evidence)
+            retry_payload = dict(payload)
+            retry_payload["messages"] = [{"role": "user", "content": retry_prompt}]
+            retry_payload["max_completion_tokens"] = 1900
+            r = _groq_call(retry_payload)
         if r.status_code != 200:
             return {"ok": False, "error": f"Groq HTTP {r.status_code}: {r.text[:1200]}", "text": "", "model": "openai/gpt-oss-120b", "evidence_count": len(pack)}
         data = r.json()
@@ -2520,11 +2533,11 @@ def analyst_story_hypothesis(q, annual, quarterly, news, sec, ai_result=None):
 
     text = ai_result.get("text", "")
     title = ""
-    # V6.21: machine-readable first line is the primary contract.
-    for line in text.splitlines()[:8]:
-        m = re.match(r"^\s*STORY\s*:\s*(.+?)\s*$", line, flags=re.I)
+    # V6.21.1: machine-readable first line is the primary contract.
+    for line in text.splitlines()[:12]:
+        m = re.match(r"^\s*(?:[-*]\s*)?STORY\s*:\s*(.+?)\s*$", line, flags=re.I)
         if m:
-            title = m.group(1).strip().strip("*#")
+            title = re.sub(r"[*_`#]", "", m.group(1)).strip()
             break
 
     # Backward compatibility with V6.20/cached responses.
@@ -2552,7 +2565,7 @@ def analyst_story_hypothesis(q, annual, quarterly, news, sec, ai_result=None):
             title = "Nejasný / smíšený příběh"
 
     if not part:
-        part = f"**Hlavní pracovní příběh:** **{title}**\n\nAI dodala strukturovaný štítek příběhu, ale samostatná sekce s jeho zdůvodněním nebyla ve výstupu nalezena."
+        part = f"**Hlavní pracovní příběh:** **{title}**\n\nAI dodala pracovní příběh, ale samostatná sekce s jeho zdůvodněním nebyla ve výstupu nalezena."
     return title, part.strip()
 
 
@@ -2657,21 +2670,27 @@ def analyst_render(ticker_input):
         st.write(analyst_financial_summary(annual, quarterly))
         if not annual.empty:
             st.markdown("**Celé účetní roky dostupné přes Yahoo Finance**")
-            st.dataframe(annual, use_container_width=True, hide_index=True)
+            annual_display = annual.copy()
+            st.table(annual_display)
         if not quarterly.empty:
             st.markdown(f"**Posledních dostupných {len(quarterly)} fiskálních čtvrtletí**")
-            st.dataframe(quarterly, use_container_width=True, hide_index=True)
+            quarterly_display = quarterly.copy()
+            st.table(quarterly_display)
         ttm = analyst_ttm_from_quarters(quarterly)
         if not ttm.empty:
             st.markdown("**TTM – poslední čtyři dostupná čtvrtletí**")
-            st.dataframe(ttm, use_container_width=True, hide_index=True)
+            st.table(ttm.copy())
 
     with st.expander("💰 5. Valuace – jaká očekávání jsou v ceně", expanded=False):
-        vals = []
+        valuation_rows = []
         for k, v in [("P/E", q.get("pe")), ("Forward P/E", q.get("forward_pe")), ("P/S", q.get("ps")), ("P/B", q.get("pb"))]:
-            if not pd.isna(safe_float(v)):
-                vals.append(f"**{k}:** {analyst_human_number(v, 1)}")
-        st.write(" · ".join(vals) if vals else "Valuační data nejsou dostupná.")
+            fv = safe_float(v)
+            if not pd.isna(fv):
+                valuation_rows.append({"Ukazatel": k, "Hodnota": analyst_human_number(v, 1)})
+        if valuation_rows:
+            st.table(pd.DataFrame(valuation_rows))
+        else:
+            st.write("Valuační data nejsou dostupná.")
         st.caption("Valuace je zde kontext očekávání, nikoli výpočet falešně přesné férové ceny.")
 
     with st.expander("🧩 6. Pracovní investiční příběh", expanded=True):
