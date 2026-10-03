@@ -53,7 +53,7 @@ def update_runtime(status=None, stage=None, message=None, error=None, run_id=Non
 
 
 st.title("📊 Stock-Screener")
-st.caption("V6.18 – Screener · samostatný modul Analytik je dostupný v menu vlevo")
+st.caption("V6.19 – Screener · samostatný modul Analytik je dostupný v menu vlevo")
 
 NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 NYSE_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
@@ -2408,6 +2408,24 @@ EVIDENCE:
 {evidence or 'Není k dispozici.'}
 
 VÝSTUP
+
+DŮLEŽITÉ POŘADÍ:
+Pracovní investiční příběh musíš určit A VYPSAT JAKO PRVNÍ. Nenechávej jej až na konec odpovědi.
+Nejprve rozhodni, jaký dominantní ekonomický příběh evidence podporuje, a potom tento závěr dolož podrobnou analýzou.
+
+## Pracovní investiční příběh
+**Základní charakter firmy:** [stručná ekonomická charakteristika, ne povolený štítek]
+**Aktuální stav:** [co se právě mění; např. růstové zpomalení, provozní zlepšení, restrukturalizace]
+**Valuační kontext:** [co říká dostupné ocenění o očekáváních; bez falešné přesnosti]
+**Hlavní pracovní příběh:** **[jeden povolený název]**
+**Proč:** 2–4 konkrétní důvody s [E#] + jasná **Inference:**
+**Co tento příběh právě ohrožuje:** ...
+**Protiargument:** ...
+**Alternativní interpretace:** ...
+**Co by změnilo můj pracovní příběh:** ...
+
+Pozor: „Protiargument“ ani „Alternativní interpretace“ nesmí automaticky vést k Nejasnému příběhu. Je normální, že pracovní příběh má protiváhu.
+
 ## Co se ve firmě právě mění
 Vyber nejvýše 4 skutečně odlišné změny. Neopakuj jeden příběh ve čtyřech variantách.
 Pro každé téma:
@@ -2428,19 +2446,6 @@ Pro každé téma:
 ## Co si navzájem potvrzují nebo odporují zdroje
 Uveď pouze skutečné vazby nebo konflikty. Pokud evidence převážně souhlasí, řekni to stručně.
 
-## Pracovní investiční příběh
-**Základní charakter firmy:** [stručná ekonomická charakteristika, ne povolený štítek]
-**Aktuální stav:** [co se právě mění; např. růstové zpomalení, provozní zlepšení, restrukturalizace]
-**Valuační kontext:** [co říká dostupné ocenění o očekáváních; bez falešné přesnosti]
-**Hlavní pracovní příběh:** **[jeden povolený název]**
-**Proč:** ... [E#] + jasná **Inference:**
-**Co tento příběh právě ohrožuje:** ...
-**Protiargument:** ...
-**Alternativní interpretace:** ...
-**Co by změnilo můj pracovní příběh:** ...
-
-Pozor: „Protiargument“ ani „Alternativní interpretace“ nesmí automaticky vést k Nejasnému příběhu. Je normální, že pracovní příběh má protiváhu.
-
 ## Co bych teď sledoval
 3–5 konkrétních ověřitelných věcí, které mohou pracovní příběh potvrdit nebo vyvrátit.
 """
@@ -2456,7 +2461,7 @@ Pozor: „Protiargument“ ani „Alternativní interpretace“ nesmí automatic
     try:
         r = requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.18"},
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.19"},
             json=payload, timeout=90
         )
         if r.status_code != 200:
