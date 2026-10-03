@@ -53,7 +53,7 @@ def update_runtime(status=None, stage=None, message=None, error=None, run_id=Non
 
 
 st.title("📊 Stock-Screener")
-st.caption("V6.17 – Screener · samostatný modul Analytik je dostupný v menu vlevo")
+st.caption("V6.18 – Screener · samostatný modul Analytik je dostupný v menu vlevo")
 
 NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 NYSE_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
@@ -2364,21 +2364,36 @@ def analyst_ai_synthesis(company, ticker, exchange, q, annual, quarterly, news, 
     ]
 
     prompt = f"""Jsi seniorní analytik veřejně obchodované společnosti {company} ({ticker}, {exchange}).
-ÚKOL: Z dostupné evidence zjisti nejvýše 4 skutečně odlišné změny, které právě mění ekonomiku firmy a její pracovní investiční příběh.
 
-PŘÍSNÁ PRAVIDLA:
+HLAVNÍ ÚKOL
+Z dostupné evidence vytvoř použitelný pracovní investiční obraz firmy. Nejde jen o výčet zpráv. Hledej kauzální řetězec:
+zdroj → událost → změna ekonomiky firmy → dopad na výsledky/cash flow/riziko/ocenění → co to znamená pro pracovní příběh.
+
+DŮLEŽITÉ: ANALYTICKÁ ODVAHA
+- Nemusíš být neutrální jen proto, že existují protichůdné signály. Pokud evidence jasně podporuje určitou interpretaci, řekni ji přímo.
+- „Nejasný / smíšený příběh“ použij pouze tehdy, když skutečně nelze rozumně určit dominantní ekonomický obraz firmy.
+- Přítomnost jednoho nebo dvou negativních faktorů sama o sobě NEZNAMENÁ Nejasný příběh.
+- Pokud jsou současně silné pozitivní i negativní signály, urč dominantní základní příběh a popiš, co jej právě mění nebo ohrožuje.
+- Odděluj tři věci: (1) základní charakter podniku, (2) aktuální změnu, (3) ocenění. Jedna negativní zpráva nemá automaticky přepsat základní charakter firmy.
+- „Inference:“ používej pro vlastní analytický závěr. Nemá být omluvou ani opakováním faktů.
+- Opatrnost používej hlavně tam, kde tvrdíš konkrétní kauzalitu, kterou evidence přímo nedokládá. Např. můžeš říct „pravděpodobně zvyšuje tlak na očekávání růstu“, ale ne tvrdit „způsobilo pokles akcie“, pokud to evidence nedokládá.
+- Když je ekonomický význam dostatečně zřejmý z čísel a firemních informací, formuluj závěr jasně.
+
+PŘÍSNÁ EVIDENČNÍ PRAVIDLA
 - Používej pouze níže uvedenou evidenci. Nevymýšlej čísla, události, výroky, zdroje ani odkazy.
-- Faktická tvrzení označ [E#]. News headline/popisek je pouze claim zdroje.
-- Logickou interpretaci označ **Inference:**; chybějící informace **Neznáme:**.
-- Pokud zdroje odporují, ukaž konflikt.
+- Faktická tvrzení označ [E#].
+- Logickou interpretaci označ **Inference:**.
+- Chybějící zásadní informaci označ **Neznáme:**.
+- Pokud zdroje odporují, ukaž konflikt; nevyrob smíření bez opory.
 - Nikdy nepřisuzuj růst/pokles konkrétnímu segmentu bez přímé evidence.
 - Nepředpokládej, že fiskální rok končí 31.12. Respektuj označení období a skutečná data konce FY.
-- TTM je posledních 4 dostupných kvartálů, nikoli automaticky kalendářní rok.
+- TTM jsou poslední 4 dostupná čtvrtletí, nikoli automaticky kalendářní rok.
 - Nezaměňuj procentní změnu za absolutní hodnotu.
 - Opakované články o stejné události slouč do jednoho tématu.
 - Žádné Buy/Hold/Sell, skóre, pořadí nebo doporučení.
 
-POVOLENÉ NÁZVY PŘÍBĚHU: {'; '.join(allowed_stories)}
+POVOLENÉ NÁZVY PRACOVNÍHO PŘÍBĚHU
+{'; '.join(allowed_stories)}
 
 FIRMA: {company}
 SEKTOR: {clean_text(q.get('sector'))} | ODVĚTVÍ: {clean_text(q.get('industry'))}
@@ -2392,8 +2407,9 @@ CENOVÝ KONTEXT:
 EVIDENCE:
 {evidence or 'Není k dispozici.'}
 
-VÝSTUP:
+VÝSTUP
 ## Co se ve firmě právě mění
+Vyber nejvýše 4 skutečně odlišné změny. Neopakuj jeden příběh ve čtyřech variantách.
 Pro každé téma:
 ### 1. [konkrétní změna]
 **Co víme:** ... [E#]
@@ -2406,34 +2422,41 @@ Pro každé téma:
 
 ## Vztah k finančním výsledkům
 **Co vidíme v číslech:** ...
-**Co to může znamenat:** ...
+**Co to podle mě znamená:** ...
 **Co z čísel nelze zjistit:** ...
 
 ## Co si navzájem potvrzují nebo odporují zdroje
-Jen skutečné vazby nebo konflikty.
+Uveď pouze skutečné vazby nebo konflikty. Pokud evidence převážně souhlasí, řekni to stručně.
 
 ## Pracovní investiční příběh
-**[jeden povolený název]**
-Proč: ... [E#]
+**Základní charakter firmy:** [stručná ekonomická charakteristika, ne povolený štítek]
+**Aktuální stav:** [co se právě mění; např. růstové zpomalení, provozní zlepšení, restrukturalizace]
+**Valuační kontext:** [co říká dostupné ocenění o očekáváních; bez falešné přesnosti]
+**Hlavní pracovní příběh:** **[jeden povolený název]**
+**Proč:** ... [E#] + jasná **Inference:**
+**Co tento příběh právě ohrožuje:** ...
 **Protiargument:** ...
 **Alternativní interpretace:** ...
+**Co by změnilo můj pracovní příběh:** ...
+
+Pozor: „Protiargument“ ani „Alternativní interpretace“ nesmí automaticky vést k Nejasnému příběhu. Je normální, že pracovní příběh má protiváhu.
 
 ## Co bych teď sledoval
-3–5 konkrétních ověřitelných věcí.
+3–5 konkrétních ověřitelných věcí, které mohou pracovní příběh potvrdit nebo vyvrátit.
 """
 
     payload = {
         "model": "openai/gpt-oss-120b",
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.2,
-        "max_completion_tokens": 3200,
+        "temperature": 0.15,
+        "max_completion_tokens": 3400,
         "reasoning_effort": "medium",
         "include_reasoning": False
     }
     try:
         r = requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.17"},
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.18"},
             json=payload, timeout=90
         )
         if r.status_code != 200:
@@ -2442,7 +2465,7 @@ Proč: ... [E#]
         choice = (data.get("choices") or [{}])[0]
         text = clean_text((choice.get("message") or {}).get("content"))
         finish = choice.get("finish_reason")
-        if len(text) < 400:
+        if len(text) < 500:
             return {"ok": False, "error": f"Groq vrátil příliš krátkou odpověď (finish_reason={finish}).", "text": text, "model": "openai/gpt-oss-120b", "evidence_count": len(pack)}
         return {"ok": True, "error": "", "text": text, "model": "openai/gpt-oss-120b", "evidence_count": len(pack), "finish_reason": finish, "usage": data.get("usage", {})}
     except Exception as e:
@@ -2460,6 +2483,7 @@ def analyst_current_developments(company, q, annual, quarterly, news, sec, ticke
 
 
 def analyst_story_hypothesis(q, annual, quarterly, news, sec, ai_result=None):
+    """Extract the structured working story without inventing a deterministic score."""
     if ai_result and ai_result.get("ok"):
         text = ai_result.get("text", "")
         if "## Pracovní investiční příběh" in text:
@@ -2467,7 +2491,31 @@ def analyst_story_hypothesis(q, annual, quarterly, news, sec, ai_result=None):
             if "## Co bych teď sledoval" in part:
                 part = part.split("## Co bych teď sledoval", 1)[0]
             lines = [x.strip() for x in part.splitlines() if x.strip()]
-            title = lines[0].strip("*# ") if lines else "Nejasný / smíšený příběh"
+            title = "Nejasný / smíšený příběh"
+            for line in lines:
+                m = re.search(r"Hlavní pracovní příběh\s*:\s*\*\*([^*]+)\*\*", line, flags=re.I)
+                if m:
+                    title = m.group(1).strip()
+                    break
+                m = re.search(r"Hlavní pracovní příběh\s*:\s*([^\n]+)", line, flags=re.I)
+                if m:
+                    title = m.group(1).strip("*# ")
+                    break
+            allowed = {
+                "Kvalitní compounder", "Kvalita za rozumnou cenu", "Růst za rozumnou cenu",
+                "Value / levná firma", "Provozní turnaround", "Cyklické zotavení",
+                "Aktivové / finanční zotavení", "Realitní hodnota", "Provozní zlepšení",
+                "Růstové zotavení", "Vysoký růst / dražší příběh", "Value trap – varování",
+                "Nejasný / smíšený příběh"
+            }
+            if title not in allowed:
+                # Backward-compatible fallback for older cached AI output.
+                for candidate in allowed:
+                    if candidate.lower() in title.lower():
+                        title = candidate
+                        break
+                else:
+                    title = "Nejasný / smíšený příběh"
             return title, part.strip()
     return "Nejasný / smíšený příběh", "Pracovní příběh nebyl mechanicky dopočítán, protože AI syntéza nebyla dostupná."
 
