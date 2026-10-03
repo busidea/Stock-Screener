@@ -1758,15 +1758,14 @@ def _analyst_period_labels(dates, annual_dates=None, quarterly=False):
         key = fy_end if fy_end is not None else pd.Timestamp(year=d.year, month=12, day=31)
         counters[key] = counters.get(key, 0) + 1
 
-    # Determine quarter number in each fiscal year by chronological order.
-    groups = {}
-    for d, fy_end in assignments:
-        key = fy_end if fy_end is not None else pd.Timestamp(year=d.year, month=12, day=31)
-        groups.setdefault(key, []).append(d)
+    # Determine fiscal quarter from the actual fiscal-year end month.
+    # Example SHL (FY ends in September): Dec=Q1, Mar=Q2, Jun=Q3, Sep=Q4.
     qnum = {}
-    for key, ds in groups.items():
-        for i, d in enumerate(sorted(ds), 1):
-            qnum[d] = i
+    for d, fy_end in assignments:
+        if fy_end is not None:
+            qnum[d] = ((d.month - fy_end.month) % 12) // 3 + 1
+        else:
+            qnum[d] = ((d.month - 12) % 12) // 3 + 1
 
     labels = []
     for d, fy_end in assignments:
@@ -2359,7 +2358,7 @@ def analyst_ai_synthesis(company, ticker, exchange, q, annual, quarterly, news, 
         return {"ok": False, "error": "Chybí GROQ_API_KEY ve Streamlit Secrets.", "text": "", "model": "openai/gpt-oss-120b"}
 
     pack = analyst_build_evidence_pack(company, ticker, exchange, q, annual, quarterly, news, sec)
-    evidence = _analyst_evidence_text(pack, max_chars=7000)
+    evidence = _analyst_evidence_text(pack, max_chars=4500)
     fin = _analyst_financial_change_summary(annual, quarterly)
     price_ctx = _analyst_price_evidence(price)
 
@@ -2440,7 +2439,7 @@ Nejprve rozhodni, jaký dominantní ekonomický příběh evidence podporuje, a 
 Pozor: „Protiargument“ ani „Alternativní interpretace“ nesmí automaticky vést k Nejasnému příběhu. Je normální, že pracovní příběh má protiváhu.
 
 ## Co se ve firmě právě mění
-Vyber nejvýše 4 skutečně odlišné změny. Neopakuj jeden příběh ve čtyřech variantách.
+Vyber nejvýše 3 skutečně odlišné změny. Neopakuj jeden příběh ve více variantách. Piš úsporně; každé téma maximálně 5–7 krátkých řádků.
 Pro každé téma:
 ### 1. [konkrétní změna]
 **Co víme:** ... [E#]
@@ -2460,21 +2459,21 @@ Pro každé téma:
 Uveď pouze skutečné vazby nebo konflikty. Pokud evidence převážně souhlasí, řekni to stručně.
 
 ## Co bych teď sledoval
-3–5 konkrétních ověřitelných věcí, které mohou pracovní příběh potvrdit nebo vyvrátit.
+3–5 konkrétních ověřitelných věcí, pouze v krátkých odrážkách.
 """
 
     payload = {
         "model": "openai/gpt-oss-120b",
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.15,
-        "max_completion_tokens": 2400,
+        "max_completion_tokens": 2100,
         "reasoning_effort": "medium",
         "include_reasoning": False
     }
     def _groq_call(current_payload):
         return requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.22"},
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.23"},
             json=current_payload, timeout=90
         )
 
@@ -2483,11 +2482,11 @@ Uveď pouze skutečné vazby nebo konflikty. Pokud evidence převážně souhlas
         # Groq free-tier context is limited. Retry once with a smaller evidence pack
         # if the combined prompt + completion request is rejected as too large.
         if r.status_code == 413:
-            compact_evidence = _analyst_evidence_text(pack, max_chars=4800)
+            compact_evidence = _analyst_evidence_text(pack, max_chars=3200)
             retry_prompt = prompt.replace(evidence, compact_evidence)
             retry_payload = dict(payload)
             retry_payload["messages"] = [{"role": "user", "content": retry_prompt}]
-            retry_payload["max_completion_tokens"] = 1900
+            retry_payload["max_completion_tokens"] = 1600
             r = _groq_call(retry_payload)
         if r.status_code != 200:
             return {"ok": False, "error": f"Groq HTTP {r.status_code}: {r.text[:1200]}", "text": "", "model": "openai/gpt-oss-120b", "evidence_count": len(pack)}
@@ -2495,9 +2494,16 @@ Uveď pouze skutečné vazby nebo konflikty. Pokud evidence převážně souhlas
         choice = (data.get("choices") or [{}])[0]
         text = clean_text((choice.get("message") or {}).get("content"))
         finish = choice.get("finish_reason")
-        if len(text) < 500:
+        if len(text) < 400:
             return {"ok": False, "error": f"Groq vrátil příliš krátkou odpověď (finish_reason={finish}).", "text": text, "model": "openai/gpt-oss-120b", "evidence_count": len(pack)}
-        return {"ok": True, "error": "", "text": text, "model": "openai/gpt-oss-120b", "evidence_count": len(pack), "finish_reason": finish, "usage": data.get("usage", {})}
+        result = {"ok": True, "error": "", "text": text, "model": "openai/gpt-oss-120b", "evidence_count": len(pack), "finish_reason": finish, "usage": data.get("usage", {})}
+        # The long answer can be truncated after the story heading. In that case the old
+        # parser incorrectly fell back to 'Nejasný'. Recover only the compact decision fields.
+        has_story_title = bool(re.search(r"(?im)^\s*\*{0,2}Hlavní pracovní příběh\s*:\s*\*{0,2}[^\n]+", text))
+        has_profile = bool(re.search(r"(?im)^\s*\*{0,2}Základní charakter firmy\s*:", text))
+        if not has_story_title or not has_profile:
+            result["recovery"] = analyst_ai_recovery(company, ticker, exchange, q, annual, quarterly, news, sec, price)
+        return result
     except Exception as e:
         return {"ok": False, "error": f"{type(e).__name__}: {e}", "text": "", "model": "openai/gpt-oss-120b", "evidence_count": len(pack)}
 
@@ -2518,6 +2524,52 @@ def _analyst_extract_section(text, heading):
     return rest.strip()
 
 
+@st.cache_data(ttl=900, show_spinner=False)
+def analyst_ai_recovery(company, ticker, exchange, q, annual, quarterly, news, sec, price=None):
+    """Small fallback call used only when the main AI answer is truncated before the story/profile.
+    It deliberately asks for machine-readable, very short outputs so the analyst cannot fall back to
+    an artificial 'unclear story' merely because the long narrative hit the token limit.
+    """
+    try:
+        api_key = st.secrets["GROQ_API_KEY"]
+    except Exception:
+        return {"ok": False, "text": "", "error": "Chybí GROQ_API_KEY ve Streamlit Secrets."}
+    pack = analyst_build_evidence_pack(company, ticker, exchange, q, annual, quarterly, news, sec)
+    evidence = _analyst_evidence_text(pack, max_chars=2800)
+    prompt = f"""Jsi analytik společnosti {company} ({ticker}, {exchange}).
+Použij pouze níže uvedenou evidenci. Nevymýšlej fakta.
+
+Vrať PŘESNĚ tyto tři řádky a nic jiného:
+STORY: [jeden název z povoleného seznamu]
+PROFILE: [jedna až dvě stručné české věty o ekonomickém modelu firmy]
+FOLLOW: [3 krátké body oddělené znakem |, co je nejdůležitější dál ověřit]
+
+Povolené STORY: Kvalitní compounder; Kvalita za rozumnou cenu; Růst za rozumnou cenu; Value / levná firma; Provozní turnaround; Cyklické zotavení; Aktivové / finanční zotavení; Realitní hodnota; Provozní zlepšení; Růstové zotavení; Vysoký růst / dražší příběh; Value trap – varování; Nejasný / smíšený příběh
+
+EVIDENCE:
+{evidence}
+"""
+    payload = {
+        "model":"openai/gpt-oss-120b",
+        "messages":[{"role":"user","content":prompt}],
+        "temperature":0.1,
+        "max_completion_tokens":700,
+        "reasoning_effort":"low",
+        "include_reasoning":False
+    }
+    try:
+        r=requests.post("https://api.groq.com/openai/v1/chat/completions",
+            headers={"Authorization":f"Bearer {api_key}","Content-Type":"application/json","User-Agent":"Stock-Screener/6.23"},
+            json=payload, timeout=60)
+        if r.status_code!=200:
+            return {"ok":False,"text":"","error":f"Groq recovery HTTP {r.status_code}: {r.text[:800]}"}
+        data=r.json(); choice=(data.get("choices") or [{}])[0]
+        text=clean_text((choice.get("message") or {}).get("content"))
+        return {"ok":bool(text),"text":text,"error":""}
+    except Exception as e:
+        return {"ok":False,"text":"","error":f"{type(e).__name__}: {e}"}
+
+
 def analyst_current_developments(company, q, annual, quarterly, news, sec, ticker="", exchange="", price=None):
     result = analyst_ai_synthesis(company, ticker, exchange, q, annual, quarterly, news, sec, price)
     if result.get("ok"):
@@ -2533,6 +2585,22 @@ def analyst_story_hypothesis(q, annual, quarterly, news, sec, ai_result=None):
     """Extract the structured working story without inventing a deterministic score."""
     if ai_result and ai_result.get("ok"):
         text = ai_result.get("text", "")
+        recovery = ai_result.get("recovery") or {}
+        recovery_text = recovery.get("text", "") if recovery.get("ok") else ""
+        mrec = re.search(r"(?m)^\s*STORY\s*:\s*(.+)$", recovery_text, flags=re.I)
+        if mrec:
+            title = mrec.group(1).strip().strip("*# ")
+            allowed = {
+                "Kvalitní compounder", "Kvalita za rozumnou cenu", "Růst za rozumnou cenu",
+                "Value / levná firma", "Provozní turnaround", "Cyklické zotavení",
+                "Aktivové / finanční zotavení", "Realitní hodnota", "Provozní zlepšení",
+                "Růstové zotavení", "Vysoký růst / dražší příběh", "Value trap – varování",
+                "Nejasný / smíšený příběh"
+            }
+            for candidate in allowed:
+                if candidate.lower() == title.lower():
+                    return candidate, recovery_text
+        
         if "## Pracovní investiční příběh" in text:
             part = _analyst_extract_section(text, "Pracovní investiční příběh")
             lines = [x.strip() for x in part.splitlines() if x.strip()]
@@ -2597,6 +2665,11 @@ def _analyst_czech_country(value):
 def _analyst_story_profile_text(ai_result):
     if not ai_result or not ai_result.get("ok"):
         return ""
+    recovery = ai_result.get("recovery") or {}
+    recovery_text = recovery.get("text", "") if recovery.get("ok") else ""
+    m = re.search(r"(?m)^\s*PROFILE\s*:\s*(.+)$", recovery_text, flags=re.I)
+    if m:
+        return m.group(1).strip()
     part = _analyst_extract_section(ai_result.get("text", ""), "Pracovní investiční příběh")
     for line in part.splitlines():
         if line.strip().lower().startswith("**základní charakter firmy:**"):
@@ -2642,10 +2715,11 @@ def _analyst_valuation_rows(q, price):
     rows = []
     labels = [("P/E", "pe"), ("Forward P/E", "forward_pe"), ("P/S", "ps"), ("P/B", "pb")]
     for label, key in labels:
-        v = safe_float(q.get(key))
+        raw = q.get(key)
+        v = safe_float(raw)
         if not pd.isna(v):
             rows.append({"Ukazatel": label, "Hodnota": analyst_human_number(v, 1) + "×"})
-    return pd.DataFrame(rows)
+    return pd.DataFrame(rows, columns=["Ukazatel", "Hodnota"])
 
 
 def _analyst_valuation_comment(q, price):
@@ -2749,7 +2823,9 @@ def analyst_render(ticker_input):
         if profile_text:
             st.write(profile_text)
         else:
-            st.info("Stručný český profil z AI není v tomto běhu dostupný.")
+            sector = _analyst_czech_sector(q.get("sector"))
+            industry = clean_text(q.get("industry")) or "daném oboru"
+            st.write(f"{company} působí v oblasti {sector.lower()} a zaměřuje se na {industry.lower()}. Detailní český profil z AI nebyl v tomto běhu dostupný.")
 
     with st.expander("🧠 2. Co se ve firmě právě mění", expanded=True):
         if ai_result.get("ok"):
@@ -2803,6 +2879,13 @@ def analyst_render(ticker_input):
             if next_h2:
                 follow = follow[:next_h2.start()].strip()
             st.markdown(follow or "AI neuvedla konkrétní body ke sledování.")
+        elif ai_result.get("ok") and (ai_result.get("recovery") or {}).get("ok"):
+            recovery_text = (ai_result.get("recovery") or {}).get("text", "")
+            m = re.search(r"(?m)^\s*FOLLOW\s*:\s*(.+)$", recovery_text, flags=re.I)
+            if m:
+                st.markdown("\n".join(f"- {x.strip()}" for x in m.group(1).split("|") if x.strip()))
+            else:
+                st.write("AI neposkytla samostatnou sekci pro další ověření.")
         else:
             st.write("AI neposkytla samostatnou sekci pro další ověření.")
 
