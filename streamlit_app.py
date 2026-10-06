@@ -1737,51 +1737,87 @@ def _analyst_get_statement(t, attr, getter_name, freq):
 
 
 def _analyst_period_labels(dates, annual_dates=None, quarterly=False):
-    """Creates fiscal-period labels from the actual statement end dates.
-    Never assumes that the fiscal year ends on 31 December.
+    """Create fiscal-period labels from actual statement dates.
+
+    For quarterly data the fiscal year-end month/day is inferred from the
+    annual statements. It is deliberately NOT necessary to have the following
+    annual year-end already present: this is what lets SHL's Dec-2025, Mar-2026
+    and Jun-2026 quarters be labelled FY2026 even when Yahoo exposes only four
+    annual columns.
     """
     dates = [pd.Timestamp(d) for d in dates if not pd.isna(pd.Timestamp(d))]
     annual_ends = sorted(pd.Timestamp(d) for d in (annual_dates or []) if not pd.isna(pd.Timestamp(d)))
     if not quarterly:
         return [f"FY{d.year} (ended {d:%Y-%m-%d})" for d in dates]
 
-    # Assign each quarter to the nearest later annual year-end. This works for
-    # companies whose fiscal year closes in any month, not only December.
-    assignments = []
-    for d in dates:
-        candidates = [a for a in annual_ends if a >= d and (a - d).days <= 370]
-        fy_end = min(candidates, key=lambda a: (a-d).days) if candidates else None
-        assignments.append((d, fy_end))
+    if not annual_ends:
+        return [f"Q{((d.month - 1) // 3) + 1} FY{d.year} (ended {d:%Y-%m-%d}; FY end unknown)" for d in dates]
 
-    counters = {}
-    for d, fy_end in assignments:
-        key = fy_end if fy_end is not None else pd.Timestamp(year=d.year, month=12, day=31)
-        counters[key] = counters.get(key, 0) + 1
-
-    # Determine fiscal quarter from the actual fiscal-year end month.
-    # Example SHL (FY ends in September): Dec=Q1, Mar=Q2, Jun=Q3, Sep=Q4.
-    # The quarter is counted FORWARD from the previous fiscal-year end.
-    # A zero month-distance therefore means the fiscal year-end quarter (Q4),
-    # not Q1. This distinction matters for companies whose FY does not end
-    # in December.
-    qnum = {}
-    for d, fy_end in assignments:
-        if fy_end is not None:
-            month_distance = (d.month - fy_end.month) % 12
-            qnum[d] = 4 if month_distance == 0 else (month_distance + 2) // 3
-        else:
-            # Without a known FY end, fall back to calendar quarters rather
-            # than pretending that the fiscal calendar is known.
-            qnum[d] = (d.month - 1) // 3 + 1
+    # Infer the fiscal-year end from the annual statement dates. In practice
+    # the same month/day repeats every year; mode protects against a malformed
+    # single date.
+    md_counts = {}
+    for a in annual_ends:
+        key = (a.month, a.day)
+        md_counts[key] = md_counts.get(key, 0) + 1
+    fy_month, fy_day = max(md_counts.items(), key=lambda kv: (kv[1], kv[0]))[0]
 
     labels = []
-    for d, fy_end in assignments:
-        if fy_end is not None:
-            labels.append(f"Q{qnum[d]} FY{fy_end.year} (ended {d:%Y-%m-%d})")
-        else:
-            labels.append(f"Q{qnum[d]} FY{d.year} (ended {d:%Y-%m-%d}; FY end unknown)")
+    for d in dates:
+        after_fy_end = (d.month, d.day) > (fy_month, fy_day)
+        fy_year = d.year + 1 if after_fy_end else d.year
+        # Quarter 4 is the fiscal year-end quarter itself.
+        month_distance = (d.month - fy_month) % 12
+        qnum = 4 if month_distance == 0 else (month_distance + 2) // 3
+        labels.append(f"Q{qnum} FY{fy_year} (ended {d:%Y-%m-%d})")
     return labels
 
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _analyst_yahoo_timeseries_fallback(yahoo_ticker, annual=False):
+    """Fallback for statement rows missing from yfinance's limited statement columns.
+
+    Yahoo's fundamentals-timeseries endpoint often contains the latest fiscal
+    year even when yfinance's income_stmt/balance_sheet exposes an incomplete
+    set of columns. We use it only to fill missing values, never to replace
+    values already supplied by yfinance.
+    """
+    yahoo_symbol = clean_text(getattr(yahoo_ticker, "ticker", yahoo_ticker))
+    freq = "annual" if annual else "quarterly"
+    types = [
+        f"{freq}TotalRevenue", f"{freq}NetIncome", f"{freq}OperatingIncome",
+        f"{freq}OperatingCashFlow", f"{freq}CapitalExpenditure",
+        f"{freq}TotalDebt", f"{freq}StockholdersEquity"
+    ]
+    try:
+        end = int(time.time())
+        start = end - 7 * 365 * 24 * 3600 if annual else end - 3 * 365 * 24 * 3600
+        url = f"https://query1.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/{yahoo_symbol}"
+        params = {"symbol": yahoo_symbol, "type": ",".join(types), "period1": start, "period2": end}
+        r = requests.get(url, params=params, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
+        r.raise_for_status()
+        result = r.json().get("timeseries", {}).get("result", [])
+        out = {}
+        for item in result:
+            for key in types:
+                vals = item.get(key, []) or []
+                if not vals:
+                    continue
+                rows = []
+                for v in vals:
+                    if not isinstance(v, dict):
+                        continue
+                    d = pd.to_datetime(v.get("asOfDate"), errors="coerce")
+                    raw = v.get("reportedValue", {})
+                    val = raw.get("raw") if isinstance(raw, dict) else None
+                    val = safe_float(val)
+                    if not pd.isna(d) and not pd.isna(val):
+                        rows.append((d, val))
+                if rows:
+                    out[key] = pd.Series({d: val for d, val in rows}, dtype=float).sort_index()
+        return out
+    except Exception:
+        return {}
 
 def _analyst_build_history(t, quarterly=False):
     freq = "quarterly" if quarterly else "yearly"
@@ -1797,11 +1833,42 @@ def _analyst_build_history(t, quarterly=False):
     debt = _analyst_statement_series(balance, ["Total Debt", "TotalDebt"])
     equity = _analyst_statement_series(balance, ["Stockholders Equity", "Common Stock Equity", "Total Equity Gross Minority Interest", "StockholdersEquity"])
 
-    cols = {name: s for name, s in [
-        ("Revenue", rev), ("Net Income", ni), ("Operating Income", op),
-        ("Operating Cash Flow", ocf), ("Capital Expenditure", capex),
-        ("Debt", debt), ("Equity", equity)
-    ] if not s.empty}
+    # Fill missing/recent statement values from Yahoo's fundamentals-timeseries.
+    # This is especially important for SHL FY2025, which can appear as a
+    # capital-expenditure-only column in yfinance while Yahoo already exposes
+    # the complete FY2025 income/cash-flow/balance-sheet values.
+    fallback = _analyst_yahoo_timeseries_fallback(t, annual=not quarterly)
+    fallback_map = {
+        "Revenue": "annualTotalRevenue" if not quarterly else "quarterlyTotalRevenue",
+        "Net Income": "annualNetIncome" if not quarterly else "quarterlyNetIncome",
+        "Operating Income": "annualOperatingIncome" if not quarterly else "quarterlyOperatingIncome",
+        "Operating Cash Flow": "annualOperatingCashFlow" if not quarterly else "quarterlyOperatingCashFlow",
+        "Capital Expenditure": "annualCapitalExpenditure" if not quarterly else "quarterlyCapitalExpenditure",
+        "Debt": "annualTotalDebt" if not quarterly else "quarterlyTotalDebt",
+        "Equity": "annualStockholdersEquity" if not quarterly else "quarterlyStockholdersEquity",
+    }
+    base_series = {"Revenue": rev, "Net Income": ni, "Operating Income": op, "Operating Cash Flow": ocf,
+                   "Capital Expenditure": capex, "Debt": debt, "Equity": equity}
+    filled = {}
+    for name, base in base_series.items():
+        fb = fallback.get(fallback_map[name], pd.Series(dtype=float))
+        if base is None or base.empty:
+            filled[name] = fb.copy()
+        else:
+            x = base.copy()
+            if not fb.empty:
+                x.index = pd.to_datetime(x.index, errors="coerce")
+                fb.index = pd.to_datetime(fb.index, errors="coerce")
+                # Yahoo's statement API has historically exposed a misleading
+                # small "Total Debt" row for some European issuers. For debt,
+                # prefer the dedicated fundamentals-timeseries value; for all
+                # other rows preserve yfinance values and fill only gaps.
+                x = fb.combine_first(x) if name == "Debt" else x.combine_first(fb)
+            filled[name] = x
+    rev, ni, op, ocf, capex, debt, equity = [filled[k] for k in base_series]
+
+    cols = {name: s for name, s in filled.items() if not s.empty}
+
     if not cols:
         return pd.DataFrame()
 
@@ -1819,9 +1886,15 @@ def _analyst_build_history(t, quarterly=False):
     annual_end_dates = []
     if quarterly:
         try:
-            ai = _analyst_statement_series(income, ["Total Revenue"])
             annual_income = _analyst_get_statement(t, "income_stmt", "get_income_stmt", "yearly")
             annual_rev = _analyst_statement_series(annual_income, ["Total Revenue", "Operating Revenue", "TotalRevenue"])
+            if annual_rev.empty:
+                annual_rev = fallback.get("annualTotalRevenue", pd.Series(dtype=float))
+            else:
+                fb_rev = fallback.get("annualTotalRevenue", pd.Series(dtype=float))
+                if not fb_rev.empty:
+                    annual_rev.index = pd.to_datetime(annual_rev.index, errors="coerce")
+                    annual_rev = annual_rev.combine_first(fb_rev)
             annual_end_dates = [d for d in pd.to_datetime(annual_rev.index, errors="coerce") if not pd.isna(d)] if not annual_rev.empty else []
         except Exception:
             annual_end_dates = []
@@ -2365,7 +2438,7 @@ def analyst_ai_synthesis(company, ticker, exchange, q, annual, quarterly, news, 
         return {"ok": False, "error": "Chybí GROQ_API_KEY ve Streamlit Secrets.", "text": "", "model": "openai/gpt-oss-120b"}
 
     pack = analyst_build_evidence_pack(company, ticker, exchange, q, annual, quarterly, news, sec)
-    evidence = _analyst_evidence_text(pack, max_chars=4500)
+    evidence = _analyst_evidence_text(pack, max_chars=7000)
     fin = _analyst_financial_change_summary(annual, quarterly)
     price_ctx = _analyst_price_evidence(price)
 
@@ -2480,7 +2553,7 @@ Uveď pouze skutečné vazby nebo konflikty. Pokud evidence převážně souhlas
     def _groq_call(current_payload):
         return requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.24"},
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.25"},
             json=current_payload, timeout=90
         )
 
@@ -2489,7 +2562,7 @@ Uveď pouze skutečné vazby nebo konflikty. Pokud evidence převážně souhlas
         # Groq free-tier context is limited. Retry once with a smaller evidence pack
         # if the combined prompt + completion request is rejected as too large.
         if r.status_code == 413:
-            compact_evidence = _analyst_evidence_text(pack, max_chars=3200)
+            compact_evidence = _analyst_evidence_text(pack, max_chars=5200)
             retry_prompt = prompt.replace(evidence, compact_evidence)
             retry_payload = dict(payload)
             retry_payload["messages"] = [{"role": "user", "content": retry_prompt}]
@@ -2501,7 +2574,7 @@ Uveď pouze skutečné vazby nebo konflikty. Pokud evidence převážně souhlas
         choice = (data.get("choices") or [{}])[0]
         text = clean_text((choice.get("message") or {}).get("content"))
         finish = choice.get("finish_reason")
-        if len(text) < 400:
+        if len(text) < 250:
             return {"ok": False, "error": f"Groq vrátil příliš krátkou odpověď (finish_reason={finish}).", "text": text, "model": "openai/gpt-oss-120b", "evidence_count": len(pack)}
         result = {"ok": True, "error": "", "text": text, "model": "openai/gpt-oss-120b", "evidence_count": len(pack), "finish_reason": finish, "usage": data.get("usage", {})}
         # The long answer can be truncated after the story heading. In that case the old
@@ -2544,7 +2617,7 @@ def analyst_ai_recovery(company, ticker, exchange, q, annual, quarterly, news, s
     except Exception:
         return {"ok": False, "text": "", "error": "Chybí GROQ_API_KEY ve Streamlit Secrets."}
     pack = analyst_build_evidence_pack(company, ticker, exchange, q, annual, quarterly, news, sec)
-    evidence = _analyst_evidence_text(pack, max_chars=2800)
+    evidence = _analyst_evidence_text(pack, max_chars=4200)
     prompt = f"""Jsi analytik společnosti {company} ({ticker}, {exchange}).
 Použij pouze níže uvedenou evidenci. Nevymýšlej fakta.
 
@@ -2573,13 +2646,13 @@ EVIDENCE:
         "model":"openai/gpt-oss-120b",
         "messages":[{"role":"user","content":prompt}],
         "temperature":0.1,
-        "max_completion_tokens":700,
+        "max_completion_tokens":900,
         "reasoning_effort":"low",
         "include_reasoning":False
     }
     try:
         r=requests.post("https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization":f"Bearer {api_key}","Content-Type":"application/json","User-Agent":"Stock-Screener/6.24"},
+            headers={"Authorization":f"Bearer {api_key}","Content-Type":"application/json","User-Agent":"Stock-Screener/6.25"},
             json=payload, timeout=60)
         if r.status_code!=200:
             return {"ok":False,"text":"","error":f"Groq recovery HTTP {r.status_code}: {r.text[:800]}"}
