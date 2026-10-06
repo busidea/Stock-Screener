@@ -1775,31 +1775,57 @@ def _analyst_period_labels(dates, annual_dates=None, quarterly=False):
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def _analyst_yahoo_timeseries_fallback(yahoo_ticker, annual=False):
-    """Fallback for statement rows missing from yfinance's limited statement columns.
+    """Generic Yahoo Finance fundamentals-timeseries fallback.
 
-    Yahoo's fundamentals-timeseries endpoint often contains the latest fiscal
-    year even when yfinance's income_stmt/balance_sheet exposes an incomplete
-    set of columns. We use it only to fill missing values, never to replace
-    values already supplied by yfinance.
+    The function intentionally works only with a ticker string, never with a
+    yfinance.Ticker object, so Streamlit can safely cache it.  Yahoo exposes
+    the same standardized fundamentals-timeseries endpoint for US and
+    international listings; we therefore do not use ticker-specific rules.
+
+    We try query2 first (the endpoint currently used by yfinance itself),
+    then query1.  If a combined request fails, each metric is retried
+    separately.  This makes a missing FY/quarter much less likely to be
+    caused by one problematic field or a long URL.
     """
-    yahoo_symbol = clean_text(getattr(yahoo_ticker, "ticker", yahoo_ticker))
+    yahoo_symbol = clean_text(yahoo_ticker).strip()
+    if not yahoo_symbol:
+        return {}
+
     freq = "annual" if annual else "quarterly"
-    types = [
-        f"{freq}TotalRevenue", f"{freq}NetIncome", f"{freq}OperatingIncome",
-        f"{freq}OperatingCashFlow", f"{freq}CapitalExpenditure",
-        f"{freq}TotalDebt", f"{freq}StockholdersEquity"
+    keys = [
+        "TotalRevenue", "NetIncome", "OperatingIncome",
+        "OperatingCashFlow", "CapitalExpenditure", "TotalDebt",
+        "StockholdersEquity",
     ]
-    try:
-        end = int(time.time())
-        start = end - 7 * 365 * 24 * 3600 if annual else end - 3 * 365 * 24 * 3600
-        url = f"https://query1.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/{yahoo_symbol}"
-        params = {"symbol": yahoo_symbol, "type": ",".join(types), "period1": start, "period2": end}
-        r = requests.get(url, params=params, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
+    types = [f"{freq}{k}" for k in keys]
+
+    end = int(time.time())
+    # Yahoo/yfinance currently exposes a limited number of annual/quarterly
+    # periods.  Ask for a comfortably wider window; Yahoo itself controls the
+    # actual number returned.
+    start = end - (8 * 365 * 24 * 3600 if annual else 4 * 365 * 24 * 3600)
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/154.0 Safari/537.36"
+    }
+
+    def fetch(url, requested_types):
+        params = {
+            "symbol": yahoo_symbol,
+            "type": ",".join(requested_types),
+            "period1": start,
+            "period2": end,
+        }
+        r = requests.get(url, params=params, timeout=20, headers=headers)
         r.raise_for_status()
-        result = r.json().get("timeseries", {}).get("result", [])
+        data = r.json()
+        result = (data.get("timeseries") or {}).get("result") or []
+        if not result:
+            return {}
         out = {}
         for item in result:
-            for key in types:
+            for key in requested_types:
                 vals = item.get(key, []) or []
                 if not vals:
                     continue
@@ -1812,12 +1838,40 @@ def _analyst_yahoo_timeseries_fallback(yahoo_ticker, annual=False):
                     val = raw.get("raw") if isinstance(raw, dict) else None
                     val = safe_float(val)
                     if not pd.isna(d) and not pd.isna(val):
-                        rows.append((d, val))
+                        rows.append((pd.Timestamp(d).normalize(), val))
                 if rows:
-                    out[key] = pd.Series({d: val for d, val in rows}, dtype=float).sort_index()
+                    # Keep the last value for a repeated asOfDate.
+                    out[key] = pd.Series(dict(rows), dtype=float).sort_index()
         return out
-    except Exception:
-        return {}
+
+    # query2 is the endpoint used by current yfinance fundamentals code;
+    # query1 remains a compatibility fallback.
+    urls = [
+        f"https://query2.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/{yahoo_symbol}",
+        f"https://query1.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/{yahoo_symbol}",
+    ]
+
+    for url in urls:
+        try:
+            out = fetch(url, types)
+            if out:
+                return out
+        except Exception:
+            pass
+
+    # If the combined request fails, retry each field separately.  A single
+    # unavailable metric must not suppress Revenue/NI/OCF/etc.
+    merged = {}
+    for typ in types:
+        for url in urls:
+            try:
+                one = fetch(url, [typ])
+                if typ in one and not one[typ].empty:
+                    merged[typ] = one[typ]
+                    break
+            except Exception:
+                continue
+    return merged
 
 def _analyst_build_history(t, quarterly=False):
     freq = "quarterly" if quarterly else "yearly"
@@ -1833,10 +1887,9 @@ def _analyst_build_history(t, quarterly=False):
     debt = _analyst_statement_series(balance, ["Total Debt", "TotalDebt"])
     equity = _analyst_statement_series(balance, ["Stockholders Equity", "Common Stock Equity", "Total Equity Gross Minority Interest", "StockholdersEquity"])
 
-    # Fill missing/recent statement values from Yahoo's fundamentals-timeseries.
-    # This is especially important for SHL FY2025, which can appear as a
-    # capital-expenditure-only column in yfinance while Yahoo already exposes
-    # the complete FY2025 income/cash-flow/balance-sheet values.
+    # Fill missing statement values from Yahoo's standardized fundamentals-timeseries.
+    # This is a generic fallback for any ticker when yfinance exposes an
+    # incomplete statement column; it is not tied to a specific exchange or issuer.
     fallback = _analyst_yahoo_timeseries_fallback(clean_text(getattr(t, "ticker", "")), annual=not quarterly)
     fallback_map = {
         "Revenue": "annualTotalRevenue" if not quarterly else "quarterlyTotalRevenue",
@@ -1859,10 +1912,10 @@ def _analyst_build_history(t, quarterly=False):
             if not fb.empty:
                 x.index = pd.to_datetime(x.index, errors="coerce")
                 fb.index = pd.to_datetime(fb.index, errors="coerce")
-                # Yahoo's statement API has historically exposed a misleading
-                # small "Total Debt" row for some European issuers. For debt,
-                # prefer the dedicated fundamentals-timeseries value; for all
-                # other rows preserve yfinance values and fill only gaps.
+                # Keep the dedicated Yahoo timeseries value as the preferred
+                # source for Debt because it is a balance-sheet field from the
+                # same standardized endpoint. For all other rows, preserve
+                # yfinance values and use Yahoo only to fill gaps.
                 x = fb.combine_first(x) if name == "Debt" else x.combine_first(fb)
             filled[name] = x
     rev, ni, op, ocf, capex, debt, equity = [filled[k] for k in base_series]
@@ -2553,7 +2606,7 @@ Uveď pouze skutečné vazby nebo konflikty. Pokud evidence převážně souhlas
     def _groq_call(current_payload):
         return requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.25"},
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.26"},
             json=current_payload, timeout=90
         )
 
@@ -2652,7 +2705,7 @@ EVIDENCE:
     }
     try:
         r=requests.post("https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization":f"Bearer {api_key}","Content-Type":"application/json","User-Agent":"Stock-Screener/6.25"},
+            headers={"Authorization":f"Bearer {api_key}","Content-Type":"application/json","User-Agent":"Stock-Screener/6.26"},
             json=payload, timeout=60)
         if r.status_code!=200:
             return {"ok":False,"text":"","error":f"Groq recovery HTTP {r.status_code}: {r.text[:800]}"}
