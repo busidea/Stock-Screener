@@ -1760,12 +1760,19 @@ def _analyst_period_labels(dates, annual_dates=None, quarterly=False):
 
     # Determine fiscal quarter from the actual fiscal-year end month.
     # Example SHL (FY ends in September): Dec=Q1, Mar=Q2, Jun=Q3, Sep=Q4.
+    # The quarter is counted FORWARD from the previous fiscal-year end.
+    # A zero month-distance therefore means the fiscal year-end quarter (Q4),
+    # not Q1. This distinction matters for companies whose FY does not end
+    # in December.
     qnum = {}
     for d, fy_end in assignments:
         if fy_end is not None:
-            qnum[d] = ((d.month - fy_end.month) % 12) // 3 + 1
+            month_distance = (d.month - fy_end.month) % 12
+            qnum[d] = 4 if month_distance == 0 else (month_distance + 2) // 3
         else:
-            qnum[d] = ((d.month - 12) % 12) // 3 + 1
+            # Without a known FY end, fall back to calendar quarters rather
+            # than pretending that the fiscal calendar is known.
+            qnum[d] = (d.month - 1) // 3 + 1
 
     labels = []
     for d, fy_end in assignments:
@@ -2473,7 +2480,7 @@ Uveď pouze skutečné vazby nebo konflikty. Pokud evidence převážně souhlas
     def _groq_call(current_payload):
         return requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.23"},
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.24"},
             json=current_payload, timeout=90
         )
 
@@ -2501,7 +2508,10 @@ Uveď pouze skutečné vazby nebo konflikty. Pokud evidence převážně souhlas
         # parser incorrectly fell back to 'Nejasný'. Recover only the compact decision fields.
         has_story_title = bool(re.search(r"(?im)^\s*\*{0,2}Hlavní pracovní příběh\s*:\s*\*{0,2}[^\n]+", text))
         has_profile = bool(re.search(r"(?im)^\s*\*{0,2}Základní charakter firmy\s*:", text))
-        if not has_story_title or not has_profile:
+        has_changes = bool(re.search(r"(?im)^\s*##\s*Co se ve firmě právě mění\s*$", text))
+        # Recovery is also needed when the answer contains story/profile but
+        # was truncated before the current-developments section.
+        if not has_story_title or not has_profile or not has_changes:
             result["recovery"] = analyst_ai_recovery(company, ticker, exchange, q, annual, quarterly, news, sec, price)
         return result
     except Exception as e:
@@ -2569,7 +2579,7 @@ EVIDENCE:
     }
     try:
         r=requests.post("https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization":f"Bearer {api_key}","Content-Type":"application/json","User-Agent":"Stock-Screener/6.23"},
+            headers={"Authorization":f"Bearer {api_key}","Content-Type":"application/json","User-Agent":"Stock-Screener/6.24"},
             json=payload, timeout=60)
         if r.status_code!=200:
             return {"ok":False,"text":"","error":f"Groq recovery HTTP {r.status_code}: {r.text[:800]}"}
@@ -2587,8 +2597,11 @@ def _analyst_recovery_changes_text(recovery_text):
     return m.group(1).strip() if m else ""
 
 
-def analyst_current_developments(company, q, annual, quarterly, news, sec, ticker="", exchange="", price=None):
-    result = analyst_ai_synthesis(company, ticker, exchange, q, annual, quarterly, news, sec, price)
+def analyst_current_developments(company, q, annual, quarterly, news, sec, ticker="", exchange="", price=None, ai_result=None):
+    # Reuse the already generated AI result. Calling Groq a second time here
+    # wastes quota and can produce a different answer from the one used by the
+    # story section.
+    result = ai_result if isinstance(ai_result, dict) else analyst_ai_synthesis(company, ticker, exchange, q, annual, quarterly, news, sec, price)
     if result.get("ok"):
         text = result.get("text", "")
         section = _analyst_extract_section(text, "Co se ve firmě právě mění")
@@ -2823,7 +2836,7 @@ def analyst_render(ticker_input):
 
     status.info("4/5 Stavím důkazní balíček a provádím AI syntézu…")
     ai_result = analyst_ai_synthesis(company, ticker, exchange, q, annual, quarterly, news, sec, price)
-    current = analyst_current_developments(company, q, annual, quarterly, news, sec, ticker, exchange, price)
+    current = analyst_current_developments(company, q, annual, quarterly, news, sec, ticker, exchange, price, ai_result=ai_result)
     primary, story_reason = analyst_story_hypothesis(q, annual, quarterly, news, sec, ai_result)
     price_comment = analyst_price_commentary(price)
     status.success("5/5 Analytické jádro dokončeno.")
