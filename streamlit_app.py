@@ -1837,7 +1837,7 @@ def _analyst_build_history(t, quarterly=False):
     # This is especially important for SHL FY2025, which can appear as a
     # capital-expenditure-only column in yfinance while Yahoo already exposes
     # the complete FY2025 income/cash-flow/balance-sheet values.
-    fallback = _analyst_yahoo_timeseries_fallback(t, annual=not quarterly)
+    fallback = _analyst_yahoo_timeseries_fallback(clean_text(getattr(t, "ticker", "")), annual=not quarterly)
     fallback_map = {
         "Revenue": "annualTotalRevenue" if not quarterly else "quarterlyTotalRevenue",
         "Net Income": "annualNetIncome" if not quarterly else "quarterlyNetIncome",
