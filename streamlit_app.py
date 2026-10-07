@@ -1873,6 +1873,110 @@ def _analyst_yahoo_timeseries_fallback(yahoo_ticker, annual=False):
                 continue
     return merged
 
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _analyst_yahoo_html_statement_fallback(yahoo_ticker, quarterly=False):
+    """Generic Yahoo Finance HTML-table fallback for incomplete API periods.
+
+    Yahoo's public financial pages can contain a newer/complete period even
+    when the fundamentals-timeseries endpoint or yfinance statement is
+    incomplete.  This fallback reads Yahoo's own rendered financial tables;
+    it is deliberately ticker-agnostic and works for US and international
+    listings alike.
+    """
+    symbol = clean_text(yahoo_ticker).strip()
+    if not symbol:
+        return {}
+    freq = "quarterly" if quarterly else "annual"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) "
+                      "Chrome/154.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    base = f"https://finance.yahoo.com/quote/{symbol}"
+    pages = {
+        "Revenue": "/financials/",
+        "Net Income": "/financials/",
+        "Operating Income": "/financials/",
+        "Operating Cash Flow": "/cash-flow/",
+        "Capital Expenditure": "/cash-flow/",
+        "Debt": "/balance-sheet/",
+        "Equity": "/balance-sheet/",
+    }
+    row_aliases = {
+        "Revenue": ["Total Revenue", "Operating Revenue"],
+        "Net Income": ["Net Income", "Net Income Common Stockholders"],
+        "Operating Income": ["Operating Income"],
+        "Operating Cash Flow": ["Total Cash From Operating Activities", "Operating Cash Flow"],
+        "Capital Expenditure": ["Capital Expenditure"],
+        "Debt": ["Total Debt"],
+        "Equity": ["Stockholders Equity", "Total Equity Gross Minority Interest", "Common Stock Equity"],
+    }
+    result = {}
+
+    def norm(x):
+        return re.sub(r"[^a-z0-9]", "", clean_text(x).lower())
+
+    def parse_page(url):
+        params = {"frequency": freq}
+        try:
+            r = requests.get(url, params=params, headers=headers, timeout=25)
+            r.raise_for_status()
+            tables = pd.read_html(StringIO(r.text))
+        except Exception:
+            return None
+        if not tables:
+            return None
+        # Prefer the table containing a recognizable Yahoo financial row.
+        for table in tables:
+            if table is None or table.empty:
+                continue
+            first_col = table.iloc[:, 0].astype(str).map(norm).tolist()
+            known = {norm(a) for aliases in row_aliases.values() for a in aliases}
+            if any(x in known for x in first_col):
+                return table
+        return tables[0]
+
+    cache = {}
+    for name, path in pages.items():
+        if path not in cache:
+            cache[path] = parse_page(base + path)
+        table = cache[path]
+        if table is None or table.empty:
+            continue
+        # Yahoo sometimes returns a MultiIndex header; flatten it first.
+        if isinstance(table.columns, pd.MultiIndex):
+            table.columns = [
+                next((clean_text(v) for v in reversed(col) if clean_text(v)), "")
+                for col in table.columns
+            ]
+        cols = [clean_text(c) for c in table.columns]
+        table.columns = cols
+        if not cols:
+            continue
+        label_col = cols[0]
+        aliases = {norm(a) for a in row_aliases[name]}
+        for _, row in table.iterrows():
+            label = norm(row.iloc[0])
+            if label not in aliases:
+                continue
+            pairs = []
+            for col in cols[1:]:
+                d = pd.to_datetime(col, errors="coerce")
+                if pd.isna(d):
+                    continue
+                val = row.get(col)
+                if isinstance(val, str):
+                    val = val.replace(",", "").replace("—", "")
+                val = safe_float(val)
+                if not pd.isna(val):
+                    pairs.append((pd.Timestamp(d).normalize(), val))
+            if pairs:
+                result[name] = pd.Series(dict(pairs), dtype=float).sort_index()
+            break
+    return result
+
 def _analyst_build_history(t, quarterly=False):
     freq = "quarterly" if quarterly else "yearly"
     income = _analyst_get_statement(t, "quarterly_income_stmt" if quarterly else "income_stmt", "get_income_stmt", freq)
@@ -1890,7 +1994,15 @@ def _analyst_build_history(t, quarterly=False):
     # Fill missing statement values from Yahoo's standardized fundamentals-timeseries.
     # This is a generic fallback for any ticker when yfinance exposes an
     # incomplete statement column; it is not tied to a specific exchange or issuer.
-    fallback = _analyst_yahoo_timeseries_fallback(clean_text(getattr(t, "ticker", "")), annual=not quarterly)
+    yahoo_symbol = clean_text(getattr(t, "ticker", ""))
+    fallback = _analyst_yahoo_timeseries_fallback(yahoo_symbol, annual=not quarterly)
+    html_fallback = _analyst_yahoo_html_statement_fallback(yahoo_symbol, quarterly=quarterly)
+    if html_fallback:
+        for k, series in html_fallback.items():
+            if k not in fallback or fallback[k].empty:
+                fallback[k] = series
+            else:
+                fallback[k] = fallback[k].combine_first(series)
     fallback_map = {
         "Revenue": "annualTotalRevenue" if not quarterly else "quarterlyTotalRevenue",
         "Net Income": "annualNetIncome" if not quarterly else "quarterlyNetIncome",
@@ -1943,6 +2055,9 @@ def _analyst_build_history(t, quarterly=False):
             annual_rev = _analyst_statement_series(annual_income, ["Total Revenue", "Operating Revenue", "TotalRevenue"])
             if annual_rev.empty:
                 annual_rev = fallback.get("annualTotalRevenue", pd.Series(dtype=float))
+                if annual_rev.empty:
+                    html_annual = _analyst_yahoo_html_statement_fallback(clean_text(getattr(t, "ticker", "")), quarterly=False)
+                    annual_rev = html_annual.get("Revenue", pd.Series(dtype=float))
             else:
                 fb_rev = fallback.get("annualTotalRevenue", pd.Series(dtype=float))
                 if not fb_rev.empty:
