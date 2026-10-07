@@ -3049,7 +3049,7 @@ def _analyst_valuation_comment(q, price):
 
 
 def _analyst_v6281_raw_diagnostics(yahoo_ticker):
-    """V6.28.1 diagnostic: show exactly what Yahoo returns before our mapping."""
+    """V6.28.2 diagnostic: show exactly what Yahoo returns before our mapping."""
     symbol = clean_text(yahoo_ticker).strip()
     out = {"symbol": symbol, "timeseries": [], "html": [], "final": {}}
     if not symbol:
@@ -3148,6 +3148,59 @@ def _analyst_v6281_raw_diagnostics(yahoo_ticker):
     return out
 
 
+
+def _analyst_v6282_pre_yfinance_diagnostics(yahoo_ticker):
+    """V6.28.2: test direct Yahoo access before yfinance is called."""
+    symbol = clean_text(yahoo_ticker).strip()
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/154.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept": "application/json,text/plain,*/*",
+    }
+    tests = [
+        ("Yahoo quote page", f"https://finance.yahoo.com/quote/{symbol}"),
+        ("Yahoo chart API – query1", f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"),
+        ("Yahoo chart API – query2", f"https://query2.finance.yahoo.com/v8/finance/chart/{symbol}"),
+        ("Yahoo quote API – query1", "https://query1.finance.yahoo.com/v7/finance/quote"),
+    ]
+    out = {"symbol": symbol, "tests": [], "all_ok": False}
+    for name, url in tests:
+        rec = {"name": name, "url": url, "status": None, "content_type": "", "detail": "", "error": ""}
+        try:
+            params = {"range": "5d", "interval": "1d"} if "/chart/" in url else ({"symbols": symbol} if "/v7/finance/quote" in url else {})
+            r = requests.get(url, params=params, headers=headers, timeout=15, allow_redirects=True)
+            rec["status"] = r.status_code
+            rec["content_type"] = r.headers.get("content-type", "")
+            if "/chart/" in url and r.status_code == 200:
+                try:
+                    data = r.json()
+                    result = ((data.get("chart") or {}).get("result") or [])
+                    error = (data.get("chart") or {}).get("error")
+                    if result:
+                        meta = result[0].get("meta") or {}
+                        rec["detail"] = f"chart.result={len(result)}, symbol={meta.get('symbol')}, currency={meta.get('currency')}, exchange={meta.get('exchangeName')}"
+                    else:
+                        rec["detail"] = f"chart.result=0; error={error}"
+                except Exception as e:
+                    rec["detail"] = f"HTTP 200, JSON parse failed: {type(e).__name__}: {e}; body={r.text[:500]}"
+            elif "/v7/finance/quote" in url and r.status_code == 200:
+                try:
+                    data = r.json()
+                    results = ((data.get("quoteResponse") or {}).get("result") or [])
+                    rec["detail"] = f"quoteResponse.result={len(results)}"
+                    if results:
+                        rec["detail"] += f"; symbol={results[0].get('symbol')}; longName={results[0].get('longName') or results[0].get('shortName')}"
+                except Exception as e:
+                    rec["detail"] = f"HTTP 200, JSON parse failed: {type(e).__name__}: {e}"
+            else:
+                text_sample = clean_text(r.text).replace("\\n", " ")[:300]
+                rec["detail"] = f"HTTP {r.status_code}; body={text_sample}"
+        except Exception as e:
+            rec["error"] = f"{type(e).__name__}: {e}"
+        out["tests"].append(rec)
+    out["all_ok"] = any(x.get("status") == 200 and not x.get("error") for x in out["tests"])
+    return out
+
 def analyst_render(ticker_input):
     st.title("🔎 Analytik")
     st.caption("Nezávislé výzkumné jádro · Analytik nevidí Screener ani důvod, proč byl titul vybrán.")
@@ -3191,10 +3244,31 @@ def analyst_render(ticker_input):
     yahoo_ticker = analyst_yahoo_ticker(ticker, exchange)
     status = st.empty()
     status.info("1/5 Ověřuji identitu firmy a načítám veřejná data…")
+    # V6.28.2: prove whether the Streamlit Cloud runtime can reach Yahoo
+    # before invoking yfinance. This prevents yfinance failure from hiding
+    # the underlying network/API problem.
+    pre_diag = _analyst_v6282_pre_yfinance_diagnostics(yahoo_ticker)
+    with st.expander("🧪 V6.28.2 – přímý test Yahoo před yfinance", expanded=True):
+        st.write(f"Yahoo ticker: **{yahoo_ticker}**")
+        st.caption("Tento test probíhá ještě před voláním yfinance. Neprovádí žádnou změnu dat ani API klíče.")
+        for rec in pre_diag.get("tests", []):
+            label = f"**{rec['name']}** · HTTP {rec.get('status')}"
+            if rec.get("error"):
+                st.error(label + " → " + rec["error"])
+            else:
+                st.write(label)
+                if rec.get("detail"):
+                    st.code(rec["detail"])
+        if not pre_diag.get("all_ok"):
+            st.error("Žádný z přímých testů Yahoo nevrátil použitelnou odpověď. yfinance proto nyní nebudeme diagnosticky obcházet dalšími změnami.")
+        else:
+            st.success("Alespoň jeden přímý test Yahoo funguje. Pokud yfinance následně selže, je problém pravděpodobně v konkrétní vrstvě yfinance/crumb/session, nikoli v úplné nedostupnosti Yahoo.")
+
     q = analyst_get_quote_data(yahoo_ticker)
     company = q.get("name") or ""
     if not company:
         st.error(f"Ticker {ticker} se nepodařilo jednoznačně načíst přes Yahoo Finance ({yahoo_ticker}).")
+        st.info("V6.28.2 výše nyní ukazuje přímé odpovědi Yahoo ještě před yfinance. Pošli mi prosím celý tento diagnostický blok; podle něj zvolíme další opravu.")
         return
 
     status.info("2/5 Sestavuji dlouhodobý finanční trend, poslední kvartály a cenu…")
@@ -3297,7 +3371,7 @@ def analyst_render(ticker_input):
         else:
             st.write("AI neposkytla samostatnou sekci pro další ověření.")
 
-    with st.expander("🧪 V6.28.1 – diagnostika načtení Yahoo dat", expanded=True):
+    with st.expander("🧪 V6.28.2 – diagnostika přístupu k Yahoo před yfinance", expanded=True):
         diag = _analyst_v6281_raw_diagnostics(yahoo_ticker)
         st.markdown("**Cíl:** zjistit, zda 30. 9. 2025 chybí už v Yahoo odpovědi, nebo až při našem převodu do interní tabulky.")
         st.write(f"Yahoo ticker: **{diag.get('symbol') or '—'}**")
