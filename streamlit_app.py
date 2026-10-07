@@ -1977,6 +1977,100 @@ def _analyst_yahoo_html_statement_fallback(yahoo_ticker, quarterly=False):
             break
     return result
 
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _analyst_yahoo_data_diagnostic(yahoo_ticker):
+    """Diagnostic only: identify which Yahoo historical-data layer is failing.
+
+    This deliberately does not alter the financial data. It reports dates and
+    response characteristics from the generic Yahoo timeseries/HTML fallbacks,
+    so the next fix can target the actual failure instead of adding another
+    blind fallback.
+    """
+    symbol = clean_text(yahoo_ticker).strip()
+    out = {"ticker": symbol, "timeseries": {}, "html": {}}
+    if not symbol:
+        return out
+
+    now = int(time.time())
+    start = now - 8 * 365 * 24 * 3600
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/154.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    types = [
+        "annualTotalRevenue", "annualNetIncome", "annualOperatingIncome",
+        "annualOperatingCashFlow", "annualCapitalExpenditure",
+        "annualTotalDebt", "annualStockholdersEquity",
+    ]
+    for host in ["query2.finance.yahoo.com", "query1.finance.yahoo.com"]:
+        try:
+            r = requests.get(
+                f"https://{host}/ws/fundamentals-timeseries/v1/finance/timeseries/{symbol}",
+                params={"symbol": symbol, "type": ",".join(types), "period1": start, "period2": now},
+                headers=headers, timeout=20,
+            )
+            layer = {"http": r.status_code, "bytes": len(r.content), "error": ""}
+            if r.status_code == 200:
+                data = r.json()
+                results = (data.get("timeseries") or {}).get("result") or []
+                for typ in types:
+                    dates = []
+                    for item in results:
+                        for v in item.get(typ, []) or []:
+                            d = clean_text(v.get("asOfDate"))
+                            raw = (v.get("reportedValue") or {}).get("raw") if isinstance(v.get("reportedValue"), dict) else None
+                            if d and not pd.isna(safe_float(raw)):
+                                dates.append(d)
+                    if dates:
+                        layer[typ] = sorted(set(dates))
+                out["timeseries"][host] = layer
+                if any(k in layer for k in types):
+                    break
+            else:
+                layer["error"] = r.text[:300]
+                out["timeseries"][host] = layer
+        except Exception as e:
+            out["timeseries"][host] = {"http": None, "bytes": 0, "error": f"{type(e).__name__}: {e}"}
+
+    base = f"https://finance.yahoo.com/quote/{symbol}"
+    for page in ["financials", "cash-flow", "balance-sheet"]:
+        try:
+            r = requests.get(
+                f"{base}/{page}/", params={"frequency": "annual"},
+                headers=headers, timeout=25,
+            )
+            item = {"http": r.status_code, "bytes": len(r.content), "tables": 0, "rows": [], "dates": [], "error": ""}
+            if r.status_code == 200:
+                try:
+                    tables = pd.read_html(StringIO(r.text))
+                    item["tables"] = len(tables)
+                    wanted = {"Total Revenue", "Operating Revenue", "Net Income", "Net Income Common Stockholders",
+                              "Operating Income", "Total Cash From Operating Activities", "Operating Cash Flow",
+                              "Capital Expenditure", "Total Debt", "Stockholders Equity", "Common Stock Equity",
+                              "Total Equity Gross Minority Interest"}
+                    for table in tables:
+                        if table is None or table.empty:
+                            continue
+                        labels = [clean_text(x) for x in table.iloc[:, 0].astype(str).tolist()]
+                        hits = [x for x in labels if x in wanted]
+                        if hits:
+                            item["rows"].extend(hits)
+                            for col in table.columns[1:]:
+                                d = pd.to_datetime(col, errors="coerce")
+                                if not pd.isna(d):
+                                    item["dates"].append(pd.Timestamp(d).strftime("%Y-%m-%d"))
+                    item["rows"] = sorted(set(item["rows"]))
+                    item["dates"] = sorted(set(item["dates"]))
+                except Exception as e:
+                    item["error"] = f"read_html: {type(e).__name__}: {e}"
+            else:
+                item["error"] = r.text[:300]
+            out["html"][page] = item
+        except Exception as e:
+            out["html"][page] = {"http": None, "bytes": 0, "tables": 0, "rows": [], "dates": [], "error": f"{type(e).__name__}: {e}"}
+    return out
+
 def _analyst_build_history(t, quarterly=False):
     freq = "quarterly" if quarterly else "yearly"
     income = _analyst_get_statement(t, "quarterly_income_stmt" if quarterly else "income_stmt", "get_income_stmt", freq)
@@ -2721,7 +2815,7 @@ Uveď pouze skutečné vazby nebo konflikty. Pokud evidence převážně souhlas
     def _groq_call(current_payload):
         return requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.26"},
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.28"},
             json=current_payload, timeout=90
         )
 
@@ -2820,7 +2914,7 @@ EVIDENCE:
     }
     try:
         r=requests.post("https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization":f"Bearer {api_key}","Content-Type":"application/json","User-Agent":"Stock-Screener/6.26"},
+            headers={"Authorization":f"Bearer {api_key}","Content-Type":"application/json","User-Agent":"Stock-Screener/6.28"},
             json=payload, timeout=60)
         if r.status_code!=200:
             return {"ok":False,"text":"","error":f"Groq recovery HTTP {r.status_code}: {r.text[:800]}"}
@@ -3175,6 +3269,10 @@ def analyst_render(ticker_input):
             st.error(ai_result.get("error", ""))
         if exchange in ("NASDAQ", "NYSE"):
             st.write(f"SEC podání načtena: {len(sec) if sec is not None else 0}")
+        if st.checkbox("Zobrazit technickou diagnostiku Yahoo historických dat", key="analyst_yahoo_diag"):
+            diag = _analyst_yahoo_data_diagnostic(yahoo_ticker)
+            st.json(diag)
+            st.caption("Diagnostika nic neopravuje; pouze ukáže, zda FY2025 chybí už v Yahoo timeseries, v HTML tabulkách, nebo až při skládání dat v aplikaci.")
 
 
 
