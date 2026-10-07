@@ -5,3 +5,4 @@ yfinance
 requests
 g4f
 matplotlib
+html5lib
