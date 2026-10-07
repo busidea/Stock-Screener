@@ -3149,22 +3149,26 @@ def _analyst_v6281_raw_diagnostics(yahoo_ticker):
 
 
 
-def _analyst_v6282_pre_yfinance_diagnostics(yahoo_ticker):
-    """V6.28.2: test direct Yahoo access before yfinance is called."""
+def _analyst_v6283_pre_yfinance_diagnostics(yahoo_ticker):
+    """V6.28.3: test Yahoo quote/chart plus direct financial endpoints before yfinance."""
     symbol = clean_text(yahoo_ticker).strip()
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/154.0 Safari/537.36",
         "Accept-Language": "en-US,en;q=0.9",
         "Accept": "application/json,text/plain,*/*",
     }
-    tests = [
+    out = {"symbol": symbol, "basic": [], "financials": [], "html": [], "all_ok": False}
+    now = int(time.time())
+    start = now - 8 * 365 * 24 * 3600
+
+    # 1) Baseline: the same endpoints that proved Yahoo itself is reachable.
+    basic_tests = [
         ("Yahoo quote page", f"https://finance.yahoo.com/quote/{symbol}"),
         ("Yahoo chart API – query1", f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"),
         ("Yahoo chart API – query2", f"https://query2.finance.yahoo.com/v8/finance/chart/{symbol}"),
         ("Yahoo quote API – query1", "https://query1.finance.yahoo.com/v7/finance/quote"),
     ]
-    out = {"symbol": symbol, "tests": [], "all_ok": False}
-    for name, url in tests:
+    for name, url in basic_tests:
         rec = {"name": name, "url": url, "status": None, "content_type": "", "detail": "", "error": ""}
         try:
             params = {"range": "5d", "interval": "1d"} if "/chart/" in url else ({"symbols": symbol} if "/v7/finance/quote" in url else {})
@@ -3172,33 +3176,93 @@ def _analyst_v6282_pre_yfinance_diagnostics(yahoo_ticker):
             rec["status"] = r.status_code
             rec["content_type"] = r.headers.get("content-type", "")
             if "/chart/" in url and r.status_code == 200:
-                try:
-                    data = r.json()
-                    result = ((data.get("chart") or {}).get("result") or [])
-                    error = (data.get("chart") or {}).get("error")
-                    if result:
-                        meta = result[0].get("meta") or {}
-                        rec["detail"] = f"chart.result={len(result)}, symbol={meta.get('symbol')}, currency={meta.get('currency')}, exchange={meta.get('exchangeName')}"
-                    else:
-                        rec["detail"] = f"chart.result=0; error={error}"
-                except Exception as e:
-                    rec["detail"] = f"HTTP 200, JSON parse failed: {type(e).__name__}: {e}; body={r.text[:500]}"
+                data = r.json()
+                result = ((data.get("chart") or {}).get("result") or [])
+                error = (data.get("chart") or {}).get("error")
+                if result:
+                    meta = result[0].get("meta") or {}
+                    rec["detail"] = f"chart.result={len(result)}, symbol={meta.get('symbol')}, currency={meta.get('currency')}, exchange={meta.get('exchangeName')}"
+                else:
+                    rec["detail"] = f"chart.result=0; error={error}"
             elif "/v7/finance/quote" in url and r.status_code == 200:
-                try:
-                    data = r.json()
-                    results = ((data.get("quoteResponse") or {}).get("result") or [])
-                    rec["detail"] = f"quoteResponse.result={len(results)}"
-                    if results:
-                        rec["detail"] += f"; symbol={results[0].get('symbol')}; longName={results[0].get('longName') or results[0].get('shortName')}"
-                except Exception as e:
-                    rec["detail"] = f"HTTP 200, JSON parse failed: {type(e).__name__}: {e}"
+                data = r.json()
+                results = ((data.get("quoteResponse") or {}).get("result") or [])
+                rec["detail"] = f"quoteResponse.result={len(results)}"
+                if results:
+                    rec["detail"] += f"; symbol={results[0].get('symbol')}; longName={results[0].get('longName') or results[0].get('shortName')}"
             else:
-                text_sample = clean_text(r.text).replace("\\n", " ")[:300]
-                rec["detail"] = f"HTTP {r.status_code}; body={text_sample}"
+                rec["detail"] = f"HTTP {r.status_code}; body={clean_text(r.text).replace(chr(10), ' ')[:300]}"
         except Exception as e:
             rec["error"] = f"{type(e).__name__}: {e}"
-        out["tests"].append(rec)
-    out["all_ok"] = any(x.get("status") == 200 and not x.get("error") for x in out["tests"])
+        out["basic"].append(rec)
+
+    # 2) Direct fundamentals-timeseries. Test each statement family separately,
+    # because a long combined URL can fail independently of the endpoint itself.
+    financial_tests = [
+        ("Income – annual", "annualTotalRevenue,annualNetIncome,annualOperatingIncome"),
+        ("Income – quarterly", "quarterlyTotalRevenue,quarterlyNetIncome,quarterlyOperatingIncome"),
+        ("Cash flow – annual", "annualOperatingCashFlow,annualCapitalExpenditure"),
+        ("Cash flow – quarterly", "quarterlyOperatingCashFlow,quarterlyCapitalExpenditure"),
+        ("Balance sheet – annual", "annualTotalDebt,annualStockholdersEquity"),
+        ("Balance sheet – quarterly", "quarterlyTotalDebt,quarterlyStockholdersEquity"),
+    ]
+    for host in ("query1.finance.yahoo.com", "query2.finance.yahoo.com"):
+        for label, types in financial_tests:
+            url = f"https://{host}/ws/fundamentals-timeseries/v1/finance/timeseries/{symbol}"
+            rec = {"name": f"{label} · {host.split('.')[0]}", "url": url, "status": None, "types": types, "rows": {}, "error": ""}
+            try:
+                r = requests.get(url, params={"symbol": symbol, "type": types, "period1": start, "period2": now}, headers=headers, timeout=20)
+                rec["status"] = r.status_code
+                data = r.json()
+                results = (data.get("timeseries") or {}).get("result") or []
+                for item in results:
+                    for typ in [x.strip() for x in types.split(',')]:
+                        vals = item.get(typ) or []
+                        rows=[]
+                        for v in vals:
+                            if not isinstance(v, dict):
+                                continue
+                            d = pd.to_datetime(v.get("asOfDate"), errors="coerce")
+                            rv = v.get("reportedValue") or {}
+                            raw = rv.get("raw") if isinstance(rv, dict) else None
+                            if not pd.isna(d) and raw is not None:
+                                rows.append({"date": str(pd.Timestamp(d).date()), "raw": raw})
+                        if rows:
+                            rec["rows"][typ] = rows
+                if not rec["rows"] and r.status_code != 200:
+                    rec["error"] = f"HTTP {r.status_code}; body={clean_text(r.text).replace(chr(10), ' ')[:500]}"
+            except Exception as e:
+                rec["error"] = f"{type(e).__name__}: {e}"
+            out["financials"].append(rec)
+
+    # 3) Yahoo financial pages without pandas.read_html/html5lib. We only inspect
+    # the raw HTML for known row labels and date markers; this keeps the diagnostic
+    # independent of optional HTML-parser packages.
+    html_tests = [
+        ("Income statement", "/financials/", ["Total Revenue", "Net Income", "Operating Income"]),
+        ("Cash flow", "/cash-flow/", ["Operating Cash Flow", "Capital Expenditure"]),
+        ("Balance sheet", "/balance-sheet/", ["Total Debt", "Stockholders Equity", "Common Stock Equity"]),
+    ]
+    for label, path, wanted in html_tests:
+        url = f"https://finance.yahoo.com/quote/{symbol}{path}"
+        rec = {"name": label, "url": url, "status": None, "length": 0, "found": [], "date_markers": [], "error": ""}
+        try:
+            r = requests.get(url, params={"frequency": "annual"}, headers=headers, timeout=20, allow_redirects=True)
+            rec["status"] = r.status_code
+            body = r.text or ""
+            rec["length"] = len(body)
+            lower = body.lower()
+            rec["found"] = [w for w in wanted if w.lower() in lower]
+            for marker in ("2025", "2024", "2023", "Sep 30, 2025", "9/30/2025"):
+                if marker.lower() in lower:
+                    rec["date_markers"].append(marker)
+            if r.status_code != 200:
+                rec["error"] = f"HTTP {r.status_code}; body={clean_text(body).replace(chr(10), ' ')[:500]}"
+        except Exception as e:
+            rec["error"] = f"{type(e).__name__}: {e}"
+        out["html"].append(rec)
+
+    out["all_ok"] = any(x.get("status") == 200 and not x.get("error") for x in out["basic"])
     return out
 
 def analyst_render(ticker_input):
@@ -3244,11 +3308,11 @@ def analyst_render(ticker_input):
     yahoo_ticker = analyst_yahoo_ticker(ticker, exchange)
     status = st.empty()
     status.info("1/5 Ověřuji identitu firmy a načítám veřejná data…")
-    # V6.28.2: prove whether the Streamlit Cloud runtime can reach Yahoo
+    # V6.28.3: prove whether the Streamlit Cloud runtime can reach Yahoo
     # before invoking yfinance. This prevents yfinance failure from hiding
     # the underlying network/API problem.
-    pre_diag = _analyst_v6282_pre_yfinance_diagnostics(yahoo_ticker)
-    with st.expander("🧪 V6.28.2 – přímý test Yahoo před yfinance", expanded=True):
+    pre_diag = _analyst_v6283_pre_yfinance_diagnostics(yahoo_ticker)
+    with st.expander("🧪 V6.28.3 – přímý test Yahoo před yfinance", expanded=True):
         st.write(f"Yahoo ticker: **{yahoo_ticker}**")
         st.caption("Tento test probíhá ještě před voláním yfinance. Neprovádí žádnou změnu dat ani API klíče.")
         for rec in pre_diag.get("tests", []):
@@ -3268,7 +3332,7 @@ def analyst_render(ticker_input):
     company = q.get("name") or ""
     if not company:
         st.error(f"Ticker {ticker} se nepodařilo jednoznačně načíst přes Yahoo Finance ({yahoo_ticker}).")
-        st.info("V6.28.2 výše nyní ukazuje přímé odpovědi Yahoo ještě před yfinance. Pošli mi prosím celý tento diagnostický blok; podle něj zvolíme další opravu.")
+        st.info("V6.28.3 výše nyní ukazuje přímé odpovědi Yahoo i finančních endpointů ještě před yfinance. Pošli mi prosím celý tento diagnostický blok; podle něj zvolíme další opravu.")
         return
 
     status.info("2/5 Sestavuji dlouhodobý finanční trend, poslední kvartály a cenu…")
@@ -3371,36 +3435,44 @@ def analyst_render(ticker_input):
         else:
             st.write("AI neposkytla samostatnou sekci pro další ověření.")
 
-    with st.expander("🧪 V6.28.2 – diagnostika přístupu k Yahoo před yfinance", expanded=True):
-        diag = _analyst_v6281_raw_diagnostics(yahoo_ticker)
-        st.markdown("**Cíl:** zjistit, zda 30. 9. 2025 chybí už v Yahoo odpovědi, nebo až při našem převodu do interní tabulky.")
+    with st.expander("🧪 V6.28.3 – diagnostika přístupu k Yahoo před yfinance", expanded=True):
+        diag = _analyst_v6283_pre_yfinance_diagnostics(yahoo_ticker)
+        st.markdown("**Cíl:** zjistit, zda Streamlit Cloud umí přímo získat finanční výkazy z Yahoo mimo yfinance.")
         st.write(f"Yahoo ticker: **{diag.get('symbol') or '—'}**")
-        st.markdown("### 1. Yahoo fundamentals-timeseries – RAW")
-        for rec in diag.get("timeseries", []):
-            st.write(f"**HTTP {rec.get('status')}** · {rec.get('url')}")
+        st.markdown("### 1. Základní Yahoo přístup")
+        for rec in diag.get("basic", []):
+            st.write(f"**{rec['name']}** · HTTP {rec.get('status')}")
             if rec.get("error"):
                 st.error(rec["error"])
-            if rec.get("metrics"):
-                for typ, rows in rec["metrics"].items():
+            elif rec.get("detail"):
+                st.code(rec["detail"])
+        st.markdown("### 2. Přímé Yahoo fundamentals-timeseries")
+        for rec in diag.get("financials", []):
+            st.write(f"**{rec['name']}** · HTTP {rec.get('status')}")
+            if rec.get("error"):
+                st.error(rec["error"])
+            if rec.get("rows"):
+                for typ, rows in rec["rows"].items():
                     dates = ", ".join(f"{x['date']}={x['raw']}" for x in rows)
                     st.code(f"{typ}: {dates}")
-            else:
-                st.warning("Yahoo v tomto endpointu nevrátil žádnou z požadovaných metrik.")
-        st.markdown("### 2. Yahoo HTML finanční tabulky")
+            elif not rec.get("error"):
+                st.warning("Endpoint odpověděl, ale nevrátil požadované finanční řady.")
+        st.markdown("### 3. Yahoo finanční stránky – RAW HTML bez html5lib")
         for rec in diag.get("html", []):
-            st.write(f"**{rec['page']}** · HTTP {rec.get('status')} · tabulek: {rec.get('tables', 0)}")
+            found = ", ".join(rec.get("found", [])) or "nic z hledaných řádků"
+            dates = ", ".join(rec.get("date_markers", [])) or "žádný hledaný rok"
+            st.write(f"**{rec['name']}** · HTTP {rec.get('status')} · délka HTML {rec.get('length', 0)}")
+            st.write(f"Nalezené řádky: **{found}** · datumové značky: **{dates}**")
             if rec.get("error"):
                 st.error(rec["error"])
-            for m in rec.get("matches", []):
-                st.write(f"Tabulka {m['table']} · řádek **{m['row']}**")
-                st.code(json.dumps(m.get("sample", []), ensure_ascii=False, indent=2, default=str)[:12000])
-            if not rec.get("matches") and not rec.get("error"):
-                st.warning("Požadované finanční řádky nebyly v nalezených HTML tabulkách identifikovány.")
-        st.markdown("### 3. Co nakonec vidí naše interní data")
-        st.write("Roční data – dostupná data:", diag.get("final", {}).get("annual_dates", []))
-        st.write("Kvartální data – dostupná data:", diag.get("final", {}).get("quarterly_dates", []))
-        st.write("Roční řádek 30. 9. 2025:", diag.get("final", {}).get("annual_2025_09_30", {}))
-        st.write("Kvartální řádek 30. 9. 2025:", diag.get("final", {}).get("quarterly_2025_09_30", {}))
+        st.markdown("### 4. Co nakonec vidí naše interní data")
+        try:
+            annual_now = analyst_get_financial_history(yahoo_ticker)
+            quarterly_now = analyst_get_quarterly_history(yahoo_ticker)
+            st.write("Roční data – dostupná data:", [str(x.date()) for x in pd.to_datetime(annual_now.index, errors="coerce")] if not annual_now.empty else [])
+            st.write("Kvartální data – dostupná data:", [str(x.date()) for x in pd.to_datetime(quarterly_now.index, errors="coerce")] if not quarterly_now.empty else [])
+        except Exception as e:
+            st.error(f"Interní data nelze vypsat: {type(e).__name__}: {e}")
 
     with st.expander("📚 9. Zdroje a diagnostika", expanded=False):
         st.write(f"Yahoo Finance: {yahoo_ticker}")
