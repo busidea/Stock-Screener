@@ -1977,150 +1977,6 @@ def _analyst_yahoo_html_statement_fallback(yahoo_ticker, quarterly=False):
             break
     return result
 
-
-def _analyst_source_diagnostics(yahoo_ticker):
-    """Diagnostic-only inspection of the three Yahoo/yfinance data layers.
-
-    This function deliberately does not alter the financial-history pipeline.
-    It reports what each source actually returned so the next version can be
-    based on evidence rather than another speculative fallback.
-    """
-    symbol = clean_text(yahoo_ticker).strip()
-    result = {
-        "symbol": symbol,
-        "timeseries": {},
-        "yfinance": {},
-        "html": {},
-        "errors": [],
-    }
-    if not symbol:
-        return result
-
-    # 1) Direct Yahoo fundamentals-timeseries endpoint.
-    ts_types = [
-        "annualTotalRevenue", "annualNetIncome", "annualOperatingIncome",
-        "annualOperatingCashFlow", "annualCapitalExpenditure",
-        "annualTotalDebt", "annualStockholdersEquity",
-        "quarterlyTotalRevenue", "quarterlyNetIncome", "quarterlyOperatingIncome",
-        "quarterlyOperatingCashFlow", "quarterlyCapitalExpenditure",
-        "quarterlyTotalDebt", "quarterlyStockholdersEquity",
-    ]
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                      "AppleWebKit/537.36 (KHTML, like Gecko) "
-                      "Chrome/154.0 Safari/537.36"
-    }
-    end = int(time.time())
-    start = end - (8 * 365 * 24 * 3600)
-    for host in ["query2.finance.yahoo.com", "query1.finance.yahoo.com"]:
-        url = f"https://{host}/ws/fundamentals-timeseries/v1/finance/timeseries/{symbol}"
-        try:
-            r = requests.get(
-                url,
-                params={"symbol": symbol, "type": ",".join(ts_types), "period1": start, "period2": end},
-                headers=headers,
-                timeout=20,
-            )
-            host_info = {"http_status": r.status_code, "url": url, "fields": {}}
-            try:
-                data = r.json()
-            except Exception:
-                data = {}
-                host_info["json_error"] = r.text[:300]
-            rows = (data.get("timeseries") or {}).get("result") or []
-            for typ in ts_types:
-                found = []
-                for item in rows:
-                    for v in item.get(typ, []) or []:
-                        if not isinstance(v, dict):
-                            continue
-                        d = clean_text(v.get("asOfDate"))
-                        raw = v.get("reportedValue", {})
-                        val = raw.get("raw") if isinstance(raw, dict) else None
-                        val = safe_float(val)
-                        if d and not pd.isna(val):
-                            found.append({"date": d, "value": val})
-                host_info["fields"][typ] = found
-            result["timeseries"][host] = host_info
-        except Exception as e:
-            result["timeseries"][host] = {"error": f"{type(e).__name__}: {e}"}
-
-    # 2) What yfinance itself exposes for annual/quarterly statements.
-    try:
-        t = yf.Ticker(symbol)
-        for label, attr in [
-            ("annual_income", "income_stmt"),
-            ("annual_balance", "balance_sheet"),
-            ("annual_cashflow", "cashflow"),
-            ("quarterly_income", "quarterly_income_stmt"),
-            ("quarterly_balance", "quarterly_balance_sheet"),
-            ("quarterly_cashflow", "quarterly_cashflow"),
-        ]:
-            try:
-                df = getattr(t, attr)
-                info = {"shape": list(df.shape) if isinstance(df, pd.DataFrame) else None,
-                        "columns": [], "target_rows": {}}
-                if isinstance(df, pd.DataFrame):
-                    info["columns"] = [str(x) for x in df.columns]
-                    wanted = [
-                        "Total Revenue", "Net Income", "Net Income Common Stockholders",
-                        "Operating Income", "Operating Cash Flow", "Total Cash From Operating Activities",
-                        "Capital Expenditure", "Total Debt", "Stockholders Equity",
-                        "Common Stock Equity", "Total Equity Gross Minority Interest",
-                    ]
-                    for row_name in wanted:
-                        if row_name not in df.index:
-                            continue
-                        vals = {}
-                        for col in df.columns:
-                            d = pd.to_datetime(col, errors="coerce")
-                            if pd.isna(d):
-                                continue
-                            vals[str(pd.Timestamp(d).date())] = safe_float(df.loc[row_name, col])
-                        if vals:
-                            info["target_rows"][row_name] = vals
-                result["yfinance"][label] = info
-            except Exception as e:
-                result["yfinance"][label] = {"error": f"{type(e).__name__}: {e}"}
-    except Exception as e:
-        result["yfinance"]["error"] = f"{type(e).__name__}: {e}"
-
-    # 3) Yahoo HTML: inspect every parsed table, not only the table selected by
-    # the production fallback. This tells us whether a relevant row/date exists.
-    pages = {
-        "financials": "/financials/",
-        "cash-flow": "/cash-flow/",
-        "balance-sheet": "/balance-sheet/",
-    }
-    for page_name, path in pages.items():
-        try:
-            url = f"https://finance.yahoo.com/quote/{symbol}{path}"
-            r = requests.get(url, params={"frequency": "annual"}, headers=headers, timeout=25)
-            info = {"http_status": r.status_code, "url": url, "tables": []}
-            if r.ok:
-                tables = pd.read_html(StringIO(r.text))
-                info["table_count"] = len(tables)
-                for i, table in enumerate(tables):
-                    if table is None or table.empty:
-                        continue
-                    cols = table.columns
-                    if isinstance(cols, pd.MultiIndex):
-                        col_names = [" | ".join(clean_text(x) for x in c if clean_text(x)) for c in cols]
-                    else:
-                        col_names = [clean_text(x) for x in cols]
-                    labels = [clean_text(x) for x in table.iloc[:, 0].head(30).tolist()]
-                    info["tables"].append({
-                        "index": i,
-                        "shape": list(table.shape),
-                        "columns": col_names[:12],
-                        "row_labels": labels,
-                    })
-            result["html"][page_name] = info
-        except Exception as e:
-            result["html"][page_name] = {"error": f"{type(e).__name__}: {e}"}
-
-    return result
-
 def _analyst_build_history(t, quarterly=False):
     freq = "quarterly" if quarterly else "yearly"
     income = _analyst_get_statement(t, "quarterly_income_stmt" if quarterly else "income_stmt", "get_income_stmt", freq)
@@ -3192,6 +3048,106 @@ def _analyst_valuation_comment(q, price):
     return ". ".join(bits) + "." if bits else "Valuační data nejsou dostatečná pro smysluplný komentář."
 
 
+def _analyst_v6281_raw_diagnostics(yahoo_ticker):
+    """V6.28.1 diagnostic: show exactly what Yahoo returns before our mapping."""
+    symbol = clean_text(yahoo_ticker).strip()
+    out = {"symbol": symbol, "timeseries": [], "html": [], "final": {}}
+    if not symbol:
+        return out
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/154.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    metric_types = [
+        "annualTotalRevenue", "annualNetIncome", "annualOperatingIncome",
+        "annualOperatingCashFlow", "annualCapitalExpenditure", "annualTotalDebt",
+        "annualStockholdersEquity",
+        "quarterlyTotalRevenue", "quarterlyNetIncome", "quarterlyOperatingIncome",
+        "quarterlyOperatingCashFlow", "quarterlyCapitalExpenditure", "quarterlyTotalDebt",
+        "quarterlyStockholdersEquity",
+    ]
+    now = int(time.time())
+    start = now - 8 * 365 * 24 * 3600
+    for host in ("query2.yahoo.finance", "query1.yahoo.finance"):
+        url = f"https://{host}.com/ws/fundamentals-timeseries/v1/finance/timeseries/{symbol}"
+        rec = {"url": url, "status": None, "error": "", "metrics": {}}
+        try:
+            r = requests.get(url, params={"symbol": symbol, "type": ",".join(metric_types), "period1": start, "period2": now}, headers=headers, timeout=25)
+            rec["status"] = r.status_code
+            data = r.json()
+            results = (data.get("timeseries") or {}).get("result") or []
+            rec["result_count"] = len(results)
+            for item in results:
+                for typ in metric_types:
+                    vals = item.get(typ) or []
+                    if not vals:
+                        continue
+                    rows=[]
+                    for v in vals:
+                        if not isinstance(v, dict):
+                            continue
+                        d=pd.to_datetime(v.get("asOfDate"), errors="coerce")
+                        rv=v.get("reportedValue") or {}
+                        raw=rv.get("raw") if isinstance(rv, dict) else None
+                        if not pd.isna(d) and raw is not None:
+                            rows.append({"date": str(pd.Timestamp(d).date()), "raw": raw})
+                    if rows:
+                        rec["metrics"][typ]=rows
+        except Exception as e:
+            rec["error"] = f"{type(e).__name__}: {e}"
+        out["timeseries"].append(rec)
+        if rec["metrics"]:
+            break
+
+    html_pages = {
+        "income_statement_annual": ("/financials/", "annual"),
+        "cash_flow_annual": ("/cash-flow/", "annual"),
+        "balance_sheet_annual": ("/balance-sheet/", "annual"),
+        "income_statement_quarterly": ("/financials/", "quarterly"),
+        "cash_flow_quarterly": ("/cash-flow/", "quarterly"),
+        "balance_sheet_quarterly": ("/balance-sheet/", "quarterly"),
+    }
+    wanted = [
+        "Total Revenue", "Operating Revenue", "Net Income", "Net Income Common Stockholders",
+        "Operating Income", "Total Cash From Operating Activities", "Operating Cash Flow",
+        "Capital Expenditure", "Total Debt", "Stockholders Equity",
+        "Total Equity Gross Minority Interest", "Common Stock Equity",
+    ]
+    for name,(path,frequency) in html_pages.items():
+        rec={"page":name,"status":None,"error":"","tables":0,"matches":[]}
+        try:
+            r=requests.get(f"https://finance.yahoo.com/quote/{symbol}{path}", params={"frequency":frequency}, headers=headers, timeout=25)
+            rec["status"]=r.status_code
+            tables=pd.read_html(StringIO(r.text))
+            rec["tables"]=len(tables)
+            for i,t in enumerate(tables):
+                if isinstance(t.columns,pd.MultiIndex):
+                    t.columns=[" | ".join([clean_text(x) for x in c if clean_text(x)]) for c in t.columns]
+                cols=[clean_text(c) for c in t.columns]
+                for row in t.iloc[:,0].astype(str).tolist() if len(t.columns) else []:
+                    rn=clean_text(row)
+                    if rn in wanted or any(rn.lower()==w.lower() for w in wanted):
+                        rec["matches"].append({"table":i,"row":rn,"columns":cols,"sample":t[t.iloc[:,0].astype(str)==row].head(1).to_dict(orient="records")})
+        except Exception as e:
+            rec["error"]=f"{type(e).__name__}: {e}"
+        out["html"].append(rec)
+
+    try:
+        annual=analyst_get_financial_history(symbol)
+        quarterly=analyst_get_quarterly_history(symbol)
+        target=pd.Timestamp("2025-09-30")
+        def snap(df):
+            if df is None or df.empty:
+                return {}
+            idx=pd.to_datetime(df.index, errors="coerce")
+            rows=df.loc[idx==target] if len(idx) else pd.DataFrame()
+            return rows.to_dict(orient="records") if not rows.empty else {}
+        out["final"]={"annual_2025_09_30":snap(annual),"quarterly_2025_09_30":snap(quarterly),"annual_dates":[str(x.date()) for x in pd.to_datetime(annual.index,errors="coerce")] if not annual.empty else [],"quarterly_dates":[str(x.date()) for x in pd.to_datetime(quarterly.index,errors="coerce")] if not quarterly.empty else []}
+    except Exception as e:
+        out["final"]={"error":f"{type(e).__name__}: {e}"}
+    return out
+
+
 def analyst_render(ticker_input):
     st.title("🔎 Analytik")
     st.caption("Nezávislé výzkumné jádro · Analytik nevidí Screener ani důvod, proč byl titul vybrán.")
@@ -3246,9 +3202,6 @@ def analyst_render(ticker_input):
     quarterly = analyst_get_quarterly_history(yahoo_ticker)
     price = analyst_price_history(yahoo_ticker)
     sec = analyst_sec_filings(ticker) if exchange in ("NASDAQ", "NYSE") else pd.DataFrame()
-
-    # V6.28.1 diagnostic: inspect the source layers without changing the data pipeline.
-    source_diag = _analyst_source_diagnostics(yahoo_ticker)
 
     status.info("3/5 Hledám aktuální firemně relevantní události…")
     news = analyst_google_news(company, ticker, q.get("ir_website") or q.get("website"))
@@ -3344,64 +3297,38 @@ def analyst_render(ticker_input):
         else:
             st.write("AI neposkytla samostatnou sekci pro další ověření.")
 
+    with st.expander("🧪 V6.28.1 – diagnostika načtení Yahoo dat", expanded=True):
+        diag = _analyst_v6281_raw_diagnostics(yahoo_ticker)
+        st.markdown("**Cíl:** zjistit, zda 30. 9. 2025 chybí už v Yahoo odpovědi, nebo až při našem převodu do interní tabulky.")
+        st.write(f"Yahoo ticker: **{diag.get('symbol') or '—'}**")
+        st.markdown("### 1. Yahoo fundamentals-timeseries – RAW")
+        for rec in diag.get("timeseries", []):
+            st.write(f"**HTTP {rec.get('status')}** · {rec.get('url')}")
+            if rec.get("error"):
+                st.error(rec["error"])
+            if rec.get("metrics"):
+                for typ, rows in rec["metrics"].items():
+                    dates = ", ".join(f"{x['date']}={x['raw']}" for x in rows)
+                    st.code(f"{typ}: {dates}")
+            else:
+                st.warning("Yahoo v tomto endpointu nevrátil žádnou z požadovaných metrik.")
+        st.markdown("### 2. Yahoo HTML finanční tabulky")
+        for rec in diag.get("html", []):
+            st.write(f"**{rec['page']}** · HTTP {rec.get('status')} · tabulek: {rec.get('tables', 0)}")
+            if rec.get("error"):
+                st.error(rec["error"])
+            for m in rec.get("matches", []):
+                st.write(f"Tabulka {m['table']} · řádek **{m['row']}**")
+                st.code(json.dumps(m.get("sample", []), ensure_ascii=False, indent=2, default=str)[:12000])
+            if not rec.get("matches") and not rec.get("error"):
+                st.warning("Požadované finanční řádky nebyly v nalezených HTML tabulkách identifikovány.")
+        st.markdown("### 3. Co nakonec vidí naše interní data")
+        st.write("Roční data – dostupná data:", diag.get("final", {}).get("annual_dates", []))
+        st.write("Kvartální data – dostupná data:", diag.get("final", {}).get("quarterly_dates", []))
+        st.write("Roční řádek 30. 9. 2025:", diag.get("final", {}).get("annual_2025_09_30", {}))
+        st.write("Kvartální řádek 30. 9. 2025:", diag.get("final", {}).get("quarterly_2025_09_30", {}))
+
     with st.expander("📚 9. Zdroje a diagnostika", expanded=False):
-        st.markdown("### 🧪 V6.28.1 – diagnostika původu finančních dat")
-        st.caption("Tato diagnostika pouze čte zdroje. Nemění finanční tabulky ani AI vstup.")
-        st.write(f"Yahoo ticker: **{yahoo_ticker}**")
-
-        st.markdown("**A. Přímý Yahoo fundamentals-timeseries**")
-        ts = source_diag.get("timeseries", {})
-        for host, info in ts.items():
-            st.markdown(f"**{host}** · HTTP `{info.get('http_status', '—')}`")
-            fields = info.get("fields", {})
-            rows = []
-            for field, vals in fields.items():
-                for item in vals:
-                    rows.append({"Pole": field, "Datum": item.get("date"), "Hodnota": item.get("value")})
-            if rows:
-                df_ts = pd.DataFrame(rows)
-                st.dataframe(df_ts, use_container_width=True, hide_index=True)
-            else:
-                st.write("Žádná pole/hodnoty nebyly vráceny.")
-
-        st.markdown("**B. Co skutečně vrací yfinance**")
-        for label, info in source_diag.get("yfinance", {}).items():
-            if label == "error":
-                st.error(info)
-                continue
-            st.markdown(f"**{label}** · shape `{info.get('shape', '—')}`")
-            st.write("Sloupce: " + ", ".join(info.get("columns", [])))
-            target = info.get("target_rows", {})
-            if target:
-                rows = []
-                for row_name, vals in target.items():
-                    rows.append({"Řádek": row_name, **vals})
-                st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-            else:
-                st.write("Relevantní řádky nebyly nalezeny.")
-
-        st.markdown("**C. Yahoo HTML tabulky – struktura zdroje**")
-        for page_name, info in source_diag.get("html", {}).items():
-            st.markdown(f"**{page_name}** · HTTP `{info.get('http_status', '—')}` · tabulek `{info.get('table_count', '—')}`")
-            for table in info.get("tables", []):
-                st.write(f"Tabulka {table['index']} · shape {table['shape']}")
-                st.write("Sloupce: " + " | ".join(table.get("columns", [])))
-                st.write("Řádky: " + " | ".join(table.get("row_labels", [])))
-
-        st.markdown("**D. Co nyní vidí produkční tabulka**")
-        target_annual = annual[annual["Období"].astype(str).str.contains("FY2025", na=False)].copy() if not annual.empty and "Období" in annual.columns else pd.DataFrame()
-        target_quarter = quarterly[quarterly["Období"].astype(str).str.contains("30.09.2025|30.9.2025|2025-09-30", na=False)].copy() if not quarterly.empty and "Období" in quarterly.columns else pd.DataFrame()
-        if not target_annual.empty:
-            st.dataframe(target_annual, use_container_width=True, hide_index=True)
-        else:
-            st.write("FY2025 v produkční roční tabulce nebyl nalezen.")
-        if not target_quarter.empty:
-            st.dataframe(target_quarter, use_container_width=True, hide_index=True)
-        else:
-            st.write("30.09.2025 v produkční kvartální tabulce nebylo nalezeno.")
-
-        st.markdown("**Poznámka:** V6.28.1 zatím nic neopravuje. Účelem je určit přesné místo ztráty dat před V6.29.")
-
         st.write(f"Yahoo Finance: {yahoo_ticker}")
         st.write(f"Relevantních zpráv: {len(news) if news is not None else 0}")
         st.write(f"Evidence položek: {ai_result.get('evidence_count', '—')}")
