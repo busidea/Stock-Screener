@@ -53,7 +53,7 @@ def update_runtime(status=None, stage=None, message=None, error=None, run_id=Non
 
 
 st.title("📊 Stock-Screener")
-st.caption("V6.28.8 – Screener · samostatný modul Analytik je dostupný v menu vlevo")
+st.caption("V6.28.9 – Screener · samostatný modul Analytik je dostupný v menu vlevo")
 
 NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 NYSE_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
@@ -1808,7 +1808,7 @@ def _analyst_yahoo_search_quote(yahoo_ticker):
 @st.cache_data(ttl=1800, show_spinner=False)
 def analyst_get_quote_data(yahoo_ticker):
     """
-    V6.28.8 IDENTITY FIREWALL.
+    V6.28.9 IDENTITY FIREWALL.
 
     A company may be accepted only when BOTH independent Yahoo layers agree
     on the exact requested Yahoo symbol:
@@ -1950,21 +1950,51 @@ def _analyst_yahoo_timeseries_direct(yahoo_ticker, annual=False, trailing=False)
     ]
     for url in urls:
         try:
+            # First try one combined request. This is fastest and is the normal
+            # path for annual/quarterly data.
             r = requests.get(url, params={"symbol": symbol, "type": ",".join(requested), "period1": start, "period2": now}, headers=headers, timeout=25)
             r.raise_for_status()
             result = ((r.json().get("timeseries") or {}).get("result") or [])
-            if not result:
-                continue
             out = {}
             for item in result:
                 for key in requested:
-                    s = _analyst_timeseries_to_series(item, key)
-                    if not s.empty:
-                        out[key] = s
+                    ss = _analyst_timeseries_to_series(item, key)
+                    if not ss.empty:
+                        out[key] = ss
             if out:
-                return out
+                # For trailing data Yahoo can occasionally omit one or more
+                # fields from a combined request. Keep what arrived, then
+                # continue below for the missing fields.
+                if not trailing or len(out) == len(requested):
+                    return out
         except Exception:
-            continue
+            out = {}
+
+        # Yahoo/yfinance itself sometimes gets better coverage by asking for
+        # one metric at a time. This is especially important for TTM because
+        # the missing FY-end quarter is reconstructed from TTM minus the next
+        # three reported quarters. Never estimate from growth rates.
+        for key in requested:
+            if key in out and not out[key].empty:
+                continue
+            try:
+                r = requests.get(
+                    url,
+                    params={"symbol": symbol, "type": key, "period1": start, "period2": now},
+                    headers=headers,
+                    timeout=25,
+                )
+                r.raise_for_status()
+                result = ((r.json().get("timeseries") or {}).get("result") or [])
+                for item in result:
+                    ss = _analyst_timeseries_to_series(item, key)
+                    if not ss.empty:
+                        out[key] = ss
+                        break
+            except Exception:
+                continue
+        if out:
+            return out
     return {}
 
 
@@ -3255,7 +3285,7 @@ def analyst_render(ticker_input):
     # The former V6.28.x diagnostic block is intentionally removed from the
     # normal UI so it cannot interrupt the analytical workflow.
 
-    # V6.28.8: HARD IDENTITY FIREWALL. No AI, financial history or news may run
+    # V6.28.9: HARD IDENTITY FIREWALL. No AI, financial history or news may run
     # until the requested Yahoo ticker is independently confirmed by Chart +
     # exact Search quote. An ambiguous identity is a hard stop, not a fallback.
     q = analyst_get_quote_data(yahoo_ticker)
@@ -3268,7 +3298,7 @@ def analyst_render(ticker_input):
             f"{q.get('identity_reason') or 'Neznámý důvod.'} Analýza byla z bezpečnostních důvodů zastavena."
         )
         st.info(
-            "Analytik V6.28.8 záměrně nepoužije přibližně nalezenou firmu ani data z jiného titulu. "
+            "Analytik V6.28.9 záměrně nepoužije přibližně nalezenou firmu ani data z jiného titulu. "
             "Pokud se zastavení opakuje, pošli mi diagnostický výpis – nebudeme to obcházet dalším fallbackem."
         )
         return
