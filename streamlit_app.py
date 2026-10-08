@@ -53,7 +53,7 @@ def update_runtime(status=None, stage=None, message=None, error=None, run_id=Non
 
 
 st.title("📊 Stock-Screener")
-st.caption("V6.28.6 – Screener · samostatný modul Analytik je dostupný v menu vlevo")
+st.caption("V6.28.7 – Screener · samostatný modul Analytik je dostupný v menu vlevo")
 
 NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 NYSE_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
@@ -1741,8 +1741,17 @@ def _analyst_yahoo_quote_page(yahoo_ticker):
     except Exception:
         return {}
 
+    # Yahoo's rendered quote page is normally authoritative for identity,
+    # but protect against a stale/misrouted response: only accept identity
+    # fields if the page itself contains the requested Yahoo symbol.
+    symbol_upper = symbol.upper()
+    page_symbol = _analyst_regex_string(html, "symbol").upper()
+    identity_ok = page_symbol == symbol_upper or re.search(rf"\b{re.escape(symbol_upper)}\b", html.upper()) is not None
+
     out = {
-        "name": _analyst_regex_string(html, "longName") or _analyst_regex_string(html, "shortName"),
+        "symbol": page_symbol,
+        "identity_ok": identity_ok,
+        "name": (_analyst_regex_string(html, "longName") or _analyst_regex_string(html, "shortName")) if identity_ok else "",
         "sector": _analyst_regex_string(html, "sector"),
         "industry": _analyst_regex_string(html, "industry"),
         "country": _analyst_regex_string(html, "country"),
@@ -1783,10 +1792,15 @@ def _analyst_yahoo_search_quote(yahoo_ticker):
         )
         r.raise_for_status()
         quotes = (r.json() or {}).get("quotes") or []
+        # SECURITY/CORRECTNESS: never accept an approximate Yahoo search hit.
+        # A search for a short ticker such as SHL can return unrelated US
+        # securities (e.g. APLD) when the exact Yahoo symbol is not present.
+        # Returning the first result can therefore silently analyze another
+        # company under the requested ticker.
         for q in quotes:
             if clean_text(q.get("symbol")).upper() == symbol.upper():
                 return q
-        return quotes[0] if quotes else {}
+        return {}
     except Exception:
         return {}
 
@@ -1813,10 +1827,19 @@ def analyst_get_quote_data(yahoo_ticker):
                 return x
         return np.nan
 
+    chart_symbol = clean_text(meta.get("symbol")).upper()
+    # Hard identity gate: if Yahoo Chart itself returns a different symbol,
+    # do not let downstream AI analysis continue.
+    identity_symbol = chart_symbol or clean_text(search.get("symbol")).upper() or clean_text(page.get("symbol")).upper()
+
     return {
+        "symbol": identity_symbol,
+        "identity_ok": identity_symbol == clean_text(yahoo_ticker).upper(),
         "price": pick_num(meta.get("regularMarketPrice"), meta.get("previousClose"), page.get("price")),
         "market_cap": pick_num(page.get("market_cap")),
         "currency": pick_text(meta.get("currency"), page.get("currency")),
+        # Search identity is accepted only when the exact Yahoo symbol matched.
+        # Never use an approximate/first search result as a company name.
         "name": pick_text(page.get("name"), search.get("longname"), search.get("longName"), search.get("shortname"), search.get("shortName")),
         "sector": pick_text(page.get("sector")),
         "industry": pick_text(page.get("industry")),
@@ -3177,15 +3200,17 @@ def analyst_render(ticker_input):
     yahoo_ticker = analyst_yahoo_ticker(ticker, exchange)
     status = st.empty()
     status.info("1/5 Ověřuji identitu firmy a načítám veřejná data…")
-    # V6.28.6: Analytik now uses direct Yahoo Chart + Fundamentals Time Series.
+    # V6.28.7: Analytik identity hardening + direct Yahoo data path.
     # The former V6.28.x diagnostic block is intentionally removed from the
     # normal UI so it cannot interrupt the analytical workflow.
 
     q = analyst_get_quote_data(yahoo_ticker)
     company = q.get("name") or ""
-    if not company:
-        st.error(f"Ticker {ticker} se nepodařilo načíst z Yahoo Finance ({yahoo_ticker}).")
-        st.info("Yahoo Chart/Finance data pro tento ticker se v tomto běhu nepodařilo načíst. Zkus běh zopakovat později.")
+    returned_symbol = clean_text(q.get("symbol")).upper()
+    expected_symbol = clean_text(yahoo_ticker).upper()
+    if not company or returned_symbol != expected_symbol:
+        st.error(f"Identitu titulu se nepodařilo bezpečně ověřit: požadováno {ticker} / {yahoo_ticker}, Yahoo vrátilo {returned_symbol or 'neznámý symbol'}. Analýza byla z bezpečnostních důvodů zastavena.")
+        st.info("Analytik nikdy nesmí pokračovat s přibližně nalezenou firmou. Zkus běh zopakovat; pokud se problém opakuje, pošli mi tento výpis.")
         return
 
     status.info("2/5 Sestavuji dlouhodobý finanční trend, poslední kvartály a cenu…")
