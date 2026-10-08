@@ -2299,6 +2299,9 @@ def _analyst_period_labels(dates, annual_dates=None, quarterly=False):
 
 
 def analyst_ttm_from_quarters(quarterly):
+    # TTM means exactly four complete quarters. Never present 3 quarters
+    # (or a mixture containing missing values) as TTM. This guard is critical
+    # when Yahoo omits a fiscal-year-end quarter.
     if quarterly is None or quarterly.empty or len(quarterly) < 4:
         return pd.DataFrame()
     q = quarterly.tail(4)
@@ -2307,8 +2310,14 @@ def analyst_ttm_from_quarters(quarterly):
     for c in ["Revenue", "Net Income", "Operating Income", "Operating Cash Flow", "FCF"]:
         if c in q.columns:
             vals = pd.to_numeric(q[c], errors="coerce")
-            if vals.notna().sum() >= 3:
-                row[c] = vals.sum(min_count=3)
+            # Every component must have all four quarters.
+            if vals.notna().sum() == 4:
+                row[c] = vals.sum(min_count=4)
+    # Do not emit a partial TTM row. The whole TTM table must represent four
+    # complete quarters, not merely whichever three values happen to exist.
+    core = [row.get(c) for c in ["Revenue", "Net Income", "Operating Income", "Operating Cash Flow", "FCF"]]
+    if any(pd.isna(safe_float(v)) for v in core):
+        return pd.DataFrame()
     rev = safe_float(row.get("Revenue"))
     ni = safe_float(row.get("Net Income"))
     if not pd.isna(rev) and rev > 0 and not pd.isna(ni):
