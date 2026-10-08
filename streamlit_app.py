@@ -3049,7 +3049,7 @@ def _analyst_valuation_comment(q, price):
 
 
 def _analyst_v6284_raw_diagnostics(yahoo_ticker):
-    """V6.28.4 direct Yahoo financial diagnostics; no yfinance required."""
+    """V6.28.5 direct Yahoo financial diagnostics; no yfinance required."""
     symbol=clean_text(yahoo_ticker).strip(); out={"symbol":symbol,"timeseries":[],"html":[],"final":{}}
     if not symbol:return out
     headers={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/154.0 Safari/537.36","Accept-Language":"en-US,en;q=0.9","Accept":"application/json,text/plain,*/*"}
@@ -3106,7 +3106,7 @@ def _analyst_v6284_raw_diagnostics(yahoo_ticker):
 
 
 def _analyst_v6282_pre_yfinance_diagnostics(yahoo_ticker):
-    """V6.28.4: test direct Yahoo access before yfinance is called."""
+    """V6.28.5: test direct Yahoo access before yfinance is called."""
     symbol = clean_text(yahoo_ticker).strip()
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/154.0 Safari/537.36",
@@ -3200,11 +3200,11 @@ def analyst_render(ticker_input):
     yahoo_ticker = analyst_yahoo_ticker(ticker, exchange)
     status = st.empty()
     status.info("1/5 Ověřuji identitu firmy a načítám veřejná data…")
-    # V6.28.4: prove whether the Streamlit Cloud runtime can reach Yahoo
+    # V6.28.5: prove whether the Streamlit Cloud runtime can reach Yahoo
     # before invoking yfinance. This prevents yfinance failure from hiding
     # the underlying network/API problem.
     pre_diag = _analyst_v6282_pre_yfinance_diagnostics(yahoo_ticker)
-    with st.expander("🧪 V6.28.4 – přímý test Yahoo před yfinance", expanded=True):
+    with st.expander("🧪 V6.28.5 – přímý test Yahoo před yfinance", expanded=True):
         st.write(f"Yahoo ticker: **{yahoo_ticker}**")
         st.caption("Tento test probíhá ještě před voláním yfinance. Neprovádí žádnou změnu dat ani API klíče.")
         for rec in pre_diag.get("tests", []):
@@ -3220,11 +3220,49 @@ def analyst_render(ticker_input):
         else:
             st.success("Alespoň jeden přímý test Yahoo funguje. Pokud yfinance následně selže, je problém pravděpodobně v konkrétní vrstvě yfinance/crumb/session, nikoli v úplné nedostupnosti Yahoo.")
 
+    # V6.28.5: run financial diagnostics BEFORE yfinance quote/history.
+    # This is critical because yfinance can fail and otherwise hide the results.
+    with st.expander("🧪 V6.28.5 – přímý test finančních dat Yahoo", expanded=True):
+        diag = _analyst_v6284_raw_diagnostics(yahoo_ticker)
+        st.markdown("**Cíl:** zjistit, zda Yahoo přímo vrací finanční výkazy ještě před jakýmkoli voláním yfinance.")
+        st.write(f"Yahoo ticker: **{diag.get('symbol') or '—'}**")
+        st.markdown("### 1. Yahoo fundamentals-timeseries – RAW")
+        for rec in diag.get("timeseries", []):
+            st.write(f"**{rec.get('name','Yahoo endpoint')}** · HTTP {rec.get('status')}")
+            if rec.get("error"):
+                st.error(rec["error"])
+            if rec.get("metrics"):
+                for typ, info in rec["metrics"].items():
+                    rows = info.get("rows", []) if isinstance(info, dict) else []
+                    dates = ", ".join(f"{x['date']}={x['raw']}" for x in rows)
+                    st.code(f"{typ}: {dates}")
+            elif rec.get("rows"):
+                st.code(", ".join(f"{x['date']}={x['raw']}" for x in rec["rows"]))
+            else:
+                st.warning("Yahoo v tomto endpointu nevrátil žádnou z požadovaných metrik.")
+            if rec.get("body_sample"):
+                st.caption(f"RAW: {rec['body_sample'][:500]}")
+        st.markdown("### 2. Yahoo HTML finanční stránky – RAW")
+        for rec in diag.get("html", []):
+            st.write(f"**{rec['page']} / {rec['frequency']}** · HTTP {rec.get('status')} · délka {rec.get('length',0)} · obsahuje 2025: {rec.get('contains_2025')}")
+            if rec.get("error"):
+                st.error(rec["error"])
+            if rec.get("matches"):
+                st.write("Nalezené řádky: " + ", ".join(rec["matches"]))
+            if rec.get("snippet"):
+                st.code(rec["snippet"][:2000])
+        st.markdown("### 3. Interní data – až po přímém testu")
+        final = diag.get("final", {})
+        st.write(f"Roční data 30.9.2025: `{final.get('annual_2025_09_30', {})}`")
+        st.write(f"Kvartální data 30.9.2025: `{final.get('quarterly_2025_09_30', {})}`")
+        st.write("Roční datumy: " + ", ".join(final.get("annual_dates", [])))
+        st.write("Kvartální datumy: " + ", ".join(final.get("quarterly_dates", [])))
+
     q = analyst_get_quote_data(yahoo_ticker)
     company = q.get("name") or ""
     if not company:
         st.error(f"Ticker {ticker} se nepodařilo jednoznačně načíst přes Yahoo Finance ({yahoo_ticker}).")
-        st.info("V6.28.4 výše nyní ukazuje přímé odpovědi Yahoo ještě před yfinance. Pošli mi prosím celý tento diagnostický blok; podle něj zvolíme další opravu.")
+        st.info("V6.28.5 výše nyní ukazuje přímé odpovědi Yahoo ještě před yfinance. Pošli mi prosím celý tento diagnostický blok; podle něj zvolíme další opravu.")
         return
 
     status.info("2/5 Sestavuji dlouhodobý finanční trend, poslední kvartály a cenu…")
@@ -3326,37 +3364,6 @@ def analyst_render(ticker_input):
                 st.write("AI neposkytla samostatnou sekci pro další ověření.")
         else:
             st.write("AI neposkytla samostatnou sekci pro další ověření.")
-
-    with st.expander("🧪 V6.28.4 – přímý test finančních dat Yahoo", expanded=True):
-        diag = _analyst_v6284_raw_diagnostics(yahoo_ticker)
-        st.markdown("**Cíl:** zjistit, zda 30. 9. 2025 chybí už v Yahoo odpovědi, nebo až při našem převodu do interní tabulky.")
-        st.write(f"Yahoo ticker: **{diag.get('symbol') or '—'}**")
-        st.markdown("### 1. Yahoo fundamentals-timeseries – RAW")
-        for rec in diag.get("timeseries", []):
-            st.write(f"**HTTP {rec.get('status')}** · {rec.get('url')}")
-            if rec.get("error"):
-                st.error(rec["error"])
-            if rec.get("metrics"):
-                for typ, rows in rec["metrics"].items():
-                    dates = ", ".join(f"{x['date']}={x['raw']}" for x in rows)
-                    st.code(f"{typ}: {dates}")
-            else:
-                st.warning("Yahoo v tomto endpointu nevrátil žádnou z požadovaných metrik.")
-        st.markdown("### 2. Yahoo HTML finanční tabulky")
-        for rec in diag.get("html", []):
-            st.write(f"**{rec['page']}** · HTTP {rec.get('status')} · tabulek: {rec.get('tables', 0)}")
-            if rec.get("error"):
-                st.error(rec["error"])
-            for m in rec.get("matches", []):
-                st.write(f"Tabulka {m['table']} · řádek **{m['row']}**")
-                st.code(json.dumps(m.get("sample", []), ensure_ascii=False, indent=2, default=str)[:12000])
-            if not rec.get("matches") and not rec.get("error"):
-                st.warning("Požadované finanční řádky nebyly v nalezených HTML tabulkách identifikovány.")
-        st.markdown("### 3. Co nakonec vidí naše interní data")
-        st.write("Roční data – dostupná data:", diag.get("final", {}).get("annual_dates", []))
-        st.write("Kvartální data – dostupná data:", diag.get("final", {}).get("quarterly_dates", []))
-        st.write("Roční řádek 30. 9. 2025:", diag.get("final", {}).get("annual_2025_09_30", {}))
-        st.write("Kvartální řádek 30. 9. 2025:", diag.get("final", {}).get("quarterly_2025_09_30", {}))
 
     with st.expander("📚 9. Zdroje a diagnostika", expanded=False):
         st.write(f"Yahoo Finance: {yahoo_ticker}")
