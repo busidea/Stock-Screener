@@ -1977,22 +1977,35 @@ def _analyst_yahoo_timeseries_direct(yahoo_ticker, annual=False, trailing=False)
         for key in requested:
             if key in out and not out[key].empty:
                 continue
-            try:
-                r = requests.get(
-                    url,
-                    params={"symbol": symbol, "type": key, "period1": start, "period2": now},
-                    headers=headers,
-                    timeout=25,
-                )
-                r.raise_for_status()
-                result = ((r.json().get("timeseries") or {}).get("result") or [])
-                for item in result:
-                    ss = _analyst_timeseries_to_series(item, key)
-                    if not ss.empty:
-                        out[key] = ss
+            # Trailing series are a special Yahoo endpoint case: asking for a
+            # very old period can make Yahoo omit the trailing value even though
+            # the same key is available without a period restriction. Try the
+            # normal bounded request first, then an unrestricted period request.
+            trailing_params = [
+                {"symbol": symbol, "type": key, "period1": start, "period2": now},
+                {"symbol": symbol, "type": key},
+            ] if trailing else [
+                {"symbol": symbol, "type": key, "period1": start, "period2": now}
+            ]
+            for params in trailing_params:
+                try:
+                    r = requests.get(
+                        url,
+                        params=params,
+                        headers=headers,
+                        timeout=25,
+                    )
+                    r.raise_for_status()
+                    result = ((r.json().get("timeseries") or {}).get("result") or [])
+                    for item in result:
+                        ss = _analyst_timeseries_to_series(item, key)
+                        if not ss.empty:
+                            out[key] = ss
+                            break
+                    if key in out and not out[key].empty:
                         break
-            except Exception:
-                continue
+                except Exception:
+                    continue
         if out:
             return out
     return {}
@@ -2023,13 +2036,25 @@ def _analyst_derive_missing_quarter_from_ttm(series, ttm_series, missing_date):
     target = pd.Timestamp(missing_date).normalize()
     if target in s.index and not pd.isna(s.loc[target]):
         return s
-    candidates = [d for d in t.index if d > target]
+    candidates = sorted([d for d in t.index if d > target])
     if not candidates:
         return s
-    ttm_end = max(candidates)
+    # Prefer the latest TTM observation; it should contain exactly the target
+    # quarter plus the following three reported quarters.
+    ttm_end = candidates[-1]
     later = s[(s.index > target) & (s.index <= ttm_end)].dropna()
     if len(later) != 3:
-        return s
+        # If Yahoo exposes an additional stale TTM observation, try each
+        # candidate from newest to oldest and accept only an exact 3-quarter
+        # decomposition.
+        for candidate in reversed(candidates):
+            candidate_later = s[(s.index > target) & (s.index <= candidate)].dropna()
+            if len(candidate_later) == 3:
+                ttm_end = candidate
+                later = candidate_later
+                break
+        if len(later) != 3:
+            return s
     ttm_val = safe_float(t.loc[ttm_end])
     if pd.isna(ttm_val):
         return s
@@ -2596,7 +2621,8 @@ def _analyst_add_financial_evidence(pack, annual, quarterly):
             vals = []
             for col, label in [
                 ("Revenue", "Tržby"), ("Net Income", "Čistý zisk"),
-                ("Operating Income", "Provozní zisk"), ("FCF", "FCF"),
+                ("Operating Income", "Provozní zisk"), ("Operating Cash Flow", "Provozní cash flow"),
+                ("Capital Expenditure", "Kapitálové výdaje"), ("FCF", "FCF"),
                 ("Debt", "Dluh"), ("Equity", "Vlastní kapitál"),
                 ("Net Margin %", "Čistá marže")
             ]:
@@ -2839,6 +2865,13 @@ PŘÍSNÁ EVIDENČNÍ PRAVIDLA
 - Nepředpokládej, že fiskální rok končí 31.12. Respektuj označení období a skutečná data konce FY.
 - TTM jsou poslední 4 dostupná čtvrtletí, nikoli automaticky kalendářní rok.
 - Nezaměňuj procentní změnu za absolutní hodnotu.
+- Jednotlivá čtvrtletí FCF jsou sezónní a nesmějí být prezentována jako „růst FCF“
+  pouze na základě mezikvartálního procenta. Pro trend FCF používej především celé
+  FY nebo TTM; pokud porovnáváš dvě čtvrtletí, výslovně uveď, že jde o změnu
+  mezi obdobími, nikoli o tempo růstu podniku.
+- Pokud je FY2025 nebo jiný fiskální rok matematicky odvozen z TTM minus tří
+  následujících reportovaných kvartálů, považuj jej za přesnou rekonstrukci
+  dostupných dat, ale ne za nový reportovaný údaj.
 - Opakované články o stejné události slouč do jednoho tématu.
 - Žádné Buy/Hold/Sell, skóre, pořadí nebo doporučení.
 
