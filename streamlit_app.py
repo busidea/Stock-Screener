@@ -53,7 +53,7 @@ def update_runtime(status=None, stage=None, message=None, error=None, run_id=Non
 
 
 st.title("📊 Stock-Screener")
-st.caption("V6.28.7 – Screener · samostatný modul Analytik je dostupný v menu vlevo")
+st.caption("V6.28.8 – Screener · samostatný modul Analytik je dostupný v menu vlevo")
 
 NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 NYSE_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
@@ -1807,11 +1807,32 @@ def _analyst_yahoo_search_quote(yahoo_ticker):
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def analyst_get_quote_data(yahoo_ticker):
-    """Direct Yahoo quote/profile layer for Analytik; yfinance is not required."""
+    """
+    V6.28.8 IDENTITY FIREWALL.
+
+    A company may be accepted only when BOTH independent Yahoo layers agree
+    on the exact requested Yahoo symbol:
+      1) Chart API -> meta.symbol
+      2) Yahoo Search -> exact quote.symbol
+
+    The Yahoo quote HTML page is deliberately NOT used here. Its large HTML
+    document can contain data for other securities, so global regex extraction
+    of fields such as longName/marketCap/P-E is unsafe.
+    """
+    expected = clean_text(yahoo_ticker).upper()
+    if not expected:
+        return {"symbol": "", "identity_ok": False, "identity_reason": "Prázdný Yahoo ticker."}
+
     chart = _analyst_yahoo_chart_data(yahoo_ticker, range_value="5d", interval="1d")
     meta = chart.get("meta") or {}
-    page = _analyst_yahoo_quote_page(yahoo_ticker)
     search = _analyst_yahoo_search_quote(yahoo_ticker)
+
+    chart_symbol = clean_text(meta.get("symbol")).upper()
+    search_symbol = clean_text(search.get("symbol")).upper()
+
+    chart_ok = chart_symbol == expected
+    search_ok = search_symbol == expected
+    identity_ok = chart_ok and search_ok
 
     def pick_text(*vals):
         for v in vals:
@@ -1827,39 +1848,69 @@ def analyst_get_quote_data(yahoo_ticker):
                 return x
         return np.nan
 
-    chart_symbol = clean_text(meta.get("symbol")).upper()
-    # Hard identity gate: if Yahoo Chart itself returns a different symbol,
-    # do not let downstream AI analysis continue.
-    identity_symbol = chart_symbol or clean_text(search.get("symbol")).upper() or clean_text(page.get("symbol")).upper()
+    # Search fields are used only from the EXACT symbol-matched quote returned
+    # above. This keeps the identity and the descriptive fields bound together.
+    name = pick_text(
+        search.get("longname"), search.get("longName"),
+        search.get("shortname"), search.get("shortName")
+    )
+
+    # Yahoo Search uses slightly different field names depending on endpoint
+    # version. Accept only fields belonging to the exact matched quote object.
+    market_cap = pick_num(search.get("marketCap"), search.get("marketcap"))
+    pe = pick_num(search.get("trailingPE"), search.get("trailingPe"))
+    forward_pe = pick_num(search.get("forwardPE"), search.get("forwardPe"))
+    ps = pick_num(search.get("priceToSalesTrailing12Months"), search.get("priceToSales"))
+    pb = pick_num(search.get("priceToBook"), search.get("priceToBookRatio"))
+    roe = pick_num(search.get("returnOnEquity"), search.get("roe"))
+    revenue_growth = pick_num(search.get("revenueGrowth"))
+    earnings_growth = pick_num(search.get("earningsGrowth"))
+    free_cash_flow = pick_num(search.get("freeCashflow"), search.get("freeCashFlow"))
+    debt_to_equity = pick_num(search.get("debtToEquity"))
+    dividend_yield = pick_num(search.get("dividendYield"), search.get("dividendYieldPct"))
+    employees = pick_num(search.get("fullTimeEmployees"))
+
+    if not identity_ok:
+        reason = (
+            f"Yahoo identity mismatch: požadováno {expected}; "
+            f"Chart={chart_symbol or '—'}, Search={search_symbol or '—'}."
+        )
+    elif not name:
+        reason = "Yahoo ověřilo ticker, ale neposkytlo bezpečně svázaný název firmy."
+        identity_ok = False
+    else:
+        reason = "OK – Chart API a přesný Yahoo Search quote shodně potvrzují ticker."
 
     return {
-        "symbol": identity_symbol,
-        "identity_ok": identity_symbol == clean_text(yahoo_ticker).upper(),
-        "price": pick_num(meta.get("regularMarketPrice"), meta.get("previousClose"), page.get("price")),
-        "market_cap": pick_num(page.get("market_cap")),
-        "currency": pick_text(meta.get("currency"), page.get("currency")),
-        # Search identity is accepted only when the exact Yahoo symbol matched.
-        # Never use an approximate/first search result as a company name.
-        "name": pick_text(page.get("name"), search.get("longname"), search.get("longName"), search.get("shortname"), search.get("shortName")),
-        "sector": pick_text(page.get("sector")),
-        "industry": pick_text(page.get("industry")),
-        "country": pick_text(page.get("country")),
-        "website": pick_text(page.get("website")),
-        "ir_website": pick_text(page.get("ir_website")),
-        "summary": pick_text(page.get("summary")),
-        "employees": pick_num(page.get("employees")),
-        "pe": pick_num(page.get("pe")),
-        "forward_pe": pick_num(page.get("forward_pe")),
-        "ps": pick_num(page.get("ps")),
-        "pb": pick_num(page.get("pb")),
-        "roe": pick_num(page.get("roe")),
-        "revenue_growth": pick_num(page.get("revenue_growth")),
-        "earnings_growth": pick_num(page.get("earnings_growth")),
-        "free_cash_flow": pick_num(page.get("free_cash_flow")),
-        "debt_to_equity": pick_num(page.get("debt_to_equity")),
-        "dividend_yield": pick_num(page.get("dividend_yield")),
-        "quote_type": pick_text(page.get("quote_type"), meta.get("instrumentType")),
-        "exchange": pick_text(page.get("exchange"), meta.get("exchangeName")),
+        "symbol": expected if chart_ok else (chart_symbol or search_symbol),
+        "identity_ok": identity_ok,
+        "identity_reason": reason,
+        "identity_chart_symbol": chart_symbol,
+        "identity_search_symbol": search_symbol,
+        "identity_source": "Yahoo Chart API + exact Yahoo Search",
+        "price": pick_num(meta.get("regularMarketPrice"), meta.get("previousClose"), search.get("regularMarketPrice")),
+        "market_cap": market_cap,
+        "currency": pick_text(meta.get("currency"), search.get("currency")),
+        "name": name,
+        "sector": pick_text(search.get("sector")),
+        "industry": pick_text(search.get("industry")),
+        "country": pick_text(search.get("country")),
+        "website": "",
+        "ir_website": "",
+        "summary": "",
+        "employees": employees,
+        "pe": pe,
+        "forward_pe": forward_pe,
+        "ps": ps,
+        "pb": pb,
+        "roe": roe,
+        "revenue_growth": revenue_growth,
+        "earnings_growth": earnings_growth,
+        "free_cash_flow": free_cash_flow,
+        "debt_to_equity": debt_to_equity,
+        "dividend_yield": dividend_yield,
+        "quote_type": pick_text(search.get("quoteType"), meta.get("instrumentType")),
+        "exchange": pick_text(meta.get("exchangeName"), search.get("exchange")),
     }
 
 
@@ -3204,13 +3255,22 @@ def analyst_render(ticker_input):
     # The former V6.28.x diagnostic block is intentionally removed from the
     # normal UI so it cannot interrupt the analytical workflow.
 
+    # V6.28.8: HARD IDENTITY FIREWALL. No AI, financial history or news may run
+    # until the requested Yahoo ticker is independently confirmed by Chart +
+    # exact Search quote. An ambiguous identity is a hard stop, not a fallback.
     q = analyst_get_quote_data(yahoo_ticker)
     company = q.get("name") or ""
     returned_symbol = clean_text(q.get("symbol")).upper()
     expected_symbol = clean_text(yahoo_ticker).upper()
-    if not company or returned_symbol != expected_symbol:
-        st.error(f"Identitu titulu se nepodařilo bezpečně ověřit: požadováno {ticker} / {yahoo_ticker}, Yahoo vrátilo {returned_symbol or 'neznámý symbol'}. Analýza byla z bezpečnostních důvodů zastavena.")
-        st.info("Analytik nikdy nesmí pokračovat s přibližně nalezenou firmou. Zkus běh zopakovat; pokud se problém opakuje, pošli mi tento výpis.")
+    if not q.get("identity_ok") or not company or returned_symbol != expected_symbol:
+        st.error(
+            f"Identitu titulu se nepodařilo bezpečně ověřit: požadováno {ticker} / {yahoo_ticker}. "
+            f"{q.get('identity_reason') or 'Neznámý důvod.'} Analýza byla z bezpečnostních důvodů zastavena."
+        )
+        st.info(
+            "Analytik V6.28.8 záměrně nepoužije přibližně nalezenou firmu ani data z jiného titulu. "
+            "Pokud se zastavení opakuje, pošli mi diagnostický výpis – nebudeme to obcházet dalším fallbackem."
+        )
         return
 
     status.info("2/5 Sestavuji dlouhodobý finanční trend, poslední kvartály a cenu…")
