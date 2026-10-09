@@ -53,7 +53,7 @@ def update_runtime(status=None, stage=None, message=None, error=None, run_id=Non
 
 
 st.title("📊 Stock-Screener")
-st.caption("V6.28.9 – Screener · samostatný modul Analytik je dostupný v menu vlevo")
+st.caption("V6.28.13 · BUILD 20261010-A – Screener · samostatný modul Analytik je dostupný v menu vlevo")
 
 NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 NYSE_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
@@ -1725,59 +1725,6 @@ def _analyst_regex_string(html, field):
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def _analyst_yahoo_quote_page(yahoo_ticker):
-    symbol = clean_text(yahoo_ticker).strip()
-    if not symbol:
-        return {}
-    url = f"https://finance.yahoo.com/quote/{symbol}/"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0 Safari/537.36",
-        "Accept-Language": "en-US,en;q=0.9",
-    }
-    try:
-        r = requests.get(url, headers=headers, timeout=25)
-        r.raise_for_status()
-        html = r.text
-    except Exception:
-        return {}
-
-    # Yahoo's rendered quote page is normally authoritative for identity,
-    # but protect against a stale/misrouted response: only accept identity
-    # fields if the page itself contains the requested Yahoo symbol.
-    symbol_upper = symbol.upper()
-    page_symbol = _analyst_regex_string(html, "symbol").upper()
-    identity_ok = page_symbol == symbol_upper or re.search(rf"\b{re.escape(symbol_upper)}\b", html.upper()) is not None
-
-    out = {
-        "symbol": page_symbol,
-        "identity_ok": identity_ok,
-        "name": (_analyst_regex_string(html, "longName") or _analyst_regex_string(html, "shortName")) if identity_ok else "",
-        "sector": _analyst_regex_string(html, "sector"),
-        "industry": _analyst_regex_string(html, "industry"),
-        "country": _analyst_regex_string(html, "country"),
-        "website": _analyst_regex_string(html, "website"),
-        "ir_website": _analyst_regex_string(html, "irWebsite"),
-        "summary": _analyst_regex_string(html, "longBusinessSummary"),
-        "currency": _analyst_regex_string(html, "currency"),
-        "exchange": _analyst_regex_string(html, "exchange"),
-        "market_cap": _analyst_regex_number(html, "marketCap"),
-        "pe": _analyst_regex_number(html, "trailingPE"),
-        "forward_pe": _analyst_regex_number(html, "forwardPE"),
-        "ps": _analyst_regex_number(html, "priceToSalesTrailing12Months"),
-        "pb": _analyst_regex_number(html, "priceToBook"),
-        "roe": _analyst_regex_number(html, "returnOnEquity"),
-        "revenue_growth": _analyst_regex_number(html, "revenueGrowth"),
-        "earnings_growth": _analyst_regex_number(html, "earningsGrowth"),
-        "free_cash_flow": _analyst_regex_number(html, "freeCashflow"),
-        "debt_to_equity": _analyst_regex_number(html, "debtToEquity"),
-        "dividend_yield": _analyst_regex_number(html, "dividendYield"),
-        "employees": _analyst_regex_number(html, "fullTimeEmployees"),
-        "quote_type": _analyst_regex_string(html, "quoteType"),
-    }
-    return out
-
-
-@st.cache_data(ttl=1800, show_spinner=False)
 def _analyst_yahoo_search_quote(yahoo_ticker):
     """Unauthenticated Yahoo search fallback for company name/profile identity."""
     symbol = clean_text(yahoo_ticker).strip()
@@ -1808,7 +1755,7 @@ def _analyst_yahoo_search_quote(yahoo_ticker):
 @st.cache_data(ttl=1800, show_spinner=False)
 def analyst_get_quote_data(yahoo_ticker):
     """
-    V6.28.9 IDENTITY FIREWALL.
+    V6.28.13 IDENTITY FIREWALL + PERIOD VALIDATION.
 
     A company may be accepted only when BOTH independent Yahoo layers agree
     on the exact requested Yahoo symbol:
@@ -1932,64 +1879,44 @@ def _analyst_timeseries_to_series(item, requested_key):
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def _analyst_yahoo_timeseries_direct(yahoo_ticker, annual=False, trailing=False):
-    """Direct Yahoo fundamentals-timeseries data, independent of yfinance."""
+def _analyst_yahoo_timeseries_direct(yahoo_ticker, annual=False):
+    """Načte pouze reportované roční nebo čtvrtletní řady z Yahoo Finance."""
     symbol = clean_text(yahoo_ticker).strip()
     if not symbol:
         return {}
-    prefix = "trailing" if trailing else ("annual" if annual else "quarterly")
+    prefix = "annual" if annual else "quarterly"
     keys = ["TotalRevenue", "NetIncome", "OperatingIncome", "OperatingCashFlow", "CapitalExpenditure", "TotalDebt", "StockholdersEquity"]
-    requested = [prefix + k for k in keys]
+    requested = [prefix + key for key in keys]
     now = int(time.time())
-    years = 10 if annual else (7 if not trailing else 3)
-    start = now - int(years * 366 * 24 * 3600)
+    start = now - int((10 if annual else 7) * 366 * 24 * 3600)
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/154.0 Safari/537.36"}
-    urls = [
-        f"https://query2.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/{symbol}",
-        f"https://query1.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/{symbol}",
-    ]
-    for url in urls:
+    for host in ("query2", "query1"):
+        url = f"https://{host}.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/{symbol}"
+        out = {}
         try:
-            # First try one combined request. This is fastest and is the normal
-            # path for annual/quarterly data.
             r = requests.get(url, params={"symbol": symbol, "type": ",".join(requested), "period1": start, "period2": now}, headers=headers, timeout=25)
             r.raise_for_status()
             result = ((r.json().get("timeseries") or {}).get("result") or [])
-            out = {}
             for item in result:
                 for key in requested:
-                    ss = _analyst_timeseries_to_series(item, key)
-                    if not ss.empty:
-                        out[key] = ss
-            if out:
-                # For trailing data Yahoo can occasionally omit one or more
-                # fields from a combined request. Keep what arrived, then
-                # continue below for the missing fields.
-                if not trailing or len(out) == len(requested):
-                    return out
+                    series = _analyst_timeseries_to_series(item, key)
+                    if not series.empty:
+                        out[key] = series
         except Exception:
-            out = {}
-
-        # Yahoo/yfinance itself sometimes gets better coverage by asking for
-        # one metric at a time. This is especially important for TTM because
-        # the missing FY-end quarter is reconstructed from TTM minus the next
-        # three reported quarters. Never estimate from growth rates.
+            pass
+        # Yahoo někdy vrátí jen část polí v hromadném požadavku; chybějící
+        # ukazatele proto zkusíme jednotlivě, ale nikdy nedopočítáváme kvartál z TTM.
         for key in requested:
             if key in out and not out[key].empty:
                 continue
             try:
-                r = requests.get(
-                    url,
-                    params={"symbol": symbol, "type": key, "period1": start, "period2": now},
-                    headers=headers,
-                    timeout=25,
-                )
+                r = requests.get(url, params={"symbol": symbol, "type": key, "period1": start, "period2": now}, headers=headers, timeout=25)
                 r.raise_for_status()
                 result = ((r.json().get("timeseries") or {}).get("result") or [])
                 for item in result:
-                    ss = _analyst_timeseries_to_series(item, key)
-                    if not ss.empty:
-                        out[key] = ss
+                    series = _analyst_timeseries_to_series(item, key)
+                    if not series.empty:
+                        out[key] = series
                         break
             except Exception:
                 continue
@@ -2000,42 +1927,15 @@ def _analyst_yahoo_timeseries_direct(yahoo_ticker, annual=False, trailing=False)
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def _analyst_yahoo_timeseries_all(yahoo_ticker):
-    """Fetch annual, quarterly and trailing Yahoo data once per ticker."""
+    """Načte reportované roční a čtvrtletní řady; nevyžaduje profilové TTM."""
     return {
         "annual": _analyst_yahoo_timeseries_direct(yahoo_ticker, annual=True),
         "quarterly": _analyst_yahoo_timeseries_direct(yahoo_ticker, annual=False),
-        "trailing": _analyst_yahoo_timeseries_direct(yahoo_ticker, trailing=True),
     }
-
 
 def _analyst_series_from_direct(raw, metric, prefix):
     return raw.get(prefix + metric, pd.Series(dtype=float)).copy()
 
-
-def _analyst_derive_missing_quarter_from_ttm(series, ttm_series, missing_date):
-    """Derive a missing quarter only when TTM and the following 3 quarters exist."""
-    if series is None or series.empty or ttm_series is None or ttm_series.empty:
-        return series
-    s = series.copy()
-    s.index = pd.to_datetime(s.index, errors="coerce")
-    t = ttm_series.copy()
-    t.index = pd.to_datetime(t.index, errors="coerce")
-    target = pd.Timestamp(missing_date).normalize()
-    if target in s.index and not pd.isna(s.loc[target]):
-        return s
-    candidates = [d for d in t.index if d > target]
-    if not candidates:
-        return s
-    ttm_end = max(candidates)
-    later = s[(s.index > target) & (s.index <= ttm_end)].dropna()
-    if len(later) != 3:
-        return s
-    ttm_val = safe_float(t.loc[ttm_end])
-    if pd.isna(ttm_val):
-        return s
-    derived = ttm_val - float(later.sum())
-    s.loc[target] = derived
-    return s.sort_index()
 
 
 def _analyst_fiscal_end_from_annual_dates(dates):
@@ -2059,13 +1959,12 @@ def _analyst_fy_for_date(d, fy_end):
 def _analyst_build_history_direct(yahoo_ticker, quarterly=False):
     """Build Analytik history entirely from direct Yahoo data.
 
-    Important: yfinance is intentionally not involved here.  Missing FY-end
-    flow data can be derived only when the Yahoo TTM value plus the following
-    three reported quarters mathematically determines the missing quarter.
-    Such rows are marked as derived in the period label.
+    Important: yfinance is intentionally not involved here. Missing annual
+    flow data may be reconstructed only from four actual consecutive reported
+    quarters. A missing quarter is never inferred from a trailing-TTM value.
     """
     all_data = _analyst_yahoo_timeseries_all(yahoo_ticker)
-    annual_raw, q_raw, trailing_raw = all_data.get("annual", {}), all_data.get("quarterly", {}), all_data.get("trailing", {})
+    annual_raw, q_raw = all_data.get("annual", {}), all_data.get("quarterly", {})
     prefix = "quarterly" if quarterly else "annual"
     metric_map = {
         "Revenue": "TotalRevenue", "Net Income": "NetIncome", "Operating Income": "OperatingIncome",
@@ -2086,37 +1985,6 @@ def _analyst_build_history_direct(yahoo_ticker, quarterly=False):
         fy_end = _analyst_fiscal_end_from_annual_dates(debt_idx)
 
     derived_dates = set()
-    if quarterly:
-        # Yahoo currently omits some fiscal-year-end flow rows while providing
-        # the TTM value. If mathematically determinable, reconstruct that one
-        # quarter. This is deliberately conservative: no estimate is made from
-        # growth rates, averages, or analyst forecasts.
-        trailing_map = {name: _analyst_series_from_direct(trailing_raw, metric, "trailing") for name, metric in metric_map.items()}
-        # Look for quarter-end dates immediately before a known next quarter;
-        # in practice this catches a missing Sep fiscal quarter for a Sep FY end.
-        known_dates = sorted(set().union(*[set(s.index) for s in filled.values() if not s.empty]))
-        if known_dates and fy_end:
-            years = sorted(set(d.year for d in known_dates))
-            candidates = []
-            for y in years:
-                try:
-                    target = pd.Timestamp(year=y, month=fy_end[0], day=fy_end[1])
-                except ValueError:
-                    continue
-                if target not in known_dates:
-                    candidates.append(target)
-            # Prefer the most recent missing FY-end date that is surrounded by data.
-            for target in sorted(candidates, reverse=True):
-                changed = False
-                for name in metric_map:
-                    before = filled[name]
-                    after = _analyst_derive_missing_quarter_from_ttm(before, trailing_map[name], target)
-                    if target in after.index and (target not in before.index):
-                        filled[name] = after
-                        changed = True
-                if changed:
-                    derived_dates.add(target)
-                    break
 
     # Annual FY2025 (or equivalent) may be absent even though all four fiscal
     # quarters are available. Sum exactly those quarters belonging to the FY.
@@ -2132,10 +2000,15 @@ def _analyst_build_history_direct(yahoo_ticker, quarterly=False):
                 q_raw_df = q_data.copy()
                 q_raw_df["_date"] = [d for d, _ in q_dates]
                 q_raw_df["_fy"] = q_raw_df["_date"].map(lambda d: _analyst_fy_for_date(d, fy_end))
-                full_fys = [fy for fy, grp in q_raw_df.groupby("_fy") if len(grp) == 4]
+                full_fys = []
+                for fy, grp in q_raw_df.groupby("_fy"):
+                    grp = grp.sort_values("_date")
+                    dates = list(grp["_date"])
+                    if len(grp) == 4 and _analyst_dates_are_consecutive_quarters(dates):
+                        full_fys.append(fy)
                 latest_fy = max(full_fys) if full_fys else None
-                qfy = q_raw_df[q_raw_df["_fy"] == latest_fy] if latest_fy is not None else pd.DataFrame()
-                if len(qfy) == 4:
+                qfy = q_raw_df[q_raw_df["_fy"] == latest_fy].sort_values("_date") if latest_fy is not None else pd.DataFrame()
+                if len(qfy) == 4 and _analyst_dates_are_consecutive_quarters(list(qfy["_date"])):
                     end_date = max(qfy["_date"])
                     for name in ["Revenue", "Net Income", "Operating Income", "Operating Cash Flow", "Capital Expenditure"]:
                         if name in qfy.columns:
@@ -2199,95 +2072,51 @@ def analyst_get_quarterly_history(yahoo_ticker):
 
 
 
-def _analyst_statement_series(df, labels):
-    if df is None or df.empty:
-        return pd.Series(dtype=float)
-    idx = {str(x).strip().lower(): x for x in df.index}
-    for label in labels:
-        if label.lower() in idx:
-            return pd.to_numeric(df.loc[idx[label.lower()]], errors="coerce")
-    compact = {re.sub(r"[^a-z0-9]", "", str(x).lower()): x for x in df.index}
-    for label in labels:
-        key = re.sub(r"[^a-z0-9]", "", label.lower())
-        if key in compact:
-            return pd.to_numeric(df.loc[compact[key]], errors="coerce")
-    return pd.Series(dtype=float)
 
-
-def _analyst_get_statement(t, attr, getter_name, freq):
-    frames = []
+def _analyst_dates_are_consecutive_quarters(dates):
+    """True only for four actual quarter-end dates roughly three months apart."""
     try:
-        x = getattr(t, attr, None)
-        if isinstance(x, pd.DataFrame) and not x.empty:
-            frames.append(x)
+        ds = sorted(pd.Timestamp(d).normalize() for d in dates)
     except Exception:
-        pass
-    try:
-        getter = getattr(t, getter_name, None)
-        if callable(getter):
-            x = getter(freq=freq)
-            if isinstance(x, pd.DataFrame) and not x.empty:
-                frames.append(x)
-    except Exception:
-        pass
-    for x in frames:
-        if isinstance(x, pd.DataFrame) and not x.empty:
-            return x
-    return pd.DataFrame()
-
-
-def _analyst_period_labels(dates, annual_dates=None, quarterly=False):
-    """Create fiscal-period labels from actual statement dates.
-
-    For quarterly data the fiscal year-end month/day is inferred from the
-    annual statements. It is deliberately NOT necessary to have the following
-    annual year-end already present: this is what lets SHL's Dec-2025, Mar-2026
-    and Jun-2026 quarters be labelled FY2026 even when Yahoo exposes only four
-    annual columns.
-    """
-    dates = [pd.Timestamp(d) for d in dates if not pd.isna(pd.Timestamp(d))]
-    annual_ends = sorted(pd.Timestamp(d) for d in (annual_dates or []) if not pd.isna(pd.Timestamp(d)))
-    if not quarterly:
-        return [f"FY{d.year} (ended {d:%Y-%m-%d})" for d in dates]
-
-    if not annual_ends:
-        return [f"Q{((d.month - 1) // 3) + 1} FY{d.year} (ended {d:%Y-%m-%d}; FY end unknown)" for d in dates]
-
-    # Infer the fiscal-year end from the annual statement dates. In practice
-    # the same month/day repeats every year; mode protects against a malformed
-    # single date.
-    md_counts = {}
-    for a in annual_ends:
-        key = (a.month, a.day)
-        md_counts[key] = md_counts.get(key, 0) + 1
-    fy_month, fy_day = max(md_counts.items(), key=lambda kv: (kv[1], kv[0]))[0]
-
-    labels = []
-    for d in dates:
-        after_fy_end = (d.month, d.day) > (fy_month, fy_day)
-        fy_year = d.year + 1 if after_fy_end else d.year
-        # Quarter 4 is the fiscal year-end quarter itself.
-        month_distance = (d.month - fy_month) % 12
-        qnum = 4 if month_distance == 0 else (month_distance + 2) // 3
-        labels.append(f"Q{qnum} FY{fy_year} (ended {d:%Y-%m-%d})")
-    return labels
+        return False
+    if len(ds) != 4 or any(pd.isna(d) for d in ds) or len(set(ds)) != 4:
+        return False
+    gaps = [(ds[i] - ds[i - 1]).days for i in range(1, 4)]
+    return all(70 <= gap <= 110 for gap in gaps)
 
 
 def analyst_ttm_from_quarters(quarterly):
-    if quarterly is None or quarterly.empty or len(quarterly) < 4:
+    """TTM is shown only for four complete, consecutive, non-reconstructed quarters."""
+    core = ["Revenue", "Net Income", "Operating Income", "Operating Cash Flow", "FCF"]
+    if quarterly is None or quarterly.empty or len(quarterly) < 4 or "Období" not in quarterly.columns:
         return pd.DataFrame()
-    q = quarterly.tail(4)
-    end_label = clean_text(q.iloc[-1].get("Období")) if not q.empty else ""
-    row = {"Období": f"TTM (4Q ended {end_label})" if end_label else "TTM"}
-    for c in ["Revenue", "Net Income", "Operating Income", "Operating Cash Flow", "FCF"]:
-        if c in q.columns:
-            vals = pd.to_numeric(q[c], errors="coerce")
-            if vals.notna().sum() >= 3:
-                row[c] = vals.sum(min_count=3)
-    rev = safe_float(row.get("Revenue"))
-    ni = safe_float(row.get("Net Income"))
-    if not pd.isna(rev) and rev > 0 and not pd.isna(ni):
-        row["Net Margin %"] = ni / rev * 100
+    q = quarterly.tail(4).copy()
+    # A period reconstructed from trailing Yahoo data is not a report and cannot
+    # be used to manufacture a complete TTM series.
+    labels = q["Období"].astype(str)
+    if labels.str.contains(r"odvozeno|derived", case=False, regex=True).any():
+        return pd.DataFrame()
+    dates = []
+    for label in labels:
+        match = re.search(r"ended (\d{4}-\d{2}-\d{2})", label)
+        if not match:
+            return pd.DataFrame()
+        dates.append(pd.Timestamp(match.group(1)))
+    if not _analyst_dates_are_consecutive_quarters(dates):
+        return pd.DataFrame()
+    row = {"Období": f"TTM (4Q ended {clean_text(labels.iloc[-1])})"}
+    for col in core:
+        if col not in q.columns:
+            return pd.DataFrame()
+        values = pd.to_numeric(q[col], errors="coerce")
+        if values.notna().sum() != 4:
+            return pd.DataFrame()
+        row[col] = float(values.sum())
+    revenue = safe_float(row.get("Revenue"))
+    net_income = safe_float(row.get("Net Income"))
+    if pd.isna(revenue) or revenue <= 0 or pd.isna(net_income):
+        return pd.DataFrame()
+    row["Net Margin %"] = net_income / revenue * 100
     return pd.DataFrame([row])
 
 
@@ -2461,7 +2290,10 @@ def analyst_financial_summary(annual, quarterly):
             parts.append("TTM je uvedeno samostatně; přímé srovnání s posledním FY nebylo použito, protože konce sledovaných období nejsou shodné nebo nejsou jednoznačně určitelné.")
 
     if len(annual)<5: parts.append(f"Yahoo Finance poskytlo pouze {len(annual)} celých fiskálních období, nikoli plných pět let.")
-    if quarterly is not None and len(quarterly)<8: parts.append(f"Čtvrtletní řada obsahuje pouze {len(quarterly)} fiskálních období; TTM je {'dostupné' if len(quarterly)>=4 else 'nedostupné'}.")
+    if quarterly is not None and len(quarterly)<8:
+        ttm_available = not analyst_ttm_from_quarters(quarterly).empty
+        ttm_status = "dostupné" if ttm_available else "nedostupné – nejméně jedno ze čtyř posledních čtvrtletí nemá kompletní údaje"
+        parts.append(f"Čtvrtletní řada obsahuje pouze {len(quarterly)} fiskálních období; TTM je {ttm_status}.")
     return " ".join(parts) if parts else "Trend nelze z dostupných údajů spolehlivě určit."
 
 
@@ -2556,7 +2388,6 @@ def _analyst_add_profile_evidence(pack, q):
         ("ps", "P/S"), ("pb", "P/B"), ("roe", "ROE"),
         ("revenue_growth", "Revenue Growth"),
         ("earnings_growth", "Earnings Growth"),
-        ("free_cash_flow", "Free Cash Flow"),
         ("debt_to_equity", "Debt/Equity")
     ]:
         v = safe_float(q.get(key))
@@ -2596,7 +2427,8 @@ def _analyst_add_financial_evidence(pack, annual, quarterly):
             vals = []
             for col, label in [
                 ("Revenue", "Tržby"), ("Net Income", "Čistý zisk"),
-                ("Operating Income", "Provozní zisk"), ("FCF", "FCF"),
+                ("Operating Income", "Provozní zisk"), ("Operating Cash Flow", "Provozní cash flow"),
+                ("Capital Expenditure", "Kapitálové výdaje"), ("FCF", "FCF"),
                 ("Debt", "Dluh"), ("Equity", "Vlastní kapitál"),
                 ("Net Margin %", "Čistá marže")
             ]:
@@ -2713,14 +2545,27 @@ def _analyst_financial_change_summary(annual, quarterly):
                 change = (s.iloc[-1] / s.iloc[0] - 1) * 100
                 parts.append(f"{label}: {change:+.1f} % mezi nejstarším a nejnovějším dostupným FY.")
     if quarterly is not None and not quarterly.empty:
-        parts.append(f"Dostupná kvartální řada: {len(quarterly)} fiskálních kvartálů; označení Q vychází z fiskálního roku.")
+        parts.append(f"Dostupná kvartální řada: {len(quarterly)} fiskálních období. Různé kvartály mezi sebou nejsou použity k výpočtu trendu, protože cash flow i zisk mohou být sezónní.")
+        # Quarter-on-quarter comparisons are omitted. A percentage change is
+        # shown only when the same fiscal quarter exists in different FYs.
+        labels = quarterly.get("Období", pd.Series(index=quarterly.index, dtype=str)).astype(str)
+        parsed = labels.str.extract(r"Q([1-4])\s+FY(\d+)")
+        work = quarterly.copy()
+        work["_quarter"] = parsed[0].values
+        work["_fy"] = pd.to_numeric(parsed[1], errors="coerce").values
         for col, label in [("Revenue", "tržby"), ("Net Income", "čistý zisk"), ("FCF", "FCF")]:
-            if col not in quarterly.columns:
+            if col not in work.columns:
                 continue
-            s = pd.to_numeric(quarterly[col], errors="coerce").dropna()
-            if len(s) >= 2 and s.iloc[0] != 0:
-                change = (s.iloc[-1] / s.iloc[0] - 1) * 100
-                parts.append(f"{label}: {change:+.1f} % mezi nejstarším a nejnovějším dostupným kvartálem.")
+            candidates = work.dropna(subset=["_quarter", "_fy", col]).sort_values("_fy")
+            for qnum, group in candidates.groupby("_quarter"):
+                if group["_fy"].nunique() < 2:
+                    continue
+                first, last = safe_float(group.iloc[0][col]), safe_float(group.iloc[-1][col])
+                if pd.isna(first) or first == 0 or pd.isna(last):
+                    continue
+                change = (last / first - 1) * 100
+                parts.append(f"{label}: {change:+.1f} % při srovnání stejného Q{qnum} v různých fiskálních letech.")
+                break
     ttm = analyst_ttm_from_quarters(quarterly)
     if not ttm.empty:
         parts.append("TTM je součet posledních čtyř dostupných kvartálů; není vydáváno za samostatný fiskální rok.")
@@ -2746,9 +2591,9 @@ def _analyst_price_evidence(price):
 def groq_connection_diagnostics(api_key, model="openai/gpt-oss-120b"):
     results = []
     base = "https://api.groq.com"
-    headers = {"Authorization": f"Bearer {api_key}", "User-Agent": "Stock-Screener/6.17"}
+    headers = {"Authorization": f"Bearer {api_key}", "User-Agent": "Stock-Screener/6.28.13"}
     try:
-        r = requests.get(base + "/", headers={"User-Agent": "Stock-Screener/6.17"}, timeout=12)
+        r = requests.get(base + "/", headers={"User-Agent": "Stock-Screener/6.28.13"}, timeout=12)
         results.append({"test": "api.groq.com – základní dostupnost", "status": r.status_code, "detail": r.text[:300]})
     except Exception as e:
         results.append({"test": "api.groq.com – základní dostupnost", "status": "ERROR", "detail": f"{type(e).__name__}: {e}"})
@@ -2814,6 +2659,11 @@ HLAVNÍ ÚKOL
 Z dostupné evidence vytvoř použitelný pracovní investiční obraz firmy. Nejde jen o výčet zpráv. Hledej kauzální řetězec:
 zdroj → událost → změna ekonomiky firmy → dopad na výsledky/cash flow/riziko/ocenění → co to znamená pro pracovní příběh.
 
+DŮLEŽITÉ: KONTROLA OBDOBÍ A CHYBĚJÍCÍCH DAT
+- TTM smíš označit jako dostupné pouze tehdy, když je v důkazním balíčku výslovně uveden validovaný součet čtyř úplných po sobě jdoucích čtvrtletí. Samotná existence alespoň čtyř řádků nestačí.
+- Nikdy nepoužívej hodnotu TTM z obecného firemního profilu jako náhradu chybějícího FY nebo kvartálu, pokud není její období a zdroj jednoznačně doložen.
+- Pokud FY2025 nebo Q4 FY2025 chybí, řekni to otevřeně a neodvozuj růst marže, FCF ani TTM z neúplných dat.
+
 DŮLEŽITÉ: ANALYTICKÁ ODVAHA
 - Nemusíš být neutrální jen proto, že existují protichůdné signály. Pokud evidence jasně podporuje určitou interpretaci, řekni ji přímo.
 - „Nejasný / smíšený příběh“ použij pouze tehdy, když skutečně nelze rozumně určit dominantní ekonomický obraz firmy.
@@ -2839,6 +2689,12 @@ PŘÍSNÁ EVIDENČNÍ PRAVIDLA
 - Nepředpokládej, že fiskální rok končí 31.12. Respektuj označení období a skutečná data konce FY.
 - TTM jsou poslední 4 dostupná čtvrtletí, nikoli automaticky kalendářní rok.
 - Nezaměňuj procentní změnu za absolutní hodnotu.
+- Jednotlivá čtvrtletí FCF jsou sezónní a nesmějí být prezentována jako „růst FCF“
+  pouze na základě mezikvartálního procenta. Pro trend FCF používej především celé
+  FY nebo TTM; pokud porovnáváš dvě čtvrtletí, výslovně uveď, že jde o změnu
+  mezi obdobími, nikoli o tempo růstu podniku.
+- Chybějící kvartál ani fiskální rok nedopočítávej z TTM minus ostatní kvartály.
+  V této aplikaci se taková rekonstrukce nepoužívá; chybějící období zůstává chybějící.
 - Opakované články o stejné události slouč do jednoho tématu.
 - Žádné Buy/Hold/Sell, skóre, pořadí nebo doporučení.
 
@@ -3285,7 +3141,7 @@ def analyst_render(ticker_input):
     # The former V6.28.x diagnostic block is intentionally removed from the
     # normal UI so it cannot interrupt the analytical workflow.
 
-    # V6.28.9: HARD IDENTITY FIREWALL. No AI, financial history or news may run
+    # V6.28.13: HARD IDENTITY FIREWALL. No AI, financial history or news may run
     # until the requested Yahoo ticker is independently confirmed by Chart +
     # exact Search quote. An ambiguous identity is a hard stop, not a fallback.
     q = analyst_get_quote_data(yahoo_ticker)
@@ -3298,7 +3154,7 @@ def analyst_render(ticker_input):
             f"{q.get('identity_reason') or 'Neznámý důvod.'} Analýza byla z bezpečnostních důvodů zastavena."
         )
         st.info(
-            "Analytik V6.28.9 záměrně nepoužije přibližně nalezenou firmu ani data z jiného titulu. "
+            "Analytik V6.28.13 záměrně nepoužije přibližně nalezenou firmu ani data z jiného titulu. "
             "Pokud se zastavení opakuje, pošli mi diagnostický výpis – nebudeme to obcházet dalším fallbackem."
         )
         return
@@ -3320,7 +3176,7 @@ def analyst_render(ticker_input):
     status.success("5/5 Analytické jádro dokončeno.")
 
     st.markdown(f"## {company}")
-    st.caption(f"Ticker **{ticker}** · Yahoo **{yahoo_ticker}** · {exchange} · načteno {datetime.now().strftime('%d.%m.%Y %H:%M')}")
+    st.caption(f"Ticker **{ticker}** · Yahoo **{yahoo_ticker}** · {exchange} · načteno {datetime.now().strftime('%d.%m.%Y %H:%M')} · build **V6.28.13 / 20261010-A**")
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Cena", f"{analyst_human_number(q.get('price'), 2)} {q.get('currency', '')}")
