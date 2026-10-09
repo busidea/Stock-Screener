@@ -496,7 +496,7 @@ def fetch_fundamentals(ticker, exchange, name="", isin=""):
         revenue = rev_current; previous_revenue = rev_hist[1] if len(rev_hist) >= 2 else np.nan
         net_income = ni_current; previous_net_income = ni_hist[1] if len(ni_hist) >= 2 else np.nan
         equity = safe_float(equity_s.iloc[0]) if not equity_s.empty else np.nan
-                debt = safe_float(debt_s.iloc[0]) if not debt_s.empty else np.nan
+        debt = safe_float(debt_s.iloc[0]) if not debt_s.empty else np.nan
         ocf = safe_float(ocf_s.iloc[0]) if not ocf_s.empty else np.nan
         capex = safe_float(capex_s.iloc[0]) if not capex_s.empty else np.nan
 
