@@ -53,7 +53,7 @@ def update_runtime(status=None, stage=None, message=None, error=None, run_id=Non
 
 
 st.title("📊 Stock-Screener")
-st.caption("V6.28.13 · BUILD 20261010-A – Screener · samostatný modul Analytik je dostupný v menu vlevo")
+st.caption("V6.28.14 · BUILD 20261010-B – Screener · samostatný modul Analytik je dostupný v menu vlevo")
 
 NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 NYSE_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
@@ -1755,7 +1755,7 @@ def _analyst_yahoo_search_quote(yahoo_ticker):
 @st.cache_data(ttl=1800, show_spinner=False)
 def analyst_get_quote_data(yahoo_ticker):
     """
-    V6.28.13 IDENTITY FIREWALL + PERIOD VALIDATION.
+    V6.28.14 IDENTITY FIREWALL + PERIOD VALIDATION.
 
     A company may be accepted only when BOTH independent Yahoo layers agree
     on the exact requested Yahoo symbol:
@@ -1860,6 +1860,54 @@ def analyst_get_quote_data(yahoo_ticker):
         "exchange": pick_text(meta.get("exchangeName"), search.get("exchange")),
     }
 
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _analyst_yfinance_quote_fallback(yahoo_ticker):
+    """Return quote/valuation fields only if yfinance confirms the exact Yahoo symbol.
+
+    The identity firewall remains authoritative. This fallback cannot supply a
+    different company's fields just because Yahoo search returned a fuzzy match.
+    """
+    symbol = clean_text(yahoo_ticker).strip().upper()
+    empty = {}
+    if not symbol:
+        return empty
+    try:
+        obj = yf.Ticker(symbol)
+        info = obj.info or {}
+        returned = clean_text(info.get("symbol")).upper()
+        if returned != symbol:
+            return {"fallback_status": f"odmítnuto: info.symbol={returned or '—'}, očekáváno {symbol}"}
+        keys = [
+            "marketCap", "sharesOutstanding", "trailingPE", "forwardPE",
+            "priceToSalesTrailing12Months", "priceToBook", "returnOnEquity",
+            "revenueGrowth", "earningsGrowth", "freeCashflow", "debtToEquity",
+            "dividendYield", "sector", "industry", "country", "longName", "shortName",
+            "currency", "quoteType", "website", "irWebsite", "fullTimeEmployees",
+            "forwardEps", "currentPrice", "regularMarketPrice"
+        ]
+        out = {k: info.get(k) for k in keys if info.get(k) is not None}
+        out["fallback_status"] = "OK – yfinance info.symbol přesně souhlasí s požadovaným tickerem"
+        return out
+    except Exception as exc:
+        return {"fallback_status": f"nedostupné: {type(exc).__name__}: {str(exc)[:180]}"}
+
+
+def _analyst_data_quality_rows(history, period_label, max_rows=8):
+    """Compact audit of missing core financial fields; does not infer missing data."""
+    if history is None or history.empty or "Období" not in history.columns:
+        return pd.DataFrame(columns=["Období", "Chybějící klíčové údaje"])
+    core = ["Revenue", "Net Income", "Operating Income", "Operating Cash Flow", "FCF"]
+    rows = []
+    for _, row in history.tail(max_rows).iterrows():
+        missing = []
+        for col in core:
+            if col not in history.columns or pd.isna(safe_float(row.get(col))):
+                missing.append(col)
+        if missing:
+            rows.append({"Období": clean_text(row.get("Období")), "Chybějící klíčové údaje": ", ".join(missing)})
+    return pd.DataFrame(rows, columns=["Období", "Chybějící klíčové údaje"])
 
 def _analyst_timeseries_to_series(item, requested_key):
     vals = (item.get(requested_key) or []) if isinstance(item, dict) else []
@@ -2579,7 +2627,7 @@ def _analyst_price_evidence(price):
     if len(p) < 60:
         return ""
     last = p.iloc[-1]
-    parts = [f"Poslední dostupná cena: {last:.2f}"]
+    parts = [f"Poslední závěrečná cena v historické řadě (close; nemusí být totožná s aktuální kotací): {last:.2f}"]
     if len(p) > 252:
         parts.append(f"12M změna ceny: {(last / p.iloc[-253] - 1) * 100:+.1f} %")
     if len(p) > 756:
@@ -2591,9 +2639,9 @@ def _analyst_price_evidence(price):
 def groq_connection_diagnostics(api_key, model="openai/gpt-oss-120b"):
     results = []
     base = "https://api.groq.com"
-    headers = {"Authorization": f"Bearer {api_key}", "User-Agent": "Stock-Screener/6.28.13"}
+    headers = {"Authorization": f"Bearer {api_key}", "User-Agent": "Stock-Screener/6.28.14"}
     try:
-        r = requests.get(base + "/", headers={"User-Agent": "Stock-Screener/6.28.13"}, timeout=12)
+        r = requests.get(base + "/", headers={"User-Agent": "Stock-Screener/6.28.14"}, timeout=12)
         results.append({"test": "api.groq.com – základní dostupnost", "status": r.status_code, "detail": r.text[:300]})
     except Exception as e:
         results.append({"test": "api.groq.com – základní dostupnost", "status": "ERROR", "detail": f"{type(e).__name__}: {e}"})
@@ -2707,7 +2755,10 @@ SEKTOR: {clean_text(q.get('sector'))} | ODVĚTVÍ: {clean_text(q.get('industry')
 FINANČNÍ KONTEXT:
 {fin or 'Není k dispozici.'}
 
-CENOVÝ KONTEXT:
+AKTUÁLNÍ KOTACE (JEDINÝ POVOLENÝ ZDROJ PRO AKTUÁLNÍ CENU):
+{analyst_human_number(q.get('price'), 2)} {clean_text(q.get('currency')) or ''}. Pokud je cena prázdná, aktuální kotace není spolehlivě dostupná. Neoznačuj jinou cenu z historické řady nebo ze zprávy jako aktuální cenu; případný rozdíl popiš jen jako rozdíl zdrojů/časů a nevymýšlej datum.
+
+CENOVÝ KONTEXT (historická řada, primárně výnosy a trend):
 {price_ctx or 'Není k dispozici.'}
 
 EVIDENCE:
@@ -3141,7 +3192,7 @@ def analyst_render(ticker_input):
     # The former V6.28.x diagnostic block is intentionally removed from the
     # normal UI so it cannot interrupt the analytical workflow.
 
-    # V6.28.13: HARD IDENTITY FIREWALL. No AI, financial history or news may run
+    # V6.28.14: HARD IDENTITY FIREWALL. No AI, financial history or news may run
     # until the requested Yahoo ticker is independently confirmed by Chart +
     # exact Search quote. An ambiguous identity is a hard stop, not a fallback.
     q = analyst_get_quote_data(yahoo_ticker)
@@ -3154,15 +3205,75 @@ def analyst_render(ticker_input):
             f"{q.get('identity_reason') or 'Neznámý důvod.'} Analýza byla z bezpečnostních důvodů zastavena."
         )
         st.info(
-            "Analytik V6.28.13 záměrně nepoužije přibližně nalezenou firmu ani data z jiného titulu. "
+            "Analytik V6.28.14 záměrně nepoužije přibližně nalezenou firmu ani data z jiného titulu. "
             "Pokud se zastavení opakuje, pošli mi diagnostický výpis – nebudeme to obcházet dalším fallbackem."
         )
         return
+
+    # V6.28.14: supplement sparse Yahoo Search quote fields only from yfinance
+    # when its info.symbol exactly matches the already-verified Yahoo ticker.
+    quote_fallback = _analyst_yfinance_quote_fallback(yahoo_ticker)
+    q["quote_fallback_status"] = quote_fallback.get("fallback_status", "nedostupné")
+    quote_field_map = {
+        "marketCap": "market_cap", "sharesOutstanding": "shares_outstanding",
+        "trailingPE": "pe", "forwardPE": "forward_pe",
+        "priceToSalesTrailing12Months": "ps", "priceToBook": "pb",
+        "returnOnEquity": "roe", "revenueGrowth": "revenue_growth",
+        "earningsGrowth": "earnings_growth", "freeCashflow": "free_cash_flow",
+        "debtToEquity": "debt_to_equity", "dividendYield": "dividend_yield",
+        "sector": "sector", "industry": "industry", "country": "country",
+        "longName": "fallback_long_name", "shortName": "fallback_short_name",
+        "currency": "currency", "quoteType": "quote_type", "website": "website",
+        "irWebsite": "ir_website", "fullTimeEmployees": "employees",
+        "forwardEps": "forward_eps", "currentPrice": "fallback_current_price",
+        "regularMarketPrice": "fallback_regular_market_price"
+    }
+    text_quote_fields = {"sector", "industry", "country", "fallback_long_name", "fallback_short_name", "currency", "quote_type", "website", "ir_website"}
+    for source_key, target_key in quote_field_map.items():
+        current_value = q.get(target_key)
+        candidate = quote_fallback.get(source_key)
+        if target_key in text_quote_fields:
+            is_missing = not clean_text(current_value)
+        else:
+            is_missing = current_value is None or pd.isna(safe_float(current_value))
+        if is_missing and candidate is not None:
+            q[target_key] = candidate
+    if not clean_text(q.get("name")):
+        q["name"] = clean_text(q.get("fallback_long_name") or q.get("fallback_short_name"))
+    if pd.isna(safe_float(q.get("price"))):
+        fallback_price = safe_float(q.get("fallback_current_price"))
+        if pd.isna(fallback_price):
+            fallback_price = safe_float(q.get("fallback_regular_market_price"))
+        if not pd.isna(fallback_price) and fallback_price > 0:
+            q["price"] = fallback_price
 
     status.info("2/5 Sestavuji dlouhodobý finanční trend, poslední kvartály a cenu…")
     annual = analyst_get_financial_history(yahoo_ticker)
     quarterly = analyst_get_quarterly_history(yahoo_ticker)
     price = analyst_price_history(yahoo_ticker)
+
+    # If the quote provider omits ratios, calculate only transparent ratios from
+    # market cap and a validated TTM (or latest reported annual) denominator.
+    ttm_for_valuation = analyst_ttm_from_quarters(quarterly)
+    latest_annual = annual.iloc[-1] if annual is not None and not annual.empty else pd.Series(dtype=object)
+    denominator_revenue = safe_float(ttm_for_valuation.iloc[0].get("Revenue")) if not ttm_for_valuation.empty else safe_float(latest_annual.get("Revenue"))
+    denominator_income = safe_float(ttm_for_valuation.iloc[0].get("Net Income")) if not ttm_for_valuation.empty else safe_float(latest_annual.get("Net Income"))
+    denominator_equity = safe_float(latest_annual.get("Equity"))
+    market_cap = safe_float(q.get("market_cap"))
+    quote_price = safe_float(q.get("price"))
+    shares = safe_float(q.get("shares_outstanding"))
+    if pd.isna(market_cap) and not pd.isna(quote_price) and quote_price > 0 and not pd.isna(shares) and shares > 0:
+        market_cap = quote_price * shares
+        q["market_cap"] = market_cap
+    if pd.isna(safe_float(q.get("pe"))) and not pd.isna(market_cap) and market_cap > 0 and not pd.isna(denominator_income) and denominator_income > 0:
+        q["pe"] = market_cap / denominator_income
+        q["pe_source"] = "odvozeno: tržní kapitalizace / validovaný TTM čistý zisk" if not ttm_for_valuation.empty else "odvozeno: tržní kapitalizace / poslední dostupný FY čistý zisk"
+    if pd.isna(safe_float(q.get("ps"))) and not pd.isna(market_cap) and market_cap > 0 and not pd.isna(denominator_revenue) and denominator_revenue > 0:
+        q["ps"] = market_cap / denominator_revenue
+        q["ps_source"] = "odvozeno: tržní kapitalizace / validované TTM tržby" if not ttm_for_valuation.empty else "odvozeno: tržní kapitalizace / poslední dostupné FY tržby"
+    if pd.isna(safe_float(q.get("roe"))) and not pd.isna(denominator_income) and denominator_income > 0 and not pd.isna(denominator_equity) and denominator_equity > 0:
+        q["roe"] = denominator_income / denominator_equity
+        q["roe_source"] = ("odvozeno: validovaný TTM čistý zisk / poslední dostupný FY vlastní kapitál" if not ttm_for_valuation.empty else "odvozeno: poslední dostupný FY čistý zisk / vlastní kapitál")
     sec = analyst_sec_filings(ticker) if exchange in ("NASDAQ", "NYSE") else pd.DataFrame()
 
     status.info("3/5 Hledám aktuální firemně relevantní události…")
@@ -3176,7 +3287,7 @@ def analyst_render(ticker_input):
     status.success("5/5 Analytické jádro dokončeno.")
 
     st.markdown(f"## {company}")
-    st.caption(f"Ticker **{ticker}** · Yahoo **{yahoo_ticker}** · {exchange} · načteno {datetime.now().strftime('%d.%m.%Y %H:%M')} · build **V6.28.13 / 20261010-A**")
+    st.caption(f"Ticker **{ticker}** · Yahoo **{yahoo_ticker}** · {exchange} · načteno {datetime.now().strftime('%d.%m.%Y %H:%M')} · build **V6.28.14 / 20261010-B**")
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Cena", f"{analyst_human_number(q.get('price'), 2)} {q.get('currency', '')}")
@@ -3261,6 +3372,24 @@ def analyst_render(ticker_input):
 
     with st.expander("📚 9. Zdroje a diagnostika", expanded=False):
         st.write(f"Yahoo Finance: {yahoo_ticker}")
+        st.write(f"Ověření identity: {q.get('identity_reason', '—')}")
+        st.write(f"Doplňková kotace/valuace: {q.get('quote_fallback_status', 'neprovedeno')}")
+        if q.get("pe_source"):
+            st.write(f"Zdroj P/E: {q['pe_source']}")
+        if q.get("ps_source"):
+            st.write(f"Zdroj P/S: {q['ps_source']}")
+        if q.get("roe_source"):
+            st.write(f"Zdroj ROE: {q['roe_source']}")
+        missing_annual = _analyst_data_quality_rows(annual, "FY", max_rows=5)
+        missing_quarterly = _analyst_data_quality_rows(quarterly, "Q", max_rows=8)
+        if not missing_annual.empty or not missing_quarterly.empty:
+            st.markdown("**Kontrola úplnosti finančních dat**")
+            if not missing_annual.empty:
+                st.caption("Roční období s chybějícími klíčovými údaji")
+                st.table(missing_annual)
+            if not missing_quarterly.empty:
+                st.caption("Čtvrtletí s chybějícími klíčovými údaji")
+                st.table(missing_quarterly)
         st.write(f"Relevantních zpráv: {len(news) if news is not None else 0}")
         st.write(f"Evidence položek: {ai_result.get('evidence_count', '—')}")
         st.write(f"AI model: {ai_result.get('model', '—')}")
