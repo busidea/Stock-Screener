@@ -53,7 +53,7 @@ def update_runtime(status=None, stage=None, message=None, error=None, run_id=Non
 
 
 st.title("📊 Stock-Screener")
-st.caption("V6.28.15 · BUILD 20261010-C – Screener · samostatný modul Analytik je dostupný v menu vlevo")
+st.caption("V6.28.16 · BUILD 20261010-D – Screener · samostatný modul Analytik je dostupný v menu vlevo")
 
 NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 NYSE_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
@@ -1755,7 +1755,7 @@ def _analyst_yahoo_search_quote(yahoo_ticker):
 @st.cache_data(ttl=1800, show_spinner=False)
 def analyst_get_quote_data(yahoo_ticker):
     """
-    V6.28.15 IDENTITY FIREWALL + PERIOD VALIDATION.
+    V6.28.16 IDENTITY FIREWALL + PERIOD VALIDATION + INTERPRETATION GUARDRAILS.
 
     A company may be accepted only when BOTH independent Yahoo layers agree
     on the exact requested Yahoo symbol:
@@ -2317,9 +2317,20 @@ def analyst_financial_summary(annual, quarterly):
         if len(s)<2 or s.iloc[0]==0: return np.nan
         return (s.iloc[-1]/s.iloc[0]-1)*100
     for col,label in [("Revenue","tržby"),("Net Income","čistý zisk"),("FCF","volný cash flow")]:
-        x=series_change(annual,col)
-        if not pd.isna(x):
-            parts.append(f"Za dostupné fiskální období {label} {'rostou' if x>5 else 'klesají' if x<-5 else 'jsou zhruba stabilní'} ({analyst_pct(x,0)}).")
+        if col not in annual.columns:
+            continue
+        series = pd.to_numeric(annual[col], errors="coerce").dropna()
+        if len(series) < 2 or series.iloc[0] == 0:
+            continue
+        x = (series.iloc[-1] / series.iloc[0] - 1) * 100
+        periods = annual.loc[series.index, "Období"].astype(str) if "Období" in annual.columns else pd.Series(["první dostupné FY", "poslední dostupné FY"])
+        start_period = str(periods.iloc[0]) if len(periods) else "první dostupné FY"
+        end_period = str(periods.iloc[-1]) if len(periods) else "poslední dostupné FY"
+        direction = "vzrostly" if x > 5 else "klesly" if x < -5 else "se změnily jen mírně"
+        parts.append(f"{label.capitalize()} se mezi {start_period} a {end_period} {direction} ({analyst_pct(x,0)}); jde o srovnání krajních dostupných hodnot, nikoli samo o sobě o důkaz souvislého trendu.")
+        diffs = [b-a for a,b in zip(series.tolist(), series.tolist()[1:]) if abs(b-a) > max(abs(a),abs(b),1.0)*0.005]
+        if len(diffs) >= 2 and any((a > 0 > b) or (a < 0 < b) for a,b in zip(diffs,diffs[1:])):
+            parts.append(f"Mezilehlé hodnoty {label} kolísají; růst/pokles mezi krajními roky nelze popisovat jako nepřetržitý.")
     if "Net Margin %" in annual.columns:
         s=pd.to_numeric(annual["Net Margin %"],errors="coerce").dropna()
         if len(s)>=2:
@@ -2461,6 +2472,43 @@ def _analyst_add_profile_evidence(pack, q):
         ))
 
 
+def analyst_interpretation_controls(annual, quarterly, q=None):
+    """Deterministic guardrails describing gaps and comparability limits in the supplied data."""
+    notes = []
+    key_cols = ["Revenue", "Net Income", "Operating Income", "Operating Cash Flow", "FCF"]
+    labels = {"Revenue": "tržby", "Net Income": "čistý zisk", "Operating Income": "provozní zisk",
+              "Operating Cash Flow": "provozní cash flow", "FCF": "FCF"}
+    if annual is not None and not annual.empty:
+        last = annual.iloc[-1]
+        period = clean_text(last.get("Období")) or "poslední FY"
+        missing = [labels[c] for c in key_cols if c not in annual.columns or pd.isna(safe_float(last.get(c)))]
+        if missing:
+            notes.append(f"Neúplný poslední roční výkaz ({period}): chybí {', '.join(missing)}. Nevyvozovat roční trend ani meziroční změnu přes toto období, pokud není srovnatelná hodnota doložena jiným zdrojem.")
+        for col, label in [("Revenue", "tržby"), ("Net Income", "čistý zisk"), ("FCF", "FCF")]:
+            if col not in annual.columns:
+                continue
+            vals = pd.to_numeric(annual[col], errors="coerce").dropna().tolist()
+            if len(vals) >= 3:
+                diffs = [b-a for a, b in zip(vals, vals[1:]) if abs(b-a) > max(abs(a), abs(b), 1.0)*0.005]
+                reversals = sum(1 for a, b in zip(diffs, diffs[1:]) if (a > 0 > b) or (a < 0 < b))
+                if reversals:
+                    notes.append(f"{label.capitalize()} v ročních datech kolísají; změnu mezi prvním a posledním FY nepopisovat jako plynulý trend. Uvést i významný mezilehlý obrat.")
+    if quarterly is not None and not quarterly.empty:
+        last = quarterly.iloc[-1]
+        missing = [labels[c] for c in key_cols if c not in quarterly.columns or pd.isna(safe_float(last.get(c)))]
+        if missing:
+            notes.append(f"Poslední čtvrtletí ({clean_text(last.get('Období')) or 'neznámé období'}) je neúplné: chybí {', '.join(missing)}. Nepopisovat je jako kompletní provozní trend.")
+        if analyst_ttm_from_quarters(quarterly).empty:
+            notes.append("Validované TTM není dostupné. Nesmí se dopočítávat ze tří čtvrtletí, z ročních údajů minus kvartály ani nahrazovat obecným údajem z profilu.")
+        notes.append("Čtvrtletní FCF a cash flow mohou být sezónní a kolísat podle pracovního kapitálu, daní a načasování plateb. Pro tvrzení o meziročním zlepšení preferovat stejné fiskální čtvrtletí předchozího roku nebo validované TTM.")
+    q = q or {}
+    if not pd.isna(safe_float(q.get("debt_to_equity"))):
+        notes.append("Debt/Equity z kotace a položka Debt v historické tabulce nemusí mít totožnou definici ani rozsah. Nekontrolovat ani nepřepočítávat D/E jako Debt děleno Equity, pokud zdroj výslovně nepotvrzuje stejné položky a datum.")
+    notes.append("Pokles kapitálových výdajů může krátkodobě zvýšit FCF, ale sám o sobě nedokazuje vyšší provozní efektivitu ani trvalé zlepšení. Rozlišit změnu provozního cash flow, kapitálových výdajů a FCF.")
+    notes.append("Každé vysvětlení příčiny (cloud, servisní mix, cenová síla, úspory, akvizice, úroky apod.) musí mít přímou oporu ve zdroji; jinak ho označit pouze jako hypotézu nebo uvést Neznáme.")
+    return "\n".join(f"- {x}" for x in notes)
+
+
 def _analyst_add_financial_evidence(pack, annual, quarterly):
     """Add compact financial evidence, preserving actual fiscal-period labels."""
     def add_selected(df, extra, limit=6):
@@ -2590,20 +2638,27 @@ def _analyst_evidence_text(pack, max_chars=12000):
 
 
 def _analyst_financial_change_summary(annual, quarterly):
+    """Compact context for AI; makes endpoints and intermediate reversals explicit."""
     parts = []
     if annual is not None and not annual.empty:
         parts.append(f"Dostupná roční řada: {len(annual)} fiskálních období; období jsou označena skutečným datem konce FY.")
         for col, label in [("Revenue", "tržby"), ("Net Income", "čistý zisk"), ("FCF", "FCF"), ("Debt", "dluh")]:
             if col not in annual.columns:
                 continue
-            s = pd.to_numeric(annual[col], errors="coerce").dropna()
-            if len(s) >= 2 and s.iloc[0] != 0:
-                change = (s.iloc[-1] / s.iloc[0] - 1) * 100
-                parts.append(f"{label}: {change:+.1f} % mezi nejstarším a nejnovějším dostupným FY.")
+            rows = []
+            for _, row in annual.iterrows():
+                val = safe_float(row.get(col))
+                if not pd.isna(val):
+                    rows.append((clean_text(row.get("Období")) or "neznámé období", val))
+            if len(rows) >= 2 and rows[0][1] != 0:
+                change = (rows[-1][1] / rows[0][1] - 1) * 100
+                parts.append(f"{label}: {change:+.1f} % mezi {rows[0][0]} a {rows[-1][0]} (pouze dostupné hodnoty; nejde automaticky o souvislý trend).")
+                diffs = [b[1] - a[1] for a, b in zip(rows, rows[1:]) if abs(b[1]-a[1]) > max(abs(a[1]), abs(b[1]), 1.0)*0.005]
+                if len(diffs) >= 2 and any((a > 0 > b) or (a < 0 < b) for a, b in zip(diffs, diffs[1:])):
+                    path = " → ".join(f"{period}: {analyst_human_number(value)}" for period, value in rows)
+                    parts.append(f"Pozor, {label} v mezilehlých letech kolísá; celá dostupná cesta: {path}.")
     if quarterly is not None and not quarterly.empty:
         parts.append(f"Dostupná kvartální řada: {len(quarterly)} fiskálních období. Různé kvartály mezi sebou nejsou použity k výpočtu trendu, protože cash flow i zisk mohou být sezónní.")
-        # Quarter-on-quarter comparisons are omitted. A percentage change is
-        # shown only when the same fiscal quarter exists in different FYs.
         labels = quarterly.get("Období", pd.Series(index=quarterly.index, dtype=str)).astype(str)
         parsed = labels.str.extract(r"Q([1-4])\s+FY(\d+)")
         work = quarterly.copy()
@@ -2620,11 +2675,13 @@ def _analyst_financial_change_summary(annual, quarterly):
                 if pd.isna(first) or first == 0 or pd.isna(last):
                     continue
                 change = (last / first - 1) * 100
-                parts.append(f"{label}: {change:+.1f} % při srovnání stejného Q{qnum} v různých fiskálních letech.")
+                parts.append(f"{label}: {change:+.1f} % při srovnání stejného Q{qnum} v různých fiskálních letech; zkontrolovat i mezilehlá období.")
                 break
     ttm = analyst_ttm_from_quarters(quarterly)
     if not ttm.empty:
-        parts.append("TTM je součet posledních čtyř dostupných kvartálů; není vydáváno za samostatný fiskální rok.")
+        parts.append("TTM je součet posledních čtyř dostupných úplných a validovaných kvartálů; není vydáváno za samostatný fiskální rok.")
+    else:
+        parts.append("Validované TTM není dostupné; nesmí být dopočítáno z neúplných kvartálů.")
     return "\n".join(parts)
 
 
@@ -2718,7 +2775,11 @@ zdroj → událost → změna ekonomiky firmy → dopad na výsledky/cash flow/r
 DŮLEŽITÉ: KONTROLA OBDOBÍ A CHYBĚJÍCÍCH DAT
 - TTM smíš označit jako dostupné pouze tehdy, když je v důkazním balíčku výslovně uveden validovaný součet čtyř úplných po sobě jdoucích čtvrtletí. Samotná existence alespoň čtyř řádků nestačí.
 - Nikdy nepoužívej hodnotu TTM z obecného firemního profilu jako náhradu chybějícího FY nebo kvartálu, pokud není její období a zdroj jednoznačně doložen.
-- Pokud FY2025 nebo Q4 FY2025 chybí, řekni to otevřeně a neodvozuj růst marže, FCF ani TTM z neúplných dat.
+- Chybějící období označ konkrétním datem a chybějícími položkami. Neodvozuj růst marže, FCF ani TTM z neúplných dat.
+- Roční údaje porovnávej s ročními a čtvrtletní s čtvrtletními. Neoznačuj jedno čtvrtletí za růst či pokles celoročního FCF.
+- Pro meziroční srovnání čtvrtletí používej stejné fiskální čtvrtletí předchozího roku. Mezikvartální srovnání výslovně označ jako QoQ a upozorni na možnou sezónnost.
+- Pokud meziroční hodnoty mezi začátkem a koncem řady výrazně kolísají, nepopisuj jen změnu prvního a posledního roku jako souvislý trend. Stručně popiš cestu a významné obraty.
+- U marží ověř, že čitatel i jmenovatel pocházejí ze stejného období a stejného typu výkazu. Procentní body marže nejsou procentní růst.
 
 DŮLEŽITÉ: ANALYTICKÁ ODVAHA
 - Nemusíš být neutrální jen proto, že existují protichůdné signály. Pokud evidence jasně podporuje určitou interpretaci, řekni ji přímo.
@@ -2745,10 +2806,12 @@ PŘÍSNÁ EVIDENČNÍ PRAVIDLA
 - Nepředpokládej, že fiskální rok končí 31.12. Respektuj označení období a skutečná data konce FY.
 - TTM jsou poslední 4 dostupná čtvrtletí, nikoli automaticky kalendářní rok.
 - Nezaměňuj procentní změnu za absolutní hodnotu.
-- Jednotlivá čtvrtletí FCF jsou sezónní a nesmějí být prezentována jako „růst FCF“
-  pouze na základě mezikvartálního procenta. Pro trend FCF používej především celé
-  FY nebo TTM; pokud porovnáváš dvě čtvrtletí, výslovně uveď, že jde o změnu
-  mezi obdobími, nikoli o tempo růstu podniku.
+- Jednotlivá čtvrtletí FCF jsou sezónní a nesmějí být prezentována jako „růst FCF“ pouze na základě mezikvartálního procenta. Pro trend FCF používej především celé FY nebo validované TTM; pokud porovnáváš dvě čtvrtletí, přednostně srovnej stejné fiskální čtvrtletí meziročně a jasně uveď, co přesně srovnáváš.
+- FCF je ovlivněn jak provozním cash flow, tak kapitálovými výdaji. Pokles capex sám o sobě nedokazuje vyšší provozní efektivitu, lepší produktový mix ani trvalý růst. Rozliš změnu OCF, capex a FCF.
+- Neoznačuj dluh jako „rostoucí“, pokud dostupná srovnatelná řada to nepotvrzuje. Uveď období a směr posledních hodnot; pokud řada kolísá, řekni „kolísavý“. Dluh, čistý dluh, krátkodobý dluh a Debt/Equity nejsou zaměnitelné pojmy.
+- Yahoo Debt/Equity může používat širší definici závazků než historická položka „Debt“. Nepřepočítávej jej z tabulky Debt / Equity ani neoznačuj za chybný, pokud není doloženo, že obě položky mají stejný rozsah a datum. Případný nesoulad označ jako rozdíl definic/zdrojů k ověření.
+- Nepřisuzuj změnu FCF, marže či tržeb konkrétní příčině (cloud, servisní mix, cenová síla, efektivita, akvizice, úrokové náklady) bez přímé opory v evidenci. Bez ní napiš „Inference“ jako hypotézu nebo „Neznáme“.
+- Před závěrem zkontroluj vnitřní konzistenci: směr dluhu musí odpovídat číslům; čtvrtletí a FY se nesmějí míchat; STORY v rozhodovacím jádru musí být totožný s názvem příběhu v podrobné části; pokud jsou data kolísavá, neprezentuj je jako stabilní trend.
 - Chybějící kvartál ani fiskální rok nedopočítávej z TTM minus ostatní kvartály.
   V této aplikaci se taková rekonstrukce nepoužívá; chybějící období zůstává chybějící.
 - Opakované články o stejné události slouč do jednoho tématu.
@@ -2762,6 +2825,9 @@ SEKTOR: {clean_text(q.get('sector'))} | ODVĚTVÍ: {clean_text(q.get('industry')
 
 FINANČNÍ KONTEXT:
 {fin or 'Není k dispozici.'}
+
+AUTOMATICKÁ KONTROLA ÚPLNOSTI A INTERPRETACE DAT (dodrž, nejde o firemní události):
+{analyst_interpretation_controls(annual, quarterly, q)}
 
 AKTUÁLNÍ KOTACE (JEDINÝ POVOLENÝ ZDROJ PRO AKTUÁLNÍ CENU):
 {analyst_human_number(q.get('price'), 2)} {clean_text(q.get('currency')) or ''}. Pokud je cena prázdná, aktuální kotace není spolehlivě dostupná. Neoznačuj jinou cenu z historické řady nebo ze zprávy jako aktuální cenu; případný rozdíl popiš jen jako rozdíl zdrojů/časů a nevymýšlej datum.
@@ -2906,6 +2972,8 @@ def analyst_ai_recovery(company, ticker, exchange, q, annual, quarterly, news, s
     prompt = f"""Jsi analytik společnosti {company} ({ticker}, {exchange}).
 Použij pouze níže uvedenou evidenci. Nevymýšlej fakta.
 
+Kontrola interpretace: porovnávej FY s FY a kvartál se stejným fiskálním kvartálem; nepovažuj jednotlivý kvartál za trend FCF. Popiš kolísání mezilehlých ročních hodnot, ne jen rozdíl prvního a posledního roku. Pokles capex sám nedokazuje lepší provozní efektivitu. Dluh a Debt/Equity mohou mít odlišné definice; neodvozuj jedno z druhého bez potvrzení. Příčiny změn uváděj jako fakt jen s přímým důkazem, jinak jako hypotézu. STORY musí být konzistentní s podrobným příběhem.
+
 Vrať PŘESNĚ tyto čtyři bloky a nic jiného:
 STORY: [jeden název z povoleného seznamu]
 PROFILE: [jedna až dvě stručné české věty o ekonomickém modelu firmy]
@@ -3015,13 +3083,15 @@ def analyst_story_hypothesis(q, annual, quarterly, news, sec, ai_result=None):
             lines = [x.strip() for x in part.splitlines() if x.strip()]
             title = "Nejasný / smíšený příběh"
             for line in lines:
-                m = re.search(r"Hlavní pracovní příběh\s*:\s*\*\*([^*]+)\*\*", line, flags=re.I)
-                if m:
-                    title = m.group(1).strip()
-                    break
-                m = re.search(r"Hlavní pracovní příběh\s*:\s*([^\n]+)", line, flags=re.I)
-                if m:
-                    title = m.group(1).strip("*# ")
+                # Accept **Hlavní pracovní příběh: STORY** and
+                # **Hlavní pracovní příběh:** **STORY** markdown variants.
+                m = re.search(r"Hlavní pracovní příběh\s*:\s*\*\*(.+?)\*\*", line, flags=re.I)
+                candidate_title = m.group(1).strip().strip("*# ") if m else ""
+                if not candidate_title:
+                    m = re.search(r"Hlavní pracovní příběh\s*:\s*([^\n]+)", line, flags=re.I)
+                    candidate_title = m.group(1).strip().strip("*# ") if m else ""
+                if candidate_title:
+                    title = candidate_title
                     break
             allowed = {
                 "Kvalitní compounder", "Kvalita za rozumnou cenu", "Růst za rozumnou cenu",
@@ -3214,7 +3284,7 @@ def analyst_render(ticker_input):
             f"{q.get('identity_reason') or 'Neznámý důvod.'} Analýza byla z bezpečnostních důvodů zastavena."
         )
         st.info(
-            "Analytik V6.28.15 nepoužije přibližně nalezenou firmu ani data z jiného titulu. "
+            "Analytik V6.28.16 nepoužije přibližně nalezenou firmu ani data z jiného titulu. "
             "Pokud se zastavení opakuje, pošli mi diagnostický výpis – nebudeme to obcházet dalším fallbackem."
         )
         return
@@ -3302,7 +3372,7 @@ def analyst_render(ticker_input):
     status.success("5/5 Analytické jádro dokončeno.")
 
     st.markdown(f"## {company}")
-    st.caption(f"Ticker **{ticker}** · Yahoo **{yahoo_ticker}** · {exchange} · načteno {datetime.now().strftime('%d.%m.%Y %H:%M')} · build **V6.28.15 / 20261010-C**")
+    st.caption(f"Ticker **{ticker}** · Yahoo **{yahoo_ticker}** · {exchange} · načteno {datetime.now().strftime('%d.%m.%Y %H:%M')} · build **V6.28.16 / 20261010-D**")
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Cena", f"{analyst_human_number(q.get('price'), 2)} {q.get('currency', '')}")
@@ -3340,6 +3410,8 @@ def analyst_render(ticker_input):
 
     with st.expander("📊 4. Finanční vývoj – trend, ne snapshot", expanded=True):
         st.write(analyst_financial_summary(annual, quarterly))
+        with st.expander("Kontrola úplnosti a správného srovnání", expanded=False):
+            st.markdown(analyst_interpretation_controls(annual, quarterly, q))
         if not annual.empty:
             st.markdown("**Celé účetní roky dostupné přes Yahoo Finance**")
             st.table(_analyst_display_financial_table(annual))
