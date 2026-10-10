@@ -53,7 +53,7 @@ def update_runtime(status=None, stage=None, message=None, error=None, run_id=Non
 
 
 st.title("📊 Stock-Screener")
-st.caption("V6.28.17 · BUILD 20261010-E – Screener · samostatný modul Analytik je dostupný v menu vlevo")
+st.caption("V6.28.18 · BUILD 20261011-A – Screener · samostatný modul Analytik je dostupný v menu vlevo")
 
 NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 NYSE_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
@@ -1755,7 +1755,7 @@ def _analyst_yahoo_search_quote(yahoo_ticker):
 @st.cache_data(ttl=1800, show_spinner=False)
 def analyst_get_quote_data(yahoo_ticker):
     """
-    V6.28.16 IDENTITY FIREWALL + PERIOD VALIDATION + INTERPRETATION GUARDRAILS.
+    V6.28.18 IDENTITY FIREWALL + PERIOD VALIDATION + INTERPRETATION GUARDRAILS.
 
     A company may be accepted only when BOTH independent Yahoo layers agree
     on the exact requested Yahoo symbol:
@@ -2484,6 +2484,7 @@ def analyst_interpretation_controls(annual, quarterly, q=None):
         missing = [labels[c] for c in key_cols if c not in annual.columns or pd.isna(safe_float(last.get(c)))]
         if missing:
             notes.append(f"Neúplný poslední roční výkaz ({period}): chybí {', '.join(missing)}. Nevyvozovat roční trend ani meziroční změnu přes toto období, pokud není srovnatelná hodnota doložena jiným zdrojem.")
+            notes.append("DŮSLEDEK PRO PRACOVNÍ PŘÍBĚH: pokud poslední FY postrádá klíčové výsledkové/cash-flow položky a validované TTM není dostupné, výslovně sniž jistotu závěrů o aktuální kvalitě a udržitelnosti růstu. Nepopisuj krátkou řadu příznivých kvartálů jako náhradu chybějícího FY.")
         for col, label in [("Revenue", "tržby"), ("Net Income", "čistý zisk"), ("FCF", "FCF")]:
             if col not in annual.columns:
                 continue
@@ -2669,14 +2670,19 @@ def _analyst_financial_change_summary(annual, quarterly):
                 continue
             candidates = work.dropna(subset=["_quarter", "_fy", col]).sort_values("_fy")
             for qnum, group in candidates.groupby("_quarter"):
+                group = group.drop_duplicates(subset=["_fy"], keep="last").sort_values("_fy")
                 if group["_fy"].nunique() < 2:
                     continue
-                first, last = safe_float(group.iloc[0][col]), safe_float(group.iloc[-1][col])
-                if pd.isna(first) or first == 0 or pd.isna(last):
+                previous = group.iloc[-2]
+                latest = group.iloc[-1]
+                first_value = safe_float(previous[col])
+                last_value = safe_float(latest[col])
+                if pd.isna(first_value) or first_value == 0 or pd.isna(last_value):
                     continue
-                change = (last / first - 1) * 100
-                parts.append(f"{label}: {change:+.1f} % při srovnání stejného Q{qnum} v různých fiskálních letech; zkontrolovat i mezilehlá období.")
-                break
+                change = (last_value / first_value - 1) * 100
+                prev_period = clean_text(previous.get("Období")) or f"Q{qnum} FY{int(previous['_fy'])}"
+                latest_period = clean_text(latest.get("Období")) or f"Q{qnum} FY{int(latest['_fy'])}"
+                parts.append(f"Srovnání stejného fiskálního Q{qnum} pro {label}: {prev_period} {analyst_human_number(first_value)} → {latest_period} {analyst_human_number(last_value)} ({change:+.1f} % YoY; jen tato dvě doložená období, ne důkaz souvislého trendu).")
     if quarterly is not None and not quarterly.empty:
         # Include the actual quarterly values for the metrics most often misread by the model.
         # This is deliberately a factual series, not an interpretation of QoQ performance.
@@ -2719,9 +2725,9 @@ def _analyst_price_evidence(price):
 def groq_connection_diagnostics(api_key, model="openai/gpt-oss-120b"):
     results = []
     base = "https://api.groq.com"
-    headers = {"Authorization": f"Bearer {api_key}", "User-Agent": "Stock-Screener/6.28.14"}
+    headers = {"Authorization": f"Bearer {api_key}", "User-Agent": "Stock-Screener/6.28.18"}
     try:
-        r = requests.get(base + "/", headers={"User-Agent": "Stock-Screener/6.28.14"}, timeout=12)
+        r = requests.get(base + "/", headers={"User-Agent": "Stock-Screener/6.28.18"}, timeout=12)
         results.append({"test": "api.groq.com – základní dostupnost", "status": r.status_code, "detail": r.text[:300]})
     except Exception as e:
         results.append({"test": "api.groq.com – základní dostupnost", "status": "ERROR", "detail": f"{type(e).__name__}: {e}"})
@@ -2795,6 +2801,11 @@ DŮLEŽITÉ: KONTROLA OBDOBÍ A CHYBĚJÍCÍCH DAT
 - Pro meziroční srovnání čtvrtletí používej stejné fiskální čtvrtletí předchozího roku. Mezikvartální srovnání výslovně označ jako QoQ a upozorni na možnou sezónnost.
 - Pokud meziroční hodnoty mezi začátkem a koncem řady výrazně kolísají, nepopisuj jen změnu prvního a posledního roku jako souvislý trend. Stručně popiš cestu a významné obraty.
 - U marží ověř, že čitatel i jmenovatel pocházejí ze stejného období a stejného typu výkazu. Procentní body marže nejsou procentní růst.
+- U každého číselného tvrzení uveď konkrétní období a jeho typ (FY, QoQ nebo YoY). Nikdy nepoužívej „ročně“, „meziročně“ nebo „kontinuální růst“, pokud výpočet skutečně neporovnává odpovídající roční období nebo stejné fiskální čtvrtletí mezi dvěma FY. U po sobě jdoucích kvartálů napiš „QoQ“ a přesná období; neoznačuj to za YoY.
+- Pokud uvádíš součet více čtvrtletí, napiš jednotlivé hodnoty i součet. Nezaměňuj poslední jednotlivý kvartál za součet Q1–Q2 ani kvartální FCF za roční FCF.
+- Pokud poslední FY nemá klíčové finanční údaje a TTM není validní, musí to být výslovně uvedeno mezi hlavními omezeními. Příznivé kvartální hodnoty mohou být podpůrným signálem, nikoli náhradou chybějícího FY.
+- „Kvalitní compounder“ vyžaduje evidenci dlouhodobě udržitelného růstu a kvality ekonomiky podniku, ne pouze příznivý FCF v několika čtvrtletích. Pokud jsou tržby/zisk v dostupných celých FY převážně stagnující či kolísavé a poslední FY/TTM chybí, nepředkládej compounder jako silně potvrzený závěr; zvol přesnější pracovní příběh nebo jasně označ nízkou jistotu.
+- Sekce „Co má smysl dále ověřit“ je povinná: uveď 3 konkrétní ověřovací kroky navázané na největší nejistoty této firmy. Nikdy nepiš, že AI tuto sekci neposkytla.
 
 DŮLEŽITÉ: ANALYTICKÁ ODVAHA
 - Nemusíš být neutrální jen proto, že existují protichůdné signály. Pokud evidence jasně podporuje určitou interpretaci, řekni ji přímo.
@@ -2915,7 +2926,7 @@ Uveď pouze skutečné vazby nebo konflikty. Pokud evidence převážně souhlas
     def _groq_call(current_payload):
         return requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.26"},
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.28.18"},
             json=current_payload, timeout=90
         )
 
@@ -3009,6 +3020,7 @@ def analyst_ai_recovery(company, ticker, exchange, q, annual, quarterly, news, s
 Použij pouze níže uvedenou evidenci. Nevymýšlej fakta.
 
 Kontrola interpretace: porovnávej FY s FY a kvartál se stejným fiskálním kvartálem; nepovažuj jednotlivý kvartál za trend FCF. Popiš kolísání mezilehlých ročních hodnot, ne jen rozdíl prvního a posledního roku. Pokles capex sám nedokazuje lepší provozní efektivitu. Dluh a Debt/Equity mohou mít odlišné definice; neodvozuj jedno z druhého bez potvrzení. Příčiny změn uváděj jako fakt jen s přímým důkazem, jinak jako hypotézu. STORY musí být konzistentní s podrobným příběhem.
+U každého číselného tvrzení uveď přesná období. Po sobě jdoucí kvartály jsou QoQ, nikoli YoY; „ročně“ použij pouze při skutečném srovnání odpovídajících FY nebo stejných fiskálních kvartálů mezi roky. Nikdy nezaměňuj hodnotu jednoho kvartálu za součet více kvartálů. Pokud poslední FY postrádá klíčová data a TTM není validní, výslovně sniž jistotu příběhu; několik příznivých kvartálů chybějící FY nenahrazuje. „Kvalitní compounder“ neopírej jen o krátkodobý FCF. Uveď konkrétní kontrolní kroky, které by nejistotu pomohly vyřešit.
 
 Vrať PŘESNĚ tyto čtyři bloky a nic jiného:
 STORY: [jeden název z povoleného seznamu]
@@ -3041,7 +3053,7 @@ EVIDENCE:
     }
     try:
         r=requests.post("https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization":f"Bearer {api_key}","Content-Type":"application/json","User-Agent":"Stock-Screener/6.26"},
+            headers={"Authorization":f"Bearer {api_key}","Content-Type":"application/json","User-Agent":"Stock-Screener/6.28.18"},
             json=payload, timeout=60)
         if r.status_code!=200:
             return {"ok":False,"text":"","error":f"Groq recovery HTTP {r.status_code}: {r.text[:800]}"}
@@ -3306,7 +3318,7 @@ def analyst_render(ticker_input):
     # The former V6.28.x diagnostic block is intentionally removed from the
     # normal UI so it cannot interrupt the analytical workflow.
 
-    # V6.28.15: HARD IDENTITY FIREWALL. The exact Yahoo Chart symbol is the
+    # V6.28.18: HARD IDENTITY FIREWALL. The exact Yahoo Chart symbol is the
     # authoritative ticker-identity check. Yahoo Search is optional enrichment: if
     # it returns an exact quote, use its fields; if it returns nothing, do not block
     # a valid exact Chart result. Never accept an approximate Search result.
@@ -3320,12 +3332,12 @@ def analyst_render(ticker_input):
             f"{q.get('identity_reason') or 'Neznámý důvod.'} Analýza byla z bezpečnostních důvodů zastavena."
         )
         st.info(
-            "Analytik V6.28.16 nepoužije přibližně nalezenou firmu ani data z jiného titulu. "
+            "Analytik V6.28.18 nepoužije přibližně nalezenou firmu ani data z jiného titulu. "
             "Pokud se zastavení opakuje, pošli mi diagnostický výpis – nebudeme to obcházet dalším fallbackem."
         )
         return
 
-    # V6.28.15: supplement sparse Yahoo Search quote fields only from yfinance
+    # V6.28.18: supplement sparse Yahoo Search quote fields only from yfinance
     # when its info.symbol exactly matches the already-verified Yahoo ticker.
     quote_fallback = _analyst_yfinance_quote_fallback(yahoo_ticker)
     q["quote_fallback_status"] = quote_fallback.get("fallback_status", "nedostupné")
@@ -3408,7 +3420,7 @@ def analyst_render(ticker_input):
     status.success("5/5 Analytické jádro dokončeno.")
 
     st.markdown(f"## {company}")
-    st.caption(f"Ticker **{ticker}** · Yahoo **{yahoo_ticker}** · {exchange} · načteno {datetime.now().strftime('%d.%m.%Y %H:%M')} · build **V6.28.16 / 20261010-D**")
+    st.caption(f"Ticker **{ticker}** · Yahoo **{yahoo_ticker}** · {exchange} · načteno {datetime.now().strftime('%d.%m.%Y %H:%M')} · build **V6.28.18 / 20261011-A**")
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Cena", f"{analyst_human_number(q.get('price'), 2)} {q.get('currency', '')}")
