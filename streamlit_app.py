@@ -53,7 +53,7 @@ def update_runtime(status=None, stage=None, message=None, error=None, run_id=Non
 
 
 st.title("📊 Stock-Screener")
-st.caption("V6.28.16 · BUILD 20261010-D – Screener · samostatný modul Analytik je dostupný v menu vlevo")
+st.caption("V6.28.17 · BUILD 20261010-E – Screener · samostatný modul Analytik je dostupný v menu vlevo")
 
 NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 NYSE_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
@@ -2326,8 +2326,8 @@ def analyst_financial_summary(annual, quarterly):
         periods = annual.loc[series.index, "Období"].astype(str) if "Období" in annual.columns else pd.Series(["první dostupné FY", "poslední dostupné FY"])
         start_period = str(periods.iloc[0]) if len(periods) else "první dostupné FY"
         end_period = str(periods.iloc[-1]) if len(periods) else "poslední dostupné FY"
-        direction = "vzrostly" if x > 5 else "klesly" if x < -5 else "se změnily jen mírně"
-        parts.append(f"{label.capitalize()} se mezi {start_period} a {end_period} {direction} ({analyst_pct(x,0)}); jde o srovnání krajních dostupných hodnot, nikoli samo o sobě o důkaz souvislého trendu.")
+        direction = "růst" if x > 5 else "pokles" if x < -5 else "jen malá změna"
+        parts.append(f"{label.capitalize()}: {direction} {analyst_pct(x,0)} mezi {start_period} a {end_period}. Jde o srovnání krajních dostupných hodnot, nikoli samo o sobě o důkaz souvislého trendu.")
         diffs = [b-a for a,b in zip(series.tolist(), series.tolist()[1:]) if abs(b-a) > max(abs(a),abs(b),1.0)*0.005]
         if len(diffs) >= 2 and any((a > 0 > b) or (a < 0 < b) for a,b in zip(diffs,diffs[1:])):
             parts.append(f"Mezilehlé hodnoty {label} kolísají; růst/pokles mezi krajními roky nelze popisovat jako nepřetržitý.")
@@ -2677,6 +2677,21 @@ def _analyst_financial_change_summary(annual, quarterly):
                 change = (last / first - 1) * 100
                 parts.append(f"{label}: {change:+.1f} % při srovnání stejného Q{qnum} v různých fiskálních letech; zkontrolovat i mezilehlá období.")
                 break
+    if quarterly is not None and not quarterly.empty:
+        # Include the actual quarterly values for the metrics most often misread by the model.
+        # This is deliberately a factual series, not an interpretation of QoQ performance.
+        for col, label in [("Revenue", "tržby"), ("Net Income", "čistý zisk"), ("Operating Cash Flow", "provozní cash flow"), ("Capital Expenditure", "capex"), ("FCF", "FCF")]:
+            if col not in quarterly.columns:
+                continue
+            points = []
+            for _, row in quarterly.iterrows():
+                value = safe_float(row.get(col))
+                if pd.isna(value):
+                    continue
+                period = clean_text(row.get("Období")) or "neznámé období"
+                points.append(f"{period}: {analyst_human_number(value)}")
+            if points:
+                parts.append(f"Kvartální řada {label} (hodnoty pouze za jednotlivá období): " + " | ".join(points) + ". Nepočítat QoQ změnu, pokud nejsou doloženy dvě sousední čtvrtletní období; přednostně porovnávat stejné Q mezi FY.")
     ttm = analyst_ttm_from_quarters(quarterly)
     if not ttm.empty:
         parts.append("TTM je součet posledních čtyř dostupných úplných a validovaných kvartálů; není vydáváno za samostatný fiskální rok.")
@@ -2754,7 +2769,7 @@ def analyst_ai_synthesis(company, ticker, exchange, q, annual, quarterly, news, 
         return {"ok": False, "error": "Chybí GROQ_API_KEY ve Streamlit Secrets.", "text": "", "model": "openai/gpt-oss-120b"}
 
     pack = analyst_build_evidence_pack(company, ticker, exchange, q, annual, quarterly, news, sec)
-    evidence = _analyst_evidence_text(pack, max_chars=7000)
+    evidence = _analyst_evidence_text(pack, max_chars=6000)
     fin = _analyst_financial_change_summary(annual, quarterly)
     price_ctx = _analyst_price_evidence(price)
 
@@ -2798,6 +2813,8 @@ DŮLEŽITÉ: ANALYTICKÁ ODVAHA
 
 PŘÍSNÁ EVIDENČNÍ PRAVIDLA
 - Používej pouze níže uvedenou evidenci. Nevymýšlej čísla, události, výroky, zdroje ani odkazy.
+- Pro finanční čísla mají přednost tabulky „FINANČNÍ KONTEXT“ a záznamy „Yahoo Finance (direct)“ před čísly v novinových titulcích, profilech nebo obecných komentářích. Pokud se čísla rozcházejí, uveď konflikt a nevytvářej vlastní kompromisní číslo.
+- Neuváděj procentní změnu QoQ, pokud zřetelně neidentifikuješ hodnotu aktuálního i bezprostředně předchozího čtvrtletí a obě hodnoty neodpovídají dodané řadě. Pokud si nejsi jistý, změnu nepočítej.
 - Faktická tvrzení označ [E#].
 - Logickou interpretaci označ **Inference:**.
 - Chybějící zásadní informaci označ **Neznáme:**.
@@ -2891,7 +2908,7 @@ Uveď pouze skutečné vazby nebo konflikty. Pokud evidence převážně souhlas
         "model": "openai/gpt-oss-120b",
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.15,
-        "max_completion_tokens": 2800,
+        "max_completion_tokens": 2100,
         "reasoning_effort": "low",
         "include_reasoning": False
     }
@@ -2904,15 +2921,34 @@ Uveď pouze skutečné vazby nebo konflikty. Pokud evidence převážně souhlas
 
     try:
         r = _groq_call(payload)
-        # Groq free-tier context is limited. Retry once with a smaller evidence pack
-        # if the combined prompt + completion request is rejected as too large.
+        # On oversized requests, shrink evidence and output budget once.
         if r.status_code == 413:
-            compact_evidence = _analyst_evidence_text(pack, max_chars=5200)
+            compact_evidence = _analyst_evidence_text(pack, max_chars=4200)
             retry_prompt = prompt.replace(evidence, compact_evidence)
             retry_payload = dict(payload)
             retry_payload["messages"] = [{"role": "user", "content": retry_prompt}]
-            retry_payload["max_completion_tokens"] = 2200
+            retry_payload["max_completion_tokens"] = 1700
             r = _groq_call(retry_payload)
+        # Groq may reject a request when its estimated prompt+completion tokens exceed
+        # the remaining per-minute allowance. Honor its suggested wait, then retry once
+        # with a smaller evidence pack and completion budget. Do not retry daily limits.
+        if r.status_code == 429:
+            error_body = r.text[:2000]
+            try:
+                error_json = r.json()
+                error_message = clean_text((error_json.get("error") or {}).get("message"))
+            except Exception:
+                error_message = error_body
+            if "tokens per minute" in error_message.lower() or "tpm" in error_message.lower():
+                wait_match = re.search(r"try again in\s+([0-9.]+)s", error_message, re.I)
+                wait_seconds = min(15.0, max(1.0, float(wait_match.group(1)) + 0.5)) if wait_match else 5.5
+                time.sleep(wait_seconds)
+                compact_evidence = _analyst_evidence_text(pack, max_chars=4200)
+                retry_prompt = prompt.replace(evidence, compact_evidence)
+                retry_payload = dict(payload)
+                retry_payload["messages"] = [{"role": "user", "content": retry_prompt}]
+                retry_payload["max_completion_tokens"] = 1600
+                r = _groq_call(retry_payload)
         if r.status_code != 200:
             return {"ok": False, "error": f"Groq HTTP {r.status_code}: {r.text[:1200]}", "text": "", "model": "openai/gpt-oss-120b", "evidence_count": len(pack)}
         data = r.json()
