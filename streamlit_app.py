@@ -53,7 +53,7 @@ def update_runtime(status=None, stage=None, message=None, error=None, run_id=Non
 
 
 st.title("📊 Stock-Screener")
-st.caption("V6.28.14 · BUILD 20261010-B – Screener · samostatný modul Analytik je dostupný v menu vlevo")
+st.caption("V6.28.15 · BUILD 20261010-C – Screener · samostatný modul Analytik je dostupný v menu vlevo")
 
 NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 NYSE_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
@@ -1755,7 +1755,7 @@ def _analyst_yahoo_search_quote(yahoo_ticker):
 @st.cache_data(ttl=1800, show_spinner=False)
 def analyst_get_quote_data(yahoo_ticker):
     """
-    V6.28.14 IDENTITY FIREWALL + PERIOD VALIDATION.
+    V6.28.15 IDENTITY FIREWALL + PERIOD VALIDATION.
 
     A company may be accepted only when BOTH independent Yahoo layers agree
     on the exact requested Yahoo symbol:
@@ -1779,7 +1779,11 @@ def analyst_get_quote_data(yahoo_ticker):
 
     chart_ok = chart_symbol == expected
     search_ok = search_symbol == expected
-    identity_ok = chart_ok and search_ok
+    # The Chart API must confirm the exact requested symbol. Search is an
+    # optional enrichment source and may intermittently return no exact result
+    # for valid listings such as SHL.DE. _analyst_yahoo_search_quote() itself
+    # returns only an exact match, never a fuzzy/first result.
+    identity_ok = chart_ok
 
     def pick_text(*vals):
         for v in vals:
@@ -1799,7 +1803,8 @@ def analyst_get_quote_data(yahoo_ticker):
     # above. This keeps the identity and the descriptive fields bound together.
     name = pick_text(
         search.get("longname"), search.get("longName"),
-        search.get("shortname"), search.get("shortName")
+        search.get("shortname"), search.get("shortName"),
+        meta.get("longName"), meta.get("shortName")
     )
 
     # Yahoo Search uses slightly different field names depending on endpoint
@@ -1817,16 +1822,19 @@ def analyst_get_quote_data(yahoo_ticker):
     dividend_yield = pick_num(search.get("dividendYield"), search.get("dividendYieldPct"))
     employees = pick_num(search.get("fullTimeEmployees"))
 
-    if not identity_ok:
+    if not chart_ok:
         reason = (
             f"Yahoo identity mismatch: požadováno {expected}; "
-            f"Chart={chart_symbol or '—'}, Search={search_symbol or '—'}."
+            f"Chart={chart_symbol or '—'}, Search={search_symbol or '—'}. "
+            "Přesná shoda tickeru v Chart API chybí."
         )
-    elif not name:
-        reason = "Yahoo ověřilo ticker, ale neposkytlo bezpečně svázaný název firmy."
-        identity_ok = False
+    elif search_ok:
+        reason = "OK – přesný ticker potvrzen Chart API i Yahoo Search."
     else:
-        reason = "OK – Chart API a přesný Yahoo Search quote shodně potvrzují ticker."
+        reason = (
+            "OK – přesný ticker potvrzen Yahoo Chart API; Yahoo Search "
+            "nevrátil přesný výsledek, proto se jeho data nepoužijí."
+        )
 
     return {
         "symbol": expected if chart_ok else (chart_symbol or search_symbol),
@@ -1834,7 +1842,7 @@ def analyst_get_quote_data(yahoo_ticker):
         "identity_reason": reason,
         "identity_chart_symbol": chart_symbol,
         "identity_search_symbol": search_symbol,
-        "identity_source": "Yahoo Chart API + exact Yahoo Search",
+        "identity_source": "Yahoo Chart API exact symbol" + (" + exact Yahoo Search" if search_ok else " (Search optional/unavailable)"),
         "price": pick_num(meta.get("regularMarketPrice"), meta.get("previousClose"), search.get("regularMarketPrice")),
         "market_cap": market_cap,
         "currency": pick_text(meta.get("currency"), search.get("currency")),
@@ -3192,25 +3200,26 @@ def analyst_render(ticker_input):
     # The former V6.28.x diagnostic block is intentionally removed from the
     # normal UI so it cannot interrupt the analytical workflow.
 
-    # V6.28.14: HARD IDENTITY FIREWALL. No AI, financial history or news may run
-    # until the requested Yahoo ticker is independently confirmed by Chart +
-    # exact Search quote. An ambiguous identity is a hard stop, not a fallback.
+    # V6.28.15: HARD IDENTITY FIREWALL. The exact Yahoo Chart symbol is the
+    # authoritative ticker-identity check. Yahoo Search is optional enrichment: if
+    # it returns an exact quote, use its fields; if it returns nothing, do not block
+    # a valid exact Chart result. Never accept an approximate Search result.
     q = analyst_get_quote_data(yahoo_ticker)
     company = q.get("name") or ""
     returned_symbol = clean_text(q.get("symbol")).upper()
     expected_symbol = clean_text(yahoo_ticker).upper()
-    if not q.get("identity_ok") or not company or returned_symbol != expected_symbol:
+    if not q.get("identity_ok") or returned_symbol != expected_symbol:
         st.error(
             f"Identitu titulu se nepodařilo bezpečně ověřit: požadováno {ticker} / {yahoo_ticker}. "
             f"{q.get('identity_reason') or 'Neznámý důvod.'} Analýza byla z bezpečnostních důvodů zastavena."
         )
         st.info(
-            "Analytik V6.28.14 záměrně nepoužije přibližně nalezenou firmu ani data z jiného titulu. "
+            "Analytik V6.28.15 nepoužije přibližně nalezenou firmu ani data z jiného titulu. "
             "Pokud se zastavení opakuje, pošli mi diagnostický výpis – nebudeme to obcházet dalším fallbackem."
         )
         return
 
-    # V6.28.14: supplement sparse Yahoo Search quote fields only from yfinance
+    # V6.28.15: supplement sparse Yahoo Search quote fields only from yfinance
     # when its info.symbol exactly matches the already-verified Yahoo ticker.
     quote_fallback = _analyst_yfinance_quote_fallback(yahoo_ticker)
     q["quote_fallback_status"] = quote_fallback.get("fallback_status", "nedostupné")
@@ -3240,6 +3249,12 @@ def analyst_render(ticker_input):
             q[target_key] = candidate
     if not clean_text(q.get("name")):
         q["name"] = clean_text(q.get("fallback_long_name") or q.get("fallback_short_name"))
+    # A verified exact ticker is safer than blocking a valid listing solely
+    # because Yahoo did not supply a company name. Use the user-entered ticker
+    # as a transparent display fallback; never substitute another company.
+    if not clean_text(q.get("name")):
+        q["name"] = ticker
+    company = clean_text(q.get("name")) or ticker
     if pd.isna(safe_float(q.get("price"))):
         fallback_price = safe_float(q.get("fallback_current_price"))
         if pd.isna(fallback_price):
@@ -3287,7 +3302,7 @@ def analyst_render(ticker_input):
     status.success("5/5 Analytické jádro dokončeno.")
 
     st.markdown(f"## {company}")
-    st.caption(f"Ticker **{ticker}** · Yahoo **{yahoo_ticker}** · {exchange} · načteno {datetime.now().strftime('%d.%m.%Y %H:%M')} · build **V6.28.14 / 20261010-B**")
+    st.caption(f"Ticker **{ticker}** · Yahoo **{yahoo_ticker}** · {exchange} · načteno {datetime.now().strftime('%d.%m.%Y %H:%M')} · build **V6.28.15 / 20261010-C**")
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Cena", f"{analyst_human_number(q.get('price'), 2)} {q.get('currency', '')}")
