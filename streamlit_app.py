@@ -53,7 +53,7 @@ def update_runtime(status=None, stage=None, message=None, error=None, run_id=Non
 
 
 st.title("📊 Stock-Screener")
-st.caption("V6.28.22 · BUILD 20261011-E – Screener · samostatný modul Analytik je dostupný v menu vlevo")
+st.caption("V6.28.23 · BUILD 20261011-F – Screener · samostatný modul Analytik je dostupný v menu vlevo")
 
 NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 NYSE_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
@@ -1755,7 +1755,7 @@ def _analyst_yahoo_search_quote(yahoo_ticker):
 @st.cache_data(ttl=1800, show_spinner=False)
 def analyst_get_quote_data(yahoo_ticker):
     """
-    V6.28.22 TRUNCATION RECOVERY + OPERATING MARGIN PATH + CAUSALITY GUARDRAILS + FOLLOW CLEANUP.
+    V6.28.23 TRUNCATION RECOVERY + OPERATING MARGIN PATH + CAUSALITY GUARDRAILS + FOLLOW CLEANUP.
 
     A company may be accepted only when BOTH independent Yahoo layers agree
     on the exact requested Yahoo symbol:
@@ -2754,9 +2754,9 @@ def _analyst_price_evidence(price):
 def groq_connection_diagnostics(api_key, model="openai/gpt-oss-120b"):
     results = []
     base = "https://api.groq.com"
-    headers = {"Authorization": f"Bearer {api_key}", "User-Agent": "Stock-Screener/6.28.21"}
+    headers = {"Authorization": f"Bearer {api_key}", "User-Agent": "Stock-Screener/6.28.23"}
     try:
-        r = requests.get(base + "/", headers={"User-Agent": "Stock-Screener/6.28.21"}, timeout=12)
+        r = requests.get(base + "/", headers={"User-Agent": "Stock-Screener/6.28.23"}, timeout=12)
         results.append({"test": "api.groq.com – základní dostupnost", "status": r.status_code, "detail": r.text[:300]})
     except Exception as e:
         results.append({"test": "api.groq.com – základní dostupnost", "status": "ERROR", "detail": f"{type(e).__name__}: {e}"})
@@ -2981,7 +2981,7 @@ Přesně 3 konkrétní ověřitelné věci, pouze v krátkých odrážkách. Ne�
     def _groq_call(current_payload):
         return requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.28.21"},
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.28.23"},
             json=current_payload, timeout=90
         )
 
@@ -3085,7 +3085,10 @@ CENA: {analyst_human_number(q.get('price'), 2)} {clean_text(q.get('currency')) o
         # A complete-looking STORY is not sufficient: if the answer hit its token
         # ceiling or omitted the follow-up section, recover a short complete version.
         if not has_story_title or not has_profile or not has_changes or truncated:
-            result["recovery"] = analyst_ai_recovery(company, ticker, exchange, q, annual, quarterly, news, sec, price, profile)
+            recovery = analyst_ai_recovery(company, ticker, exchange, q, annual, quarterly, news, sec, price, profile)
+            if not recovery.get("ok"):
+                recovery = {"ok": True, "text": _analyst_deterministic_recovery(annual, quarterly, profile), "error": "Použit datový fallback, protože AI odpověď nebyla úplná."}
+            result["recovery"] = recovery
         return result
     except Exception as e:
         return {"ok": False, "error": f"{type(e).__name__}: {e}", "text": "", "model": "openai/gpt-oss-120b", "evidence_count": len(pack)}
@@ -3117,7 +3120,7 @@ def analyst_ai_recovery(company, ticker, exchange, q, annual, quarterly, news, s
     except Exception:
         return {"ok": False, "text": "", "error": "Chybí GROQ_API_KEY ve Streamlit Secrets."}
     pack = analyst_build_evidence_pack(company, ticker, exchange, q, annual, quarterly, news, sec)
-    evidence = _analyst_evidence_text(pack, max_chars=4200)
+    evidence = _analyst_evidence_text(pack, max_chars=2600)
     profile_guidance = analyst_profile_guidance(profile)
     prompt = f"""Jsi analytik společnosti {company} ({ticker}, {exchange}).
 {profile_guidance}
@@ -3151,19 +3154,29 @@ EVIDENCE:
         "model":"openai/gpt-oss-120b",
         "messages":[{"role":"user","content":prompt}],
         "temperature":0.1,
-        "max_completion_tokens":1300,
+        "max_completion_tokens":900,
         "reasoning_effort":"low",
         "include_reasoning":False
     }
     try:
         r=requests.post("https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization":f"Bearer {api_key}","Content-Type":"application/json","User-Agent":"Stock-Screener/6.28.21"},
+            headers={"Authorization":f"Bearer {api_key}","Content-Type":"application/json","User-Agent":"Stock-Screener/6.28.23"},
             json=payload, timeout=60)
         if r.status_code!=200:
             return {"ok":False,"text":"","error":f"Groq recovery HTTP {r.status_code}: {r.text[:800]}"}
         data=r.json(); choice=(data.get("choices") or [{}])[0]
         text=clean_text((choice.get("message") or {}).get("content"))
-        return {"ok":bool(text),"text":text,"error":""}
+        finish = clean_text(choice.get("finish_reason"))
+        has_story = bool(re.search(r"(?im)^\s*STORY\s*:\s*[^\n]+", text))
+        has_profile = bool(re.search(r"(?im)^\s*PROFILE\s*:\s*[^\n]+", text))
+        has_changes = bool(re.search(r"(?im)^\s*CHANGES\s*:", text))
+        follow_match = re.search(r"(?im)^\s*FOLLOW\s*:\s*(.+)$", text)
+        follow_count = len([x for x in follow_match.group(1).split("|") if x.strip()]) if follow_match else 0
+        # Never treat another truncated answer as a successful recovery.
+        valid = bool(text and has_story and has_profile and has_changes and follow_count == 3
+                     and finish not in ("length", "max_tokens")
+                     and not re.search(r"(?:\*\*|__|\b(?:protože|například|Inference:)\s*)\s*$", text))
+        return {"ok":valid,"text":text,"error":"" if valid else f"Neúplná záchranná odpověď (finish_reason={finish}, follow={follow_count}/3).", "finish_reason":finish}
     except Exception as e:
         return {"ok":False,"text":"","error":f"{type(e).__name__}: {e}"}
 
@@ -3172,7 +3185,105 @@ def _analyst_recovery_changes_text(recovery_text):
     if not recovery_text:
         return ""
     m = re.search(r"(?is)\bCHANGES\s*:\s*(.*?)(?=\n\s*FOLLOW\s*:|\Z)", recovery_text)
-    return m.group(1).strip() if m else ""
+    if not m:
+        return ""
+    # A stray bold marker at the start was visibly rendered as a lone '**'.
+    return re.sub(r"^(?:\*\*|__|[#*_`\s])+", "", m.group(1).strip()).strip()
+
+
+def _analyst_extract_follow(text):
+    """Extract three follow-up checks whether the model uses pipes or a multiline list."""
+    if not text:
+        return []
+    m = re.search(r"(?im)^\s*FOLLOW\s*:\s*(.*)$", text)
+    if not m:
+        return []
+    items=[]
+    first=m.group(1).strip()
+    if first:
+        items.extend(x.strip(" -*•\t") for x in first.split("|") if x.strip(" -*•\t"))
+    tail=text[m.end():]
+    for line in tail.splitlines():
+        stripped=line.strip()
+        if not stripped:
+            if items:
+                continue
+            else:
+                continue
+        if re.match(r"(?i)^(?:STORY|PROFILE|CHANGES|THESIS|THREAT|COUNTER|CHANGE)\s*:", stripped):
+            break
+        if stripped.startswith(("- ", "* ", "• ")):
+            item=stripped[2:].strip()
+            if item:
+                items.append(item)
+        elif items and not re.match(r"^#{1,6}\s", stripped):
+            # Join wrapped lines to the previous bullet instead of losing them.
+            items[-1] += " " + stripped
+        elif stripped.startswith("FOLLOW:"):
+            continue
+        else:
+            break
+    return items[:3]
+
+
+def _analyst_deterministic_recovery(annual, quarterly, profile="Naspeedovaný"):
+    """Deterministic, data-grounded fallback when both Groq answers are incomplete."""
+    def val(row, key):
+        try:
+            x = safe_float(row.get(key))
+            return None if pd.isna(x) else float(x)
+        except Exception:
+            return None
+    def fmt(x, digits=1):
+        return "—" if x is None else f"{x:,.{digits}f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    rows=[]
+    if annual is not None and not annual.empty:
+        for _, row in annual.iterrows():
+            rev, op, ni, fcf = (val(row,k) for k in ("Revenue","Operating Income","Net Income","FCF"))
+            if rev and op is not None:
+                period = clean_text(row.get("Období")) or "FY"
+                rows.append({"period":period,"revenue":rev,"op":op,"ni":ni,"fcf":fcf,"opm":op/rev*100})
+    if len(rows)>=2:
+        first,last=rows[0],rows[-1]
+        opm_path=" → ".join(f"{r['period']}: {fmt(r['opm'])} %" for r in rows)
+        revenue_path=" → ".join(f"{r['period']}: {fmt(r['revenue'])} mld." for r in rows)
+        opm_delta=last["opm"]-first["opm"]
+        rev_delta=(last["revenue"]/first["revenue"]-1)*100 if first["revenue"] else None
+        opm_sentence=(f"Provozní marže se mezi první a poslední dostupnou FY změnila o {fmt(opm_delta)} p. b.; "
+                      + ("celkově vzrostla, ale mezilehlá cesta je důležitá." if opm_delta>0 else "celkově klesla; příčina z poměrů samotných nevyplývá."))
+        story="Provozní zlepšení" if opm_delta>1 else "Nejasný / smíšený příběh"
+        change_title="Vývoj provozní marže a rozdíl proti čistému zisku"
+        change=(
+            f"### 1. {change_title}\n"
+            f"**Co víme:** Provozní marže podle provozního zisku / tržeb: {opm_path}. Tržby: {revenue_path}.\n"
+            f"**Co se mění:** {opm_sentence} Růst tržeb mezi krajními dostupnými FY činí {fmt(rev_delta)} %.\n"
+            "**Ekonomický dopad:** Pokud se provozní marže udrží, může podpořit budoucí provozní zisk; samotná řada ale nepotvrzuje udržitelnost ani příčinu.\n"
+            "**Inference:** Data podporují pracovní hypotézu provozního zlepšení, nikoli automaticky příběh kvalitního compounderu.\n"
+            "**Neznáme:** Co přesně vysvětluje rozdíl mezi provozním a čistým ziskem a jak se vyvíjely marže jednotlivých segmentů.\n"
+            "**Charakter změny:** Předběžně provozní zlepšení; strukturální příčina zatím nepotvrzena.\n"
+            "**Co by ji potvrdilo nebo vyvrátilo:** Segmentové marže a rozpad finančních, daňových a jednorázových položek za stejné FY."
+        )
+    else:
+        story="Nejasný / smíšený příběh"
+        change_title="Nedostatek srovnatelných ročních dat"
+        change=(
+            f"### 1. {change_title}\n"
+            "**Co víme:** Dostupná roční řada neobsahuje dost hodnot pro bezpečné odvození provozní marže.\n"
+            "**Co se mění:** Směr a trvalost změny nelze spolehlivě určit.\n"
+            "**Ekonomický dopad:** Bez srovnatelné řady nelze bezpečně odhadnout udržitelnost zisku.\n"
+            "**Inference:** Zatím nelze dát silnější závěr než smíšený příběh.\n"
+            "**Neznáme:** Chybí srovnatelné hodnoty tržeb a provozního zisku.\n"
+            "**Charakter změny:** Nejasná.\n"
+            "**Co by ji potvrdilo nebo vyvrátilo:** Doplnit chybějící účetní období z primárních výkazů."
+        )
+    follow=(
+        "Porovnat provozní marži a provozní zisk ve všech dostupných FY včetně mezilehlých obratů.",
+        "Rozebrat rozdíl mezi provozním a čistým ziskem: finanční výsledek, daně a doložené jednorázové položky.",
+        "Doplnit segmentové tržby a marže, aby se ověřilo, zda zlepšení přichází z cloudu, tradičních licencí nebo nákladů."
+    )
+    return (f"STORY: {story}\n"
+            "PROFILE: Profil nebylo možné spolehlivě obnovit z dokončené AI odpovědi; hlavní důraz je proto na ověřitelná finanční data.\n"
+            f"CHANGES:\n{change}\nFOLLOW: " + " | ".join(follow))
 
 
 def analyst_current_developments(company, q, annual, quarterly, news, sec, ticker="", exchange="", price=None, ai_result=None):
@@ -3433,7 +3544,7 @@ def analyst_render(ticker_input):
     # The former V6.28.x diagnostic block is intentionally removed from the
     # normal UI so it cannot interrupt the analytical workflow.
 
-    # V6.28.22: HARD IDENTITY FIREWALL. The exact Yahoo Chart symbol is the
+    # V6.28.23: HARD IDENTITY FIREWALL. The exact Yahoo Chart symbol is the
     # authoritative ticker-identity check. Yahoo Search is optional enrichment: if
     # it returns an exact quote, use its fields; if it returns nothing, do not block
     # a valid exact Chart result. Never accept an approximate Search result.
@@ -3447,12 +3558,12 @@ def analyst_render(ticker_input):
             f"{q.get('identity_reason') or 'Neznámý důvod.'} Analýza byla z bezpečnostních důvodů zastavena."
         )
         st.info(
-            "Analytik V6.28.22 nepoužije přibližně nalezenou firmu ani data z jiného titulu. "
+            "Analytik V6.28.23 nepoužije přibližně nalezenou firmu ani data z jiného titulu. "
             "Pokud se zastavení opakuje, pošli mi diagnostický výpis – nebudeme to obcházet dalším fallbackem."
         )
         return
 
-    # V6.28.22: supplement sparse Yahoo Search quote fields only from yfinance
+    # V6.28.23: supplement sparse Yahoo Search quote fields only from yfinance
     # when its info.symbol exactly matches the already-verified Yahoo ticker.
     quote_fallback = _analyst_yfinance_quote_fallback(yahoo_ticker)
     q["quote_fallback_status"] = quote_fallback.get("fallback_status", "nedostupné")
@@ -3535,7 +3646,7 @@ def analyst_render(ticker_input):
     status.success("5/5 Analytické jádro dokončeno.")
 
     st.markdown(f"## {company}")
-    st.caption(f"Ticker **{ticker}** · Yahoo **{yahoo_ticker}** · {exchange} · profil **{profile}** · načteno {datetime.now().strftime('%d.%m.%Y %H:%M')} · build **V6.28.22 / 20261011-E**")
+    st.caption(f"Ticker **{ticker}** · Yahoo **{yahoo_ticker}** · {exchange} · profil **{profile}** · načteno {datetime.now().strftime('%d.%m.%Y %H:%M')} · build **V6.28.23 / 20261011-F**")
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Cena", f"{analyst_human_number(q.get('price'), 2)} {q.get('currency', '')}")
@@ -3612,15 +3723,18 @@ def analyst_render(ticker_input):
             st.markdown(follow or "AI neuvedla konkrétní body ke sledování.")
         elif ai_result.get("ok"):
             recovery_text = (ai_result.get("recovery") or {}).get("text", "")
-            m = re.search(r"(?im)^\s*FOLLOW\s*:\s*(.+)$", recovery_text)
-            if not m:
-                # Last-resort salvage: the primary response may contain a FOLLOW line
-                # even if the model was cut off before its final H2 section.
-                m = re.search(r"(?im)^\s*FOLLOW\s*:\s*(.+)$", ai_result.get("text", ""))
-            if m:
-                st.markdown("\n".join(f"- {x.strip()}" for x in m.group(1).split("|") if x.strip()))
+            follow_items = _analyst_extract_follow(recovery_text)
+            if not follow_items:
+                # Last-resort salvage: the primary response may contain FOLLOW
+                # even if its final H2 heading was cut off.
+                follow_items = _analyst_extract_follow(ai_result.get("text", ""))
+            if not follow_items:
+                fallback_text = _analyst_deterministic_recovery(annual, quarterly, profile)
+                follow_items = _analyst_extract_follow(fallback_text)
+            if follow_items:
+                st.markdown("\n".join(f"- {x}" for x in follow_items))
             else:
-                st.warning("AI odpověď nebyla úplná a neposkytla ověřitelné kontrolní kroky. Spusť analýzu znovu; ostatní části se zobrazují, ale závěr není považován za kompletní.")
+                st.warning("AI odpověď nebyla úplná a nepodařilo se bezpečně obnovit kontrolní kroky.")
         else:
             st.write("AI neposkytla samostatnou sekci pro další ověření.")
 
