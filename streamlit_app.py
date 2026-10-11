@@ -53,7 +53,7 @@ def update_runtime(status=None, stage=None, message=None, error=None, run_id=Non
 
 
 st.title("📊 Stock-Screener")
-st.caption("V6.28.19 · BUILD 20261011-B – Screener · samostatný modul Analytik je dostupný v menu vlevo")
+st.caption("V6.28.20 · BUILD 20261011-C – Screener · samostatný modul Analytik je dostupný v menu vlevo")
 
 NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 NYSE_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
@@ -1755,7 +1755,7 @@ def _analyst_yahoo_search_quote(yahoo_ticker):
 @st.cache_data(ttl=1800, show_spinner=False)
 def analyst_get_quote_data(yahoo_ticker):
     """
-    V6.28.19 TPM FALLBACK + IDENTITY FIREWALL + PERIOD VALIDATION + INTERPRETATION GUARDRAILS.
+    V6.28.20 TPM FALLBACK + IDENTITY FIREWALL + PERIOD VALIDATION + INTERPRETATION GUARDRAILS.
 
     A company may be accepted only when BOTH independent Yahoo layers agree
     on the exact requested Yahoo symbol:
@@ -2767,8 +2767,25 @@ def groq_connection_diagnostics(api_key, model="openai/gpt-oss-120b"):
     return results
 
 
+def analyst_profile_guidance(profile):
+    """Differentiate willingness to interpret, never the standard of evidence."""
+    if profile == "Naspeedovaný":
+        return """PROFIL ANALÝZY: NASPEEDOVANÝ — odvážný, ale poctivý analytik.
+- Aktivně formuluj nejpravděpodobnější investiční tezi; neschovávej se za neutralitu jen proto, že existuje protiargument.
+- Hledej i méně zjevné možnosti: co může trh podceňovat, kde se může lámat trend, co naznačují marže, cash flow, kapitálová disciplína, management a sektor.
+- Uveď jasný základní scénář a stručně i alternativu/bull case a hlavní riziko. Pojmenuj, co je na příběhu zajímavé a co by mohlo být špatně oceněné, ale tvrzení o ocenění opři o dostupné násobky a výsledky.
+- Pracuj s odvážnějšími hypotézami, pokud dávají ekonomický smysl, ale každou nedoloženou příčinu výslovně označ **Inference / hypotéza**, nikoli fakt. Přidej míru jistoty: vysoká / střední / nízká a stručně proč.
+- Nevyžaduj dokonalá data, abys vyslovil pracovní názor. Pokud chybí poslední FY/TTM, řekni, co dostupná data přesto naznačují a co zůstává neověřené. Chybějící data mají snižovat jistotu, ne automaticky mazat názor.
+- „Nejasný / smíšený příběh“ používej jen tehdy, když opravdu není rozumně dominantní teze. Žádné Buy/Hold/Sell ani cílová cena."""
+    return """PROFIL ANALÝZY: SERIÓZNÍ — disciplinovaný, důkazně orientovaný analytik.
+- Urči dominantní pracovní příběh, pokud jej data rozumně podporují; nevybírej automaticky „Nejasný / smíšený příběh“ kvůli běžným protichůdným signálům.
+- Odděluj potvrzená fakta, logickou interpretaci a spekulativní hypotézu. Kauzalitu bez přímé opory označ jako hypotézu.
+- Uveď nejsilnější protiargument a konkrétní ověření, které by závěr potvrdilo nebo vyvrátilo. Chybějící data snižují jistotu, ale nemusí zabránit pracovnímu závěru.
+- Žádné Buy/Hold/Sell ani cílová cena."""
+
+
 @st.cache_data(ttl=900, show_spinner=False)
-def analyst_ai_synthesis(company, ticker, exchange, q, annual, quarterly, news, sec, price=None):
+def analyst_ai_synthesis(company, ticker, exchange, q, annual, quarterly, news, sec, price=None, profile="Seriózní"):
     try:
         api_key = st.secrets["GROQ_API_KEY"]
     except Exception:
@@ -2787,7 +2804,10 @@ def analyst_ai_synthesis(company, ticker, exchange, q, annual, quarterly, news, 
         "Nejasný / smíšený příběh"
     ]
 
+    profile_guidance = analyst_profile_guidance(profile)
     prompt = f"""Jsi seniorní analytik veřejně obchodované společnosti {company} ({ticker}, {exchange}).
+
+{profile_guidance}
 
 HLAVNÍ ÚKOL
 Z dostupné evidence vytvoř použitelný pracovní investiční obraz firmy. Nejde jen o výčet zpráv. Hledej kauzální řetězec:
@@ -2892,7 +2912,7 @@ CHANGE: [jedna stručná věta: co by muselo nastat, aby se STORY změnil]
 Pozor: „Protiargument“ ani „Alternativní interpretace“ nesmí automaticky vést k Nejasnému příběhu. Je normální, že pracovní příběh má protiváhu.
 
 ## Co se ve firmě právě mění
-Vyber nejvýše 3 skutečně odlišné změny. Neopakuj jeden příběh ve více variantách. Piš úsporně; každé téma maximálně 5–7 krátkých řádků.
+Vyber nejvýše 2 nejdůležitější skutečně odlišné změny. Neopakuj jeden příběh ve více variantách. Každé téma zpracuj v nejvýše 7 velmi krátkých řádcích (jeden pro každé povinné pole), bez opakování téhož v závěru.
 Pro každé téma:
 ### 1. [konkrétní změna]
 **Co víme:** ... [E#]
@@ -2912,7 +2932,7 @@ Pro každé téma:
 Uveď pouze skutečné vazby nebo konflikty. Pokud evidence převážně souhlasí, řekni to stručně.
 
 ## Co bych teď sledoval
-3–5 konkrétních ověřitelných věcí, pouze v krátkých odrážkách.
+Přesně 3 konkrétní ověřitelné věci, pouze v krátkých odrážkách. Nežádáš znovu o kontrolu období, která už jsou v tabulkách k dispozici: nejprve je sám porovnej (zejména stejná fiskální čtvrtletí meziročně). Navrhni budoucí ověření nebo skutečně chybějící údaj, ne už známá historická data.
 """
 
     payload = {
@@ -2926,7 +2946,7 @@ Uveď pouze skutečné vazby nebo konflikty. Pokud evidence převážně souhlas
     def _groq_call(current_payload):
         return requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.28.19"},
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.28.20"},
             json=current_payload, timeout=90
         )
 
@@ -2949,6 +2969,7 @@ Uveď pouze skutečné vazby nebo konflikty. Pokud evidence převážně souhlas
         compact_fin = (fin or "Není k dispozici.")[:1800]
         compact_controls = analyst_interpretation_controls(annual, quarterly, q)[:1000]
         compact_prompt = f"""Jsi analytik firmy {company} ({ticker}, {exchange}). Používej pouze podklady níže; nevymýšlej příčiny ani čísla.
+{profile_guidance}
 
 VYHODNOŤ: co se změnilo, proč (jen pokud doloženo), ekonomický dopad, co nevíme. Odděluj fakt [E#] od hypotézy **Inference:**. U každého čísla uveď přesné období. FY srovnávej s FY, kvartál YoY se stejným kvartálem minulého FY; sousední kvartály jsou QoQ a mohou být sezónní. Nikdy nezaměňuj jeden kvartál za součet více kvartálů. Chybějící FY/kvartál nedopočítávej. Pokud chybí poslední FY a validované TTM, sniž jistotu. Nepřisuzuj změnu cloudu, mixu, efektivitě ani cenám bez přímého důkazu.
 
@@ -3020,7 +3041,7 @@ CENA: {analyst_human_number(q.get('price'), 2)} {clean_text(q.get('currency')) o
         # Recovery is also needed when the answer contains story/profile but
         # was truncated before the current-developments section.
         if not has_story_title or not has_profile or not has_changes:
-            result["recovery"] = analyst_ai_recovery(company, ticker, exchange, q, annual, quarterly, news, sec, price)
+            result["recovery"] = analyst_ai_recovery(company, ticker, exchange, q, annual, quarterly, news, sec, price, profile)
         return result
     except Exception as e:
         return {"ok": False, "error": f"{type(e).__name__}: {e}", "text": "", "model": "openai/gpt-oss-120b", "evidence_count": len(pack)}
@@ -3043,7 +3064,7 @@ def _analyst_extract_section(text, heading):
 
 
 @st.cache_data(ttl=900, show_spinner=False)
-def analyst_ai_recovery(company, ticker, exchange, q, annual, quarterly, news, sec, price=None):
+def analyst_ai_recovery(company, ticker, exchange, q, annual, quarterly, news, sec, price=None, profile="Seriózní"):
     """Compact fallback used when the main AI answer is truncated.
     It recovers the story/profile, the most important current changes, and follow-up checks.
     """
@@ -3053,7 +3074,9 @@ def analyst_ai_recovery(company, ticker, exchange, q, annual, quarterly, news, s
         return {"ok": False, "text": "", "error": "Chybí GROQ_API_KEY ve Streamlit Secrets."}
     pack = analyst_build_evidence_pack(company, ticker, exchange, q, annual, quarterly, news, sec)
     evidence = _analyst_evidence_text(pack, max_chars=4200)
+    profile_guidance = analyst_profile_guidance(profile)
     prompt = f"""Jsi analytik společnosti {company} ({ticker}, {exchange}).
+{profile_guidance}
 Použij pouze níže uvedenou evidenci. Nevymýšlej fakta.
 
 Kontrola interpretace: porovnávej FY s FY a kvartál se stejným fiskálním kvartálem; nepovažuj jednotlivý kvartál za trend FCF. Popiš kolísání mezilehlých ročních hodnot, ne jen rozdíl prvního a posledního roku. Pokles capex sám nedokazuje lepší provozní efektivitu. Dluh a Debt/Equity mohou mít odlišné definice; neodvozuj jedno z druhého bez potvrzení. Příčiny změn uváděj jako fakt jen s přímým důkazem, jinak jako hypotézu. STORY musí být konzistentní s podrobným příběhem.
@@ -3319,6 +3342,14 @@ def analyst_render(ticker_input):
         default_ex = 2 if str(ticker_input).upper().endswith(".DE") else 0
         exchange = st.selectbox("Trh", ["NASDAQ", "NYSE", "XETRA"], index=default_ex)
 
+    profile = st.radio(
+        "Profil analytika",
+        ["Seriózní", "Naspeedovaný"],
+        index=0,
+        horizontal=True,
+        help=("Seriózní = disciplinovaný základní názor. Naspeedovaný = odvážnější investiční hypotézy a výraznější interpretace; důkazní pravidla jsou stejná."),
+    )
+    st.caption("Oba profily používají stejná finanční data a stejné požadavky na pravdivost. Liší se hlavně odvahou a stylem interpretace.")
     analyse = st.button("🔬 Spustit analytické jádro", type="primary")
     with st.expander("🧪 Diagnostika Groq připojení", expanded=False):
         st.write("Tento test nic nemění na API klíči. Ověří pouze, zda Streamlit Cloud dokáže z tohoto serveru oslovit Groq a zda Groq přijme klíč i model.")
@@ -3355,7 +3386,7 @@ def analyst_render(ticker_input):
     # The former V6.28.x diagnostic block is intentionally removed from the
     # normal UI so it cannot interrupt the analytical workflow.
 
-    # V6.28.19: HARD IDENTITY FIREWALL. The exact Yahoo Chart symbol is the
+    # V6.28.20: HARD IDENTITY FIREWALL. The exact Yahoo Chart symbol is the
     # authoritative ticker-identity check. Yahoo Search is optional enrichment: if
     # it returns an exact quote, use its fields; if it returns nothing, do not block
     # a valid exact Chart result. Never accept an approximate Search result.
@@ -3369,12 +3400,12 @@ def analyst_render(ticker_input):
             f"{q.get('identity_reason') or 'Neznámý důvod.'} Analýza byla z bezpečnostních důvodů zastavena."
         )
         st.info(
-            "Analytik V6.28.18 nepoužije přibližně nalezenou firmu ani data z jiného titulu. "
+            "Analytik V6.28.20 nepoužije přibližně nalezenou firmu ani data z jiného titulu. "
             "Pokud se zastavení opakuje, pošli mi diagnostický výpis – nebudeme to obcházet dalším fallbackem."
         )
         return
 
-    # V6.28.19: supplement sparse Yahoo Search quote fields only from yfinance
+    # V6.28.20: supplement sparse Yahoo Search quote fields only from yfinance
     # when its info.symbol exactly matches the already-verified Yahoo ticker.
     quote_fallback = _analyst_yfinance_quote_fallback(yahoo_ticker)
     q["quote_fallback_status"] = quote_fallback.get("fallback_status", "nedostupné")
@@ -3450,14 +3481,14 @@ def analyst_render(ticker_input):
     news = analyst_google_news(company, ticker, q.get("ir_website") or q.get("website"))
 
     status.info("4/5 Stavím důkazní balíček a provádím AI syntézu…")
-    ai_result = analyst_ai_synthesis(company, ticker, exchange, q, annual, quarterly, news, sec, price)
+    ai_result = analyst_ai_synthesis(company, ticker, exchange, q, annual, quarterly, news, sec, price, profile)
     current = analyst_current_developments(company, q, annual, quarterly, news, sec, ticker, exchange, price, ai_result=ai_result)
     primary, story_reason = analyst_story_hypothesis(q, annual, quarterly, news, sec, ai_result)
     price_comment = analyst_price_commentary(price)
     status.success("5/5 Analytické jádro dokončeno.")
 
     st.markdown(f"## {company}")
-    st.caption(f"Ticker **{ticker}** · Yahoo **{yahoo_ticker}** · {exchange} · načteno {datetime.now().strftime('%d.%m.%Y %H:%M')} · build **V6.28.19 / 20261011-B**")
+    st.caption(f"Ticker **{ticker}** · Yahoo **{yahoo_ticker}** · {exchange} · profil **{profile}** · načteno {datetime.now().strftime('%d.%m.%Y %H:%M')} · build **V6.28.20 / 20261011-C**")
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Cena", f"{analyst_human_number(q.get('price'), 2)} {q.get('currency', '')}")
