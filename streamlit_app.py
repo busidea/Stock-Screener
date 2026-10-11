@@ -53,7 +53,7 @@ def update_runtime(status=None, stage=None, message=None, error=None, run_id=Non
 
 
 st.title("📊 Stock-Screener")
-st.caption("V6.28.23 · BUILD 20261011-F – Screener · samostatný modul Analytik je dostupný v menu vlevo")
+st.caption("V6.28.24 · BUILD 20261011-G – Screener · samostatný modul Analytik je dostupný v menu vlevo")
 
 NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 NYSE_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
@@ -1755,7 +1755,7 @@ def _analyst_yahoo_search_quote(yahoo_ticker):
 @st.cache_data(ttl=1800, show_spinner=False)
 def analyst_get_quote_data(yahoo_ticker):
     """
-    V6.28.23 TRUNCATION RECOVERY + OPERATING MARGIN PATH + CAUSALITY GUARDRAILS + FOLLOW CLEANUP.
+    V6.28.24 TRUNCATION RECOVERY + OPERATING MARGIN PATH + CAUSALITY GUARDRAILS + FOLLOW CLEANUP.
 
     A company may be accepted only when BOTH independent Yahoo layers agree
     on the exact requested Yahoo symbol:
@@ -2754,9 +2754,9 @@ def _analyst_price_evidence(price):
 def groq_connection_diagnostics(api_key, model="openai/gpt-oss-120b"):
     results = []
     base = "https://api.groq.com"
-    headers = {"Authorization": f"Bearer {api_key}", "User-Agent": "Stock-Screener/6.28.23"}
+    headers = {"Authorization": f"Bearer {api_key}", "User-Agent": "Stock-Screener/6.28.24"}
     try:
-        r = requests.get(base + "/", headers={"User-Agent": "Stock-Screener/6.28.23"}, timeout=12)
+        r = requests.get(base + "/", headers={"User-Agent": "Stock-Screener/6.28.24"}, timeout=12)
         results.append({"test": "api.groq.com – základní dostupnost", "status": r.status_code, "detail": r.text[:300]})
     except Exception as e:
         results.append({"test": "api.groq.com – základní dostupnost", "status": "ERROR", "detail": f"{type(e).__name__}: {e}"})
@@ -2981,7 +2981,7 @@ Přesně 3 konkrétní ověřitelné věci, pouze v krátkých odrážkách. Ne�
     def _groq_call(current_payload):
         return requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.28.23"},
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.28.24"},
             json=current_payload, timeout=90
         )
 
@@ -3087,7 +3087,7 @@ CENA: {analyst_human_number(q.get('price'), 2)} {clean_text(q.get('currency')) o
         if not has_story_title or not has_profile or not has_changes or truncated:
             recovery = analyst_ai_recovery(company, ticker, exchange, q, annual, quarterly, news, sec, price, profile)
             if not recovery.get("ok"):
-                recovery = {"ok": True, "text": _analyst_deterministic_recovery(annual, quarterly, profile), "error": "Použit datový fallback, protože AI odpověď nebyla úplná."}
+                recovery = {"ok": True, "text": _analyst_deterministic_recovery(annual, quarterly, profile, company, q), "error": "Použit datový fallback, protože AI odpověď nebyla úplná."}
             result["recovery"] = recovery
         return result
     except Exception as e:
@@ -3160,7 +3160,7 @@ EVIDENCE:
     }
     try:
         r=requests.post("https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization":f"Bearer {api_key}","Content-Type":"application/json","User-Agent":"Stock-Screener/6.28.23"},
+            headers={"Authorization":f"Bearer {api_key}","Content-Type":"application/json","User-Agent":"Stock-Screener/6.28.24"},
             json=payload, timeout=60)
         if r.status_code!=200:
             return {"ok":False,"text":"","error":f"Groq recovery HTTP {r.status_code}: {r.text[:800]}"}
@@ -3226,7 +3226,7 @@ def _analyst_extract_follow(text):
     return items[:3]
 
 
-def _analyst_deterministic_recovery(annual, quarterly, profile="Naspeedovaný"):
+def _analyst_deterministic_recovery(annual, quarterly, profile="Naspeedovaný", company="", q=None):
     """Deterministic, data-grounded fallback when both Groq answers are incomplete."""
     def val(row, key):
         try:
@@ -3246,7 +3246,7 @@ def _analyst_deterministic_recovery(annual, quarterly, profile="Naspeedovaný"):
     if len(rows)>=2:
         first,last=rows[0],rows[-1]
         opm_path=" → ".join(f"{r['period']}: {fmt(r['opm'])} %" for r in rows)
-        revenue_path=" → ".join(f"{r['period']}: {fmt(r['revenue'])} mld." for r in rows)
+        revenue_path=" → ".join(f"{r['period']}: {fmt(r['revenue']/1_000_000_000)} mld." for r in rows)
         opm_delta=last["opm"]-first["opm"]
         rev_delta=(last["revenue"]/first["revenue"]-1)*100 if first["revenue"] else None
         opm_sentence=(f"Provozní marže se mezi první a poslední dostupnou FY změnila o {fmt(opm_delta)} p. b.; "
@@ -3282,7 +3282,7 @@ def _analyst_deterministic_recovery(annual, quarterly, profile="Naspeedovaný"):
         "Doplnit segmentové tržby a marže, aby se ověřilo, zda zlepšení přichází z cloudu, tradičních licencí nebo nákladů."
     )
     return (f"STORY: {story}\n"
-            "PROFILE: Profil nebylo možné spolehlivě obnovit z dokončené AI odpovědi; hlavní důraz je proto na ověřitelná finanční data.\n"
+            f"PROFILE: {_analyst_profile_fallback(company, q)}\n"
             f"CHANGES:\n{change}\nFOLLOW: " + " | ".join(follow))
 
 
@@ -3426,6 +3426,49 @@ def _analyst_story_profile_text(ai_result):
     return ""
 
 
+
+def _analyst_profile_fallback(company, q=None):
+    """Independent deterministic business-model fallback from verified quote metadata.
+
+    It deliberately avoids another model call. Industry templates are broad and
+    explicitly avoid claiming a particular revenue mix unless that is supplied by
+    the company profile/evidence itself.
+    """
+    q = q or {}
+    industry = clean_text(q.get("industry"))
+    sector = _analyst_czech_sector(q.get("sector"))
+    industry_l = industry.lower()
+    company = clean_text(company) or "Společnost"
+
+    if "software" in industry_l and ("application" in industry_l or "system" in industry_l):
+        if "sap" in company.lower():
+            return ("SAP dodává podnikový aplikační software pro řízení klíčových procesů firem. "
+                    "Jeho model kombinuje cloudové služby a předplatné s tradičním softwarem, licencemi a podporou; "
+                    "tento stručný profil však neověřuje aktuální podíl jednotlivých zdrojů tržeb.")
+        return (f"{company} působí v oblasti aplikačního softwaru. Takové firmy obvykle vydělávají na prodeji "
+                "softwaru, předplatném, cloudových službách nebo podpoře; konkrétní kombinaci příjmů je nutné ověřit "
+                "v podnikových materiálech.")
+    templates = [
+        (("semiconductor", "semiconductors", "chip"), "vyvíjí nebo vyrábí polovodičové součástky a související technologie; přesný podíl vlastního návrhu, výroby a externích kapacit je nutné ověřit"),
+        (("medical device", "medical devices", "healthcare equipment"), "dodává zdravotnické přístroje, technologie nebo související služby; konkrétní produktové portfolio a servisní podíl je nutné ověřit"),
+        (("bank", "banks", "regional bank"), "vydělává zejména na finančním zprostředkování, úrokových výnosech a poplatcích; přesná struktura výnosů a rizik vyžaduje bankovní výkazy"),
+        (("insurance", "insurer"), "nabízí pojištění a spravuje pojistná rizika; klíčové jsou pojistné, škodní průběh, náklady a investiční výnosy"),
+        (("industrial", "machinery", "engineering"), "dodává průmyslové výrobky, zařízení nebo technická řešení; konkrétní podíl výrobků, servisu a zakázek je nutné ověřit"),
+        (("chemicals", "chemical"), "vyrábí nebo distribuuje chemické produkty a materiály; výsledky obvykle citlivě reagují na objemy, ceny vstupů a produktový mix"),
+        (("auto", "automobile", "automotive"), "působí v automobilovém průmyslu; přesné zaměření na vozidla, komponenty nebo služby je nutné ověřit"),
+        (("real estate", "reit"), "působí v nemovitostech; pro posouzení modelu jsou důležité typ aktiv, obsazenost, nájemné, financování a případný developerský podíl"),
+        (("utilities", "electric utility", "regulated electric"), "provozuje nebo dodává síťové či energetické služby; význam regulace, cen a kapitálových investic závisí na konkrétním podnikání"),
+        (("oil", "gas", "energy"), "působí v energetice; konkrétní citlivost na komoditní ceny, objemy a kapitálové výdaje závisí na části hodnotového řetězce"),
+    ]
+    for keys, description in templates:
+        if any(key in industry_l for key in keys):
+            return f"{company} působí v odvětví {industry or sector.lower()} a {description}. Jde o orientační profil podle klasifikace odvětví, nikoli o ověření aktuálního produktového mixu."
+    if industry:
+        return (f"{company} je podle dostupných kotacních metadat zařazena do odvětví {industry} v sektoru {sector.lower()}. "
+                "Tato klasifikace sama o sobě nestačí k bezpečnému určení hlavních produktů, zákaznických skupin ani zdrojů tržeb; ty je nutné ověřit z firemních materiálů.")
+    return (f"U společnosti {company} se nepodařilo získat dost spolehlivých údajů k přesnému popisu obchodního modelu. "
+            "Bez ověřeného odvětví nebo firemního profilu by konkrétnější popis byl spekulací.")
+
 def _analyst_display_financial_table(df):
     if df is None or df.empty:
         return df
@@ -3544,7 +3587,7 @@ def analyst_render(ticker_input):
     # The former V6.28.x diagnostic block is intentionally removed from the
     # normal UI so it cannot interrupt the analytical workflow.
 
-    # V6.28.23: HARD IDENTITY FIREWALL. The exact Yahoo Chart symbol is the
+    # V6.28.24: HARD IDENTITY FIREWALL. The exact Yahoo Chart symbol is the
     # authoritative ticker-identity check. Yahoo Search is optional enrichment: if
     # it returns an exact quote, use its fields; if it returns nothing, do not block
     # a valid exact Chart result. Never accept an approximate Search result.
@@ -3558,12 +3601,12 @@ def analyst_render(ticker_input):
             f"{q.get('identity_reason') or 'Neznámý důvod.'} Analýza byla z bezpečnostních důvodů zastavena."
         )
         st.info(
-            "Analytik V6.28.23 nepoužije přibližně nalezenou firmu ani data z jiného titulu. "
+            "Analytik V6.28.24 nepoužije přibližně nalezenou firmu ani data z jiného titulu. "
             "Pokud se zastavení opakuje, pošli mi diagnostický výpis – nebudeme to obcházet dalším fallbackem."
         )
         return
 
-    # V6.28.23: supplement sparse Yahoo Search quote fields only from yfinance
+    # V6.28.24: supplement sparse Yahoo Search quote fields only from yfinance
     # when its info.symbol exactly matches the already-verified Yahoo ticker.
     quote_fallback = _analyst_yfinance_quote_fallback(yahoo_ticker)
     q["quote_fallback_status"] = quote_fallback.get("fallback_status", "nedostupné")
@@ -3646,7 +3689,7 @@ def analyst_render(ticker_input):
     status.success("5/5 Analytické jádro dokončeno.")
 
     st.markdown(f"## {company}")
-    st.caption(f"Ticker **{ticker}** · Yahoo **{yahoo_ticker}** · {exchange} · profil **{profile}** · načteno {datetime.now().strftime('%d.%m.%Y %H:%M')} · build **V6.28.23 / 20261011-F**")
+    st.caption(f"Ticker **{ticker}** · Yahoo **{yahoo_ticker}** · {exchange} · profil **{profile}** · načteno {datetime.now().strftime('%d.%m.%Y %H:%M')} · build **V6.28.24 / 20261011-G**")
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Cena", f"{analyst_human_number(q.get('price'), 2)} {q.get('currency', '')}")
@@ -3663,9 +3706,8 @@ def analyst_render(ticker_input):
         if profile_text:
             st.write(profile_text)
         else:
-            sector = _analyst_czech_sector(q.get("sector"))
-            industry = clean_text(q.get("industry")) or "daném oboru"
-            st.write(f"{company} působí v oblasti {sector.lower()} a zaměřuje se na {industry.lower()}. Detailní český profil z AI nebyl v tomto běhu dostupný.")
+            st.write(_analyst_profile_fallback(company, q))
+            st.caption("Náhradní profil je sestaven z dostupných metadat; konkrétní produktový mix nemusí být ověřen.")
 
     with st.expander("🧠 2. Co se ve firmě právě mění", expanded=True):
         if ai_result.get("ok"):
@@ -3729,7 +3771,7 @@ def analyst_render(ticker_input):
                 # even if its final H2 heading was cut off.
                 follow_items = _analyst_extract_follow(ai_result.get("text", ""))
             if not follow_items:
-                fallback_text = _analyst_deterministic_recovery(annual, quarterly, profile)
+                fallback_text = _analyst_deterministic_recovery(annual, quarterly, profile, company, q)
                 follow_items = _analyst_extract_follow(fallback_text)
             if follow_items:
                 st.markdown("\n".join(f"- {x}" for x in follow_items))
