@@ -53,7 +53,7 @@ def update_runtime(status=None, stage=None, message=None, error=None, run_id=Non
 
 
 st.title("📊 Stock-Screener")
-st.caption("V6.28.18 · BUILD 20261011-A – Screener · samostatný modul Analytik je dostupný v menu vlevo")
+st.caption("V6.28.19 · BUILD 20261011-B – Screener · samostatný modul Analytik je dostupný v menu vlevo")
 
 NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 NYSE_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
@@ -1755,7 +1755,7 @@ def _analyst_yahoo_search_quote(yahoo_ticker):
 @st.cache_data(ttl=1800, show_spinner=False)
 def analyst_get_quote_data(yahoo_ticker):
     """
-    V6.28.18 IDENTITY FIREWALL + PERIOD VALIDATION + INTERPRETATION GUARDRAILS.
+    V6.28.19 TPM FALLBACK + IDENTITY FIREWALL + PERIOD VALIDATION + INTERPRETATION GUARDRAILS.
 
     A company may be accepted only when BOTH independent Yahoo layers agree
     on the exact requested Yahoo symbol:
@@ -2926,40 +2926,77 @@ Uveď pouze skutečné vazby nebo konflikty. Pokud evidence převážně souhlas
     def _groq_call(current_payload):
         return requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.28.18"},
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.28.19"},
             json=current_payload, timeout=90
         )
 
+    def _is_tpm_limit(response):
+        if response.status_code not in (413, 429):
+            return False
+        try:
+            body = response.json()
+            message = clean_text((body.get("error") or {}).get("message"))
+        except Exception:
+            message = response.text
+        low = message.lower()
+        return any(term in low for term in ("tokens per minute", "tpm"))
+
+    def _compact_retry_payload():
+        # A short, independent fallback prompt is materially smaller than replacing
+        # only the evidence in the full prompt. This is needed when the full prompt
+        # plus its completion budget exceeds Groq's 8k TPM allowance.
+        compact_evidence = _analyst_evidence_text(pack, max_chars=1800)
+        compact_fin = (fin or "Není k dispozici.")[:1800]
+        compact_controls = analyst_interpretation_controls(annual, quarterly, q)[:1000]
+        compact_prompt = f"""Jsi analytik firmy {company} ({ticker}, {exchange}). Používej pouze podklady níže; nevymýšlej příčiny ani čísla.
+
+VYHODNOŤ: co se změnilo, proč (jen pokud doloženo), ekonomický dopad, co nevíme. Odděluj fakt [E#] od hypotézy **Inference:**. U každého čísla uveď přesné období. FY srovnávej s FY, kvartál YoY se stejným kvartálem minulého FY; sousední kvartály jsou QoQ a mohou být sezónní. Nikdy nezaměňuj jeden kvartál za součet více kvartálů. Chybějící FY/kvartál nedopočítávej. Pokud chybí poslední FY a validované TTM, sniž jistotu. Nepřisuzuj změnu cloudu, mixu, efektivitě ani cenám bez přímého důkazu.
+
+Vyber dominantní pracovní příběh z těchto možností: Kvalitní compounder; Kvalita za rozumnou cenu; Růst za rozumnou cenu; Value / levná firma; Provozní turnaround; Cyklické zotavení; Aktivové / finanční zotavení; Realitní hodnota; Provozní zlepšení; Růstové zotavení; Vysoký růst / dražší příběh; Value trap – varování; Nejasný / smíšený příběh. Nepoužívej automaticky Nejasný; ale „Kvalitní compounder“ vyžaduje důkazy dlouhodobé udržitelnosti.
+
+Vrať stručně, ale kompletně tyto oddíly:
+STORY: [jeden přesný povolený název]
+PROFILE: [obchodní model]
+THESIS: [proč tento příběh]
+THREAT: [hlavní riziko]
+COUNTER: [protiargument]
+CHANGE: [co by změnilo příběh]
+## Pracovní investiční příběh
+**Hlavní pracovní příběh:** **[stejný název]**; uveď důvody s [E#], nejistoty a míru jistoty.
+## Co se ve firmě právě mění
+Uveď nejvýše 3 témata, každé: Co víme [E#]; Co se mění; Ekonomický dopad; **Inference:**; **Neznáme:**; Charakter změny; Co ověřit.
+## Vztah k finančním výsledkům
+## Co si navzájem potvrzují nebo odporují zdroje
+## Co bych teď sledoval
+Uveď přesně 3 konkrétní ověřovací kroky. Žádné Buy/Hold/Sell.
+
+FINANČNÍ KONTEXT:
+{compact_fin}
+AUTOMATICKÁ KONTROLA ÚPLNOSTI:
+{compact_controls}
+EVIDENCE:
+{compact_evidence}
+CENA: {analyst_human_number(q.get('price'), 2)} {clean_text(q.get('currency')) or ''}."""
+        return {
+            "model": "openai/gpt-oss-120b",
+            "messages": [{"role": "user", "content": compact_prompt}],
+            "temperature": 0.15,
+            "max_completion_tokens": 900,
+            "reasoning_effort": "low",
+            "include_reasoning": False
+        }
+
     try:
         r = _groq_call(payload)
-        # On oversized requests, shrink evidence and output budget once.
-        if r.status_code == 413:
-            compact_evidence = _analyst_evidence_text(pack, max_chars=4200)
-            retry_prompt = prompt.replace(evidence, compact_evidence)
-            retry_payload = dict(payload)
-            retry_payload["messages"] = [{"role": "user", "content": retry_prompt}]
-            retry_payload["max_completion_tokens"] = 1700
-            r = _groq_call(retry_payload)
-        # Groq may reject a request when its estimated prompt+completion tokens exceed
-        # the remaining per-minute allowance. Honor its suggested wait, then retry once
-        # with a smaller evidence pack and completion budget. Do not retry daily limits.
-        if r.status_code == 429:
-            error_body = r.text[:2000]
-            try:
-                error_json = r.json()
-                error_message = clean_text((error_json.get("error") or {}).get("message"))
-            except Exception:
-                error_message = error_body
-            if "tokens per minute" in error_message.lower() or "tpm" in error_message.lower():
+        # HTTP 413 can also mean the TPM budget was exceeded, not only a body-size
+        # problem. Retry once with a genuinely shorter prompt and smaller output cap.
+        if r.status_code == 413 or _is_tpm_limit(r):
+            if _is_tpm_limit(r):
+                error_message = r.text
                 wait_match = re.search(r"try again in\s+([0-9.]+)s", error_message, re.I)
-                wait_seconds = min(15.0, max(1.0, float(wait_match.group(1)) + 0.5)) if wait_match else 5.5
+                wait_seconds = min(12.0, max(2.0, float(wait_match.group(1)) + 0.5)) if wait_match else 6.0
                 time.sleep(wait_seconds)
-                compact_evidence = _analyst_evidence_text(pack, max_chars=4200)
-                retry_prompt = prompt.replace(evidence, compact_evidence)
-                retry_payload = dict(payload)
-                retry_payload["messages"] = [{"role": "user", "content": retry_prompt}]
-                retry_payload["max_completion_tokens"] = 1600
-                r = _groq_call(retry_payload)
+            r = _groq_call(_compact_retry_payload())
         if r.status_code != 200:
             return {"ok": False, "error": f"Groq HTTP {r.status_code}: {r.text[:1200]}", "text": "", "model": "openai/gpt-oss-120b", "evidence_count": len(pack)}
         data = r.json()
@@ -3318,7 +3355,7 @@ def analyst_render(ticker_input):
     # The former V6.28.x diagnostic block is intentionally removed from the
     # normal UI so it cannot interrupt the analytical workflow.
 
-    # V6.28.18: HARD IDENTITY FIREWALL. The exact Yahoo Chart symbol is the
+    # V6.28.19: HARD IDENTITY FIREWALL. The exact Yahoo Chart symbol is the
     # authoritative ticker-identity check. Yahoo Search is optional enrichment: if
     # it returns an exact quote, use its fields; if it returns nothing, do not block
     # a valid exact Chart result. Never accept an approximate Search result.
@@ -3337,7 +3374,7 @@ def analyst_render(ticker_input):
         )
         return
 
-    # V6.28.18: supplement sparse Yahoo Search quote fields only from yfinance
+    # V6.28.19: supplement sparse Yahoo Search quote fields only from yfinance
     # when its info.symbol exactly matches the already-verified Yahoo ticker.
     quote_fallback = _analyst_yfinance_quote_fallback(yahoo_ticker)
     q["quote_fallback_status"] = quote_fallback.get("fallback_status", "nedostupné")
@@ -3420,7 +3457,7 @@ def analyst_render(ticker_input):
     status.success("5/5 Analytické jádro dokončeno.")
 
     st.markdown(f"## {company}")
-    st.caption(f"Ticker **{ticker}** · Yahoo **{yahoo_ticker}** · {exchange} · načteno {datetime.now().strftime('%d.%m.%Y %H:%M')} · build **V6.28.18 / 20261011-A**")
+    st.caption(f"Ticker **{ticker}** · Yahoo **{yahoo_ticker}** · {exchange} · načteno {datetime.now().strftime('%d.%m.%Y %H:%M')} · build **V6.28.19 / 20261011-B**")
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Cena", f"{analyst_human_number(q.get('price'), 2)} {q.get('currency', '')}")
