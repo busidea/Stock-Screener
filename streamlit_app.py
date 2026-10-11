@@ -53,7 +53,7 @@ def update_runtime(status=None, stage=None, message=None, error=None, run_id=Non
 
 
 st.title("📊 Stock-Screener")
-st.caption("V6.28.24 · BUILD 20261011-G – Screener · samostatný modul Analytik je dostupný v menu vlevo")
+st.caption("V6.28.25 · BUILD 20261012-A – Screener · samostatný modul Analytik je dostupný v menu vlevo")
 
 NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 NYSE_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
@@ -1755,7 +1755,7 @@ def _analyst_yahoo_search_quote(yahoo_ticker):
 @st.cache_data(ttl=1800, show_spinner=False)
 def analyst_get_quote_data(yahoo_ticker):
     """
-    V6.28.24 TRUNCATION RECOVERY + OPERATING MARGIN PATH + CAUSALITY GUARDRAILS + FOLLOW CLEANUP.
+    V6.28.25 COMPLETION DIAGNOSTICS + EXPLICIT AI/FALLBACK STATUS + GROQ USAGE TRACE.
 
     A company may be accepted only when BOTH independent Yahoo layers agree
     on the exact requested Yahoo symbol:
@@ -2754,9 +2754,9 @@ def _analyst_price_evidence(price):
 def groq_connection_diagnostics(api_key, model="openai/gpt-oss-120b"):
     results = []
     base = "https://api.groq.com"
-    headers = {"Authorization": f"Bearer {api_key}", "User-Agent": "Stock-Screener/6.28.24"}
+    headers = {"Authorization": f"Bearer {api_key}", "User-Agent": "Stock-Screener/6.28.25"}
     try:
-        r = requests.get(base + "/", headers={"User-Agent": "Stock-Screener/6.28.24"}, timeout=12)
+        r = requests.get(base + "/", headers={"User-Agent": "Stock-Screener/6.28.25"}, timeout=12)
         results.append({"test": "api.groq.com – základní dostupnost", "status": r.status_code, "detail": r.text[:300]})
     except Exception as e:
         results.append({"test": "api.groq.com – základní dostupnost", "status": "ERROR", "detail": f"{type(e).__name__}: {e}"})
@@ -2981,7 +2981,7 @@ Přesně 3 konkrétní ověřitelné věci, pouze v krátkých odrážkách. Ne�
     def _groq_call(current_payload):
         return requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.28.24"},
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.28.25"},
             json=current_payload, timeout=90
         )
 
@@ -3082,13 +3082,45 @@ CENA: {analyst_human_number(q.get('price'), 2)} {clean_text(q.get('currency')) o
             or (tail and not re.search(r"[.!?…:]$|\]$|\)$|\*\*$", tail))
         )
         truncated = str(finish or "").lower() in {"length", "max_tokens"} or not has_follow or incomplete_tail
+        missing_parts = []
+        if not has_story_title: missing_parts.append("STORY")
+        if not has_profile: missing_parts.append("PROFILE")
+        if not has_changes: missing_parts.append("sekce změn")
+        if not has_follow: missing_parts.append("sekce ověření")
+        if incomplete_tail: missing_parts.append("podezřelý konec odpovědi")
+        if str(finish or "").lower() in {"length", "max_tokens"}: missing_parts.append(f"limit výstupu ({finish})")
+        result["completion_diagnostics"] = {
+            "primary_chars": len(text),
+            "primary_finish_reason": finish or "neuvedeno",
+            "primary_complete_by_structure": bool(has_story_title and has_profile and has_changes and has_follow and not incomplete_tail and str(finish or "").lower() not in {"length", "max_tokens"}),
+            "missing_parts": list(dict.fromkeys(missing_parts)),
+            "usage": data.get("usage", {}) or {},
+        }
         # A complete-looking STORY is not sufficient: if the answer hit its token
-        # ceiling or omitted the follow-up section, recover a short complete version.
+        # ceiling or omitted a required section, try a compact AI recovery.
         if not has_story_title or not has_profile or not has_changes or truncated:
             recovery = analyst_ai_recovery(company, ticker, exchange, q, annual, quarterly, news, sec, price, profile)
-            if not recovery.get("ok"):
-                recovery = {"ok": True, "text": _analyst_deterministic_recovery(annual, quarterly, profile, company, q), "error": "Použit datový fallback, protože AI odpověď nebyla úplná."}
+            if recovery.get("ok"):
+                recovery["source"] = "ai_recovery"
+                result["completion_status"] = "ai_recovery"
+            else:
+                recovery = {
+                    "ok": True,
+                    "source": "deterministic_fallback",
+                    "text": _analyst_deterministic_recovery(annual, quarterly, profile, company, q),
+                    "error": "Záchranná AI odpověď nebyla úplná; použit datový fallback bez domýšlení příčin.",
+                }
+                result["completion_status"] = "deterministic_fallback"
             result["recovery"] = recovery
+            result["completion_diagnostics"]["recovery_status"] = recovery.get("source", "ai_recovery")
+            result["completion_diagnostics"]["recovery_error"] = recovery.get("error", "")
+            result["completion_diagnostics"]["recovery_chars"] = len(recovery.get("text", ""))
+            result["completion_diagnostics"]["recovery_finish_reason"] = recovery.get("finish_reason", "—")
+            result["completion_diagnostics"]["recovery_usage"] = recovery.get("usage", {}) or {}
+        else:
+            result["completion_status"] = "primary_ai"
+            result["completion_diagnostics"]["recovery_status"] = "nebyla potřeba"
+            result["completion_diagnostics"]["recovery_error"] = ""
         return result
     except Exception as e:
         return {"ok": False, "error": f"{type(e).__name__}: {e}", "text": "", "model": "openai/gpt-oss-120b", "evidence_count": len(pack)}
@@ -3160,7 +3192,7 @@ EVIDENCE:
     }
     try:
         r=requests.post("https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization":f"Bearer {api_key}","Content-Type":"application/json","User-Agent":"Stock-Screener/6.28.24"},
+            headers={"Authorization":f"Bearer {api_key}","Content-Type":"application/json","User-Agent":"Stock-Screener/6.28.25"},
             json=payload, timeout=60)
         if r.status_code!=200:
             return {"ok":False,"text":"","error":f"Groq recovery HTTP {r.status_code}: {r.text[:800]}"}
@@ -3176,7 +3208,7 @@ EVIDENCE:
         valid = bool(text and has_story and has_profile and has_changes and follow_count == 3
                      and finish not in ("length", "max_tokens")
                      and not re.search(r"(?:\*\*|__|\b(?:protože|například|Inference:)\s*)\s*$", text))
-        return {"ok":valid,"text":text,"error":"" if valid else f"Neúplná záchranná odpověď (finish_reason={finish}, follow={follow_count}/3).", "finish_reason":finish}
+        return {"ok":valid,"text":text,"error":"" if valid else f"Neúplná záchranná odpověď (finish_reason={finish}, follow={follow_count}/3).", "finish_reason":finish, "usage": data.get("usage", {}) or {}, "chars": len(text)}
     except Exception as e:
         return {"ok":False,"text":"","error":f"{type(e).__name__}: {e}"}
 
@@ -3587,7 +3619,7 @@ def analyst_render(ticker_input):
     # The former V6.28.x diagnostic block is intentionally removed from the
     # normal UI so it cannot interrupt the analytical workflow.
 
-    # V6.28.24: HARD IDENTITY FIREWALL. The exact Yahoo Chart symbol is the
+    # V6.28.25: HARD IDENTITY FIREWALL. The exact Yahoo Chart symbol is the
     # authoritative ticker-identity check. Yahoo Search is optional enrichment: if
     # it returns an exact quote, use its fields; if it returns nothing, do not block
     # a valid exact Chart result. Never accept an approximate Search result.
@@ -3601,12 +3633,12 @@ def analyst_render(ticker_input):
             f"{q.get('identity_reason') or 'Neznámý důvod.'} Analýza byla z bezpečnostních důvodů zastavena."
         )
         st.info(
-            "Analytik V6.28.24 nepoužije přibližně nalezenou firmu ani data z jiného titulu. "
+            "Analytik V6.28.25 nepoužije přibližně nalezenou firmu ani data z jiného titulu. "
             "Pokud se zastavení opakuje, pošli mi diagnostický výpis – nebudeme to obcházet dalším fallbackem."
         )
         return
 
-    # V6.28.24: supplement sparse Yahoo Search quote fields only from yfinance
+    # V6.28.25: supplement sparse Yahoo Search quote fields only from yfinance
     # when its info.symbol exactly matches the already-verified Yahoo ticker.
     quote_fallback = _analyst_yfinance_quote_fallback(yahoo_ticker)
     q["quote_fallback_status"] = quote_fallback.get("fallback_status", "nedostupné")
@@ -3689,7 +3721,7 @@ def analyst_render(ticker_input):
     status.success("5/5 Analytické jádro dokončeno.")
 
     st.markdown(f"## {company}")
-    st.caption(f"Ticker **{ticker}** · Yahoo **{yahoo_ticker}** · {exchange} · profil **{profile}** · načteno {datetime.now().strftime('%d.%m.%Y %H:%M')} · build **V6.28.24 / 20261011-G**")
+    st.caption(f"Ticker **{ticker}** · Yahoo **{yahoo_ticker}** · {exchange} · profil **{profile}** · načteno {datetime.now().strftime('%d.%m.%Y %H:%M')} · build **V6.28.25 / 20261012-A**")
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Cena", f"{analyst_human_number(q.get('price'), 2)} {q.get('currency', '')}")
@@ -3711,6 +3743,13 @@ def analyst_render(ticker_input):
 
     with st.expander("🧠 2. Co se ve firmě právě mění", expanded=True):
         if ai_result.get("ok"):
+            completion_status = ai_result.get("completion_status", "unknown")
+            if completion_status == "primary_ai":
+                st.caption("Původní AI odpověď prošla kontrolou formální úplnosti. To samo o sobě nepotvrzuje věcnou správnost závěrů.")
+            elif completion_status == "ai_recovery":
+                st.warning("Původní AI odpověď byla neúplná. Níže je použita zkrácená záchranná odpověď AI; věcnou správnost je stále nutné posuzovat podle důkazů.")
+            elif completion_status == "deterministic_fallback":
+                st.warning("AI nedodala úplnou odpověď ani v opakování. Níže je datový fallback vypočtený z dostupné finanční řady; nejde o plnohodnotnou AI syntézu a příčiny změn nejsou prokázány.")
             st.markdown(current)
         else:
             st.error(ai_result.get("error", "AI syntéza není dostupná."))
@@ -3803,6 +3842,22 @@ def analyst_render(ticker_input):
         st.write(f"Relevantních zpráv: {len(news) if news is not None else 0}")
         st.write(f"Evidence položek: {ai_result.get('evidence_count', '—')}")
         st.write(f"AI model: {ai_result.get('model', '—')}")
+        st.write(f"Stav dokončení AI: { {'primary_ai': 'původní odpověď formálně úplná', 'ai_recovery': 'použita záchranná AI odpověď', 'deterministic_fallback': 'použit datový fallback'}.get(ai_result.get('completion_status'), 'stav není k dispozici') }")
+        diag = ai_result.get("completion_diagnostics") or {}
+        if diag:
+            st.write(f"Primární odpověď: {diag.get('primary_chars', '—')} znaků; finish_reason={diag.get('primary_finish_reason', '—')}")
+            usage = diag.get("usage") or {}
+            st.write(f"Tokeny podle Groq: prompt={usage.get('prompt_tokens', '—')}, completion={usage.get('completion_tokens', '—')}, total={usage.get('total_tokens', '—')}")
+            if diag.get("missing_parts"):
+                st.write("Kontrola úplnosti: " + ", ".join(diag["missing_parts"]))
+            st.write(f"Záchranný postup: {diag.get('recovery_status', '—')}")
+            if diag.get("recovery_status") == "ai_recovery":
+                rec_usage = diag.get("recovery_usage") or {}
+                st.write(f"Záchranná AI odpověď: {diag.get('recovery_chars', '—')} znaků; finish_reason={diag.get('recovery_finish_reason', '—')}; completion tokeny={rec_usage.get('completion_tokens', '—')}")
+            if diag.get("recovery_error"):
+                st.caption(diag["recovery_error"])
+        elif not ai_result.get("ok"):
+            st.write("Podrobná diagnostika dokončení není dostupná, protože primární volání selhalo před vytvořením odpovědi.")
         if not ai_result.get("ok"):
             st.error(ai_result.get("error", ""))
         if exchange in ("NASDAQ", "NYSE"):
