@@ -15,6 +15,7 @@ from datetime import datetime
 st.set_page_config(page_title="Stock-Screener", page_icon="🔎", layout="wide")
 
 RUNTIME_LOG = Path("/tmp/stock_screener_runtime.json")
+ANALYST_FALLBACK_REVISION = "DF30-A · přímý datový výpočet bez parsování AI textu"
 
 @st.cache_resource(show_spinner=False)
 def get_runtime_state():
@@ -53,7 +54,7 @@ def update_runtime(status=None, stage=None, message=None, error=None, run_id=Non
 
 
 st.title("📊 Stock-Screener")
-st.caption("V6.28.29 · BUILD 20261012-E – Screener · samostatný modul Analytik je dostupný v menu vlevo")
+st.caption("V6.28.30 · BUILD 20261012-F – Screener · samostatný modul Analytik je dostupný v menu vlevo")
 
 NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 NYSE_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
@@ -1755,7 +1756,7 @@ def _analyst_yahoo_search_quote(yahoo_ticker):
 @st.cache_data(ttl=1800, show_spinner=False)
 def analyst_get_quote_data(yahoo_ticker):
     """
-    V6.28.29 COMPLETION DIAGNOSTICS + EXPLICIT AI/FALLBACK STATUS + GROQ USAGE TRACE.
+    V6.28.30 COMPLETION DIAGNOSTICS + EXPLICIT AI/FALLBACK STATUS + GROQ USAGE TRACE.
 
     A company may be accepted only when BOTH independent Yahoo layers agree
     on the exact requested Yahoo symbol:
@@ -2754,9 +2755,9 @@ def _analyst_price_evidence(price):
 def groq_connection_diagnostics(api_key, model="openai/gpt-oss-120b"):
     results = []
     base = "https://api.groq.com"
-    headers = {"Authorization": f"Bearer {api_key}", "User-Agent": "Stock-Screener/6.28.29"}
+    headers = {"Authorization": f"Bearer {api_key}", "User-Agent": "Stock-Screener/6.28.30"}
     try:
-        r = requests.get(base + "/", headers={"User-Agent": "Stock-Screener/6.28.29"}, timeout=12)
+        r = requests.get(base + "/", headers={"User-Agent": "Stock-Screener/6.28.30"}, timeout=12)
         results.append({"test": "api.groq.com – základní dostupnost", "status": r.status_code, "detail": r.text[:300]})
     except Exception as e:
         results.append({"test": "api.groq.com – základní dostupnost", "status": "ERROR", "detail": f"{type(e).__name__}: {e}"})
@@ -2989,7 +2990,7 @@ Přesně 3 konkrétní ověřitelné věci, pouze v krátkých odrážkách. Ne�
     def _groq_call(current_payload):
         return requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.28.29"},
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.28.30"},
             json=current_payload, timeout=90
         )
 
@@ -3222,7 +3223,7 @@ EVIDENCE:
     def call(payload):
         return requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.28.29"},
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.28.30"},
             json=payload, timeout=60
         )
 
@@ -3403,6 +3404,14 @@ def analyst_current_developments(company, q, annual, quarterly, news, sec, ticke
     # wastes quota and can produce a different answer from the one used by the
     # story section.
     result = ai_result if isinstance(ai_result, dict) else analyst_ai_synthesis(company, ticker, exchange, q, annual, quarterly, news, sec, price)
+    # V6.28.30 / DF30-A: when both AI responses failed validation, never parse or
+    # display any text returned by the model as section 2. Recompute directly from
+    # the current annual dataframe so model-invented values/causes cannot leak in.
+    if result.get("ok") and result.get("completion_status") == "deterministic_fallback":
+        deterministic = _analyst_deterministic_recovery(annual, quarterly, profile="Naspeedovaný", company=company, q=q)
+        deterministic_changes = _analyst_recovery_changes_text(deterministic)
+        if deterministic_changes:
+            return deterministic_changes
     if result.get("ok"):
         text = result.get("text", "")
         recovery = result.get("recovery") or {}
@@ -3699,7 +3708,7 @@ def analyst_render(ticker_input):
     # The former V6.28.x diagnostic block is intentionally removed from the
     # normal UI so it cannot interrupt the analytical workflow.
 
-    # V6.28.29: HARD IDENTITY FIREWALL. The exact Yahoo Chart symbol is the
+    # V6.28.30: HARD IDENTITY FIREWALL. The exact Yahoo Chart symbol is the
     # authoritative ticker-identity check. Yahoo Search is optional enrichment: if
     # it returns an exact quote, use its fields; if it returns nothing, do not block
     # a valid exact Chart result. Never accept an approximate Search result.
@@ -3713,12 +3722,12 @@ def analyst_render(ticker_input):
             f"{q.get('identity_reason') or 'Neznámý důvod.'} Analýza byla z bezpečnostních důvodů zastavena."
         )
         st.info(
-            "Analytik V6.28.29 nepoužije přibližně nalezenou firmu ani data z jiného titulu. "
+            "Analytik V6.28.30 nepoužije přibližně nalezenou firmu ani data z jiného titulu. "
             "Pokud se zastavení opakuje, pošli mi diagnostický výpis – nebudeme to obcházet dalším fallbackem."
         )
         return
 
-    # V6.28.29: supplement sparse Yahoo Search quote fields only from yfinance
+    # V6.28.30: supplement sparse Yahoo Search quote fields only from yfinance
     # when its info.symbol exactly matches the already-verified Yahoo ticker.
     quote_fallback = _analyst_yfinance_quote_fallback(yahoo_ticker)
     q["quote_fallback_status"] = quote_fallback.get("fallback_status", "nedostupné")
@@ -3801,7 +3810,7 @@ def analyst_render(ticker_input):
     status.success("5/5 Analytické jádro dokončeno.")
 
     st.markdown(f"## {company}")
-    st.caption(f"Ticker **{ticker}** · Yahoo **{yahoo_ticker}** · {exchange} · profil **{profile}** · načteno {datetime.now().strftime('%d.%m.%Y %H:%M')} · build **V6.28.29 / 20261012-E**")
+    st.caption(f"Ticker **{ticker}** · Yahoo **{yahoo_ticker}** · {exchange} · profil **{profile}** · načteno {datetime.now().strftime('%d.%m.%Y %H:%M')} · build **V6.28.30 / 20261012-F**")
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Cena", f"{analyst_human_number(q.get('price'), 2)} {q.get('currency', '')}")
@@ -3922,6 +3931,8 @@ def analyst_render(ticker_input):
         st.write(f"Relevantních zpráv: {len(news) if news is not None else 0}")
         st.write(f"Evidence položek: {ai_result.get('evidence_count', '—')}")
         st.write(f"AI model: {ai_result.get('model', '—')}")
+        st.write(f"Kontrola kódu fallbacku: {ANALYST_FALLBACK_REVISION}")
+        st.write("Pravidlo V6.28.30: při deterministic_fallback se sekce 2 počítá přímo z ročních dat; nepřebírá text z AI.")
         st.write(f"Stav dokončení AI: { {'primary_ai': 'původní odpověď formálně úplná', 'ai_recovery': 'použita záchranná AI odpověď', 'deterministic_fallback': 'použit datový fallback'}.get(ai_result.get('completion_status'), 'stav není k dispozici') }")
         diag = ai_result.get("completion_diagnostics") or {}
         if diag:
