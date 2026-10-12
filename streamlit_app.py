@@ -15,7 +15,7 @@ from datetime import datetime
 st.set_page_config(page_title="Stock-Screener", page_icon="🔎", layout="wide")
 
 RUNTIME_LOG = Path("/tmp/stock_screener_runtime.json")
-ANALYST_FALLBACK_REVISION = "DF34-A · stručná syntéza, TPM-aware dávkování a přímý datový fallback"
+ANALYST_FALLBACK_REVISION = "DF35-A · stručná syntéza, TPM-aware dávkování a přímý datový fallback"
 
 @st.cache_resource(show_spinner=False)
 def get_runtime_state():
@@ -54,7 +54,7 @@ def update_runtime(status=None, stage=None, message=None, error=None, run_id=Non
 
 
 st.title("📊 Stock-Screener")
-st.caption("V6.28.34 · BUILD 20261013-A – Screener · samostatný modul Analytik je dostupný v menu vlevo")
+st.caption("V6.28.35 · BUILD 20261013-B – Screener · samostatný modul Analytik je dostupný v menu vlevo")
 
 NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 NYSE_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
@@ -1756,7 +1756,7 @@ def _analyst_yahoo_search_quote(yahoo_ticker):
 @st.cache_data(ttl=1800, show_spinner=False)
 def analyst_get_quote_data(yahoo_ticker):
     """
-    V6.28.34 DETERMINISTIC FINANCIAL SECTION + AI INTERPRETATION SEPARATION + COMPLETION DIAGNOSTICS.
+    V6.28.35 DETERMINISTIC FINANCIAL SECTION + AI INTERPRETATION SEPARATION + COMPLETION DIAGNOSTICS.
 
     A company may be accepted only when BOTH independent Yahoo layers agree
     on the exact requested Yahoo symbol:
@@ -2755,9 +2755,9 @@ def _analyst_price_evidence(price):
 def groq_connection_diagnostics(api_key, model="openai/gpt-oss-120b"):
     results = []
     base = "https://api.groq.com"
-    headers = {"Authorization": f"Bearer {api_key}", "User-Agent": "Stock-Screener/6.28.34"}
+    headers = {"Authorization": f"Bearer {api_key}", "User-Agent": "Stock-Screener/6.28.35"}
     try:
-        r = requests.get(base + "/", headers={"User-Agent": "Stock-Screener/6.28.34"}, timeout=12)
+        r = requests.get(base + "/", headers={"User-Agent": "Stock-Screener/6.28.35"}, timeout=12)
         results.append({"test": "api.groq.com – základní dostupnost", "status": r.status_code, "detail": r.text[:300]})
     except Exception as e:
         results.append({"test": "api.groq.com – základní dostupnost", "status": "ERROR", "detail": f"{type(e).__name__}: {e}"})
@@ -2836,9 +2836,9 @@ def analyst_ai_synthesis(company, ticker, exchange, q, annual, quarterly, news, 
         if str(item.get("source", "")).lower() not in {"yahoo finance", "yahoo finance (direct)"}
     ]
     story_items = profile_items + non_financial_items[:5]
-    story_evidence = _analyst_evidence_text(story_items, max_chars=2100)
-    fin_short = (fin or "Roční finanční řada není k dispozici.")[:1050]
-    controls_short = (controls or "Automatické kontroly nejsou k dispozici.")[:420]
+    story_evidence = _analyst_evidence_text(story_items, max_chars=1500)
+    fin_short = (fin or "Roční finanční řada není k dispozici.")[:700]
+    controls_short = (controls or "Automatické kontroly nejsou k dispozici.")[:250]
 
     allowed_stories = (
         "Kvalitní compounder; Kvalita za rozumnou cenu; Růst za rozumnou cenu; "
@@ -2856,29 +2856,15 @@ CÍL: Neopakuj finanční tabulky. Vytvoř stručnou investiční tezi: co je na
 
 PRAVIDLA: Používej jen dodané podklady. Příčinu změny označ za fakt jen s přímou oporou [E#]; jinak ji nazvi hypotézou nebo napiš, že ji neznáme. Neodvozuj podíl cloudu/SaaS/BTP, úspory, cenovou sílu ani produktový mix z marží nebo cash flow. FY srovnávej s FY; kvartál YoY jen se stejným kvartálem minulého FY. Nepoužívej už známá období jako úkol k dalšímu ověření. Ocenění posuzuj odděleně od kvality podniku. „Za rozumnou cenu“ vyžaduje argument, proč násobky odpovídají očekávanému růstu; nižší forward P/E samo nestačí.
 
-VÝSTUP: nejvýše 180 slov; stručně, bez úvodu a bez opakování. Zachovej přesně nadpisy a pořadí. Tři ověřovací kroky jsou povinné.
+VÝSTUP: nejvýše 105 slov CELKEM. Každé pole jen jedna krátká věta. Bez úvodu, bez tabulek, bez opakování číselných řad. Vyplň všechna pole a skonči po FOLLOW.
 STORY: [vyber přesně jeden název z: {allowed_stories}]
-PROFILE: [jedna věta o obchodním modelu, bez neověřených segmentových podílů]
-THESIS: [jedna věta: proč je příběh zajímavý, případně s odkazem [E#]]
-THREAT: [největší konkrétní riziko]
-COUNTER: [nejsilnější protiargument proti hlavní tezi]
-CHANGE: [hlavní aktuální změna; neodvozuj příčinu bez důkazu]
-## Pracovní investiční příběh
-**Hlavní pracovní příběh:** [název]. [Důvod a hlavní nejistota v jedné až dvou větách.]
-## Co se ve firmě právě mění
-- **Co víme:** [konkrétní důkaz s [E#], je-li k dispozici]
-- **Ekonomický dopad:** [stručně]
-- **Inference:** [pracovní výklad, ne vydávaný za fakt]
-- **Neznáme:** [hlavní chybějící důkaz]
-- **Co ověřit:** [konkrétní chybějící vysvětlení]
-## Vztah k finančním výsledkům
-[Jedna věta s přesným obdobím; pokud finanční data neprokazují příčinu, řekni to.]
-## Co si navzájem potvrzují nebo odporují zdroje
-[Jedna věta; nevymýšlej konflikt, který zdroje nedokládají.]
-## Co bych teď sledoval
-1. [ověřovací krok]
-2. [ověřovací krok]
-3. [ověřovací krok]
+PROFILE: [jedna krátká věta o obchodním modelu, bez neověřených podílů]
+THESIS: [jedna věta s hlavním důvodem, proč je firma zajímavá; odkaz [E#] jen pokud sedí]
+THREAT: [jedna věta o největším doloženém riziku]
+COUNTER: [jedna věta s nejsilnějším protiargumentem]
+CHANGE: [jedna věta o aktuální změně; příčinu neodvozuj bez důkazu]
+FOLLOW: [kontrola 1] | [kontrola 2] | [kontrola 3]
+Nevypisuj žádné další nadpisy ani vysvětlení. Nepřepisuj finanční kontext; aplikace ho zobrazí zvlášť.
 
 FINANČNÍ KONTEXT (jen pro orientaci; neopsat celý):
 {financial}
@@ -2901,7 +2887,7 @@ CENA: {analyst_human_number(q.get('price'), 2)} {clean_text(q.get('currency')) o
     def call(payload):
         return requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.28.34"},
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.28.35"},
             json=payload, timeout=90,
         )
 
@@ -2953,9 +2939,9 @@ CENA: {analyst_human_number(q.get('price'), 2)} {clean_text(q.get('currency')) o
     attempt_used = "short_primary"
     wait_seconds = 0.0
     prompts = [
-        (make_prompt(story_evidence, fin_short, controls_short), 850, "short_primary"),
-        (make_prompt(_analyst_evidence_text(profile_items + non_financial_items[:2], max_chars=900), fin_short[:650], controls_short[:250]), 600, "compact_retry"),
-        (make_prompt(_analyst_evidence_text(profile_items, max_chars=420), fin_short[:420], controls_short[:150]), 450, "minimal_retry"),
+        (make_prompt(story_evidence, fin_short, controls_short), 650, "short_primary"),
+        (make_prompt(_analyst_evidence_text(profile_items + non_financial_items[:2], max_chars=700), fin_short[:400], controls_short[:150]), 500, "compact_retry"),
+        (make_prompt(_analyst_evidence_text(profile_items, max_chars=300), fin_short[:250], controls_short[:100]), 400, "minimal_retry"),
     ]
     try:
         for index, (prompt_text, token_cap, label) in enumerate(prompts):
@@ -2986,8 +2972,8 @@ CENA: {analyst_human_number(q.get('price'), 2)} {clean_text(q.get('currency')) o
             # a half-finished thesis. The next prompt is shorter and has a lower cap.
             has_story = bool(re.search(r"(?im)^\s*STORY\s*:\s*[^\n]+", current_text))
             has_profile = bool(re.search(r"(?im)^\s*PROFILE\s*:\s*[^\n]+", current_text))
-            has_change = bool(re.search(r"(?im)^\s*##\s*Co se ve firmě právě mění\s*$", current_text))
-            has_follow = bool(re.search(r"(?im)^\s*##\s*Co bych teď sledoval\s*$", current_text))
+            has_change = bool(re.search(r"(?im)^\s*CHANGE\s*:\s*.+$", current_text))
+            has_follow = bool(re.search(r"(?im)^\s*FOLLOW\s*:\s*.+$", current_text))
             finish_bad = current_finish.lower() in {"length", "max_tokens"}
             tail = next((line.strip() for line in reversed(current_text.splitlines()) if line.strip()), "")
             incomplete_tail = bool(tail and not re.search(r"[.!?…:]$|\]$|\)$|\*\*$", tail))
@@ -3001,8 +2987,8 @@ CENA: {analyst_human_number(q.get('price'), 2)} {clean_text(q.get('currency')) o
         usage = current_data.get("usage", {}) or {}
         has_story = bool(re.search(r"(?im)^\s*STORY\s*:\s*[^\n]+", current_text))
         has_profile = bool(re.search(r"(?im)^\s*PROFILE\s*:\s*[^\n]+", current_text))
-        has_change = bool(re.search(r"(?im)^\s*##\s*Co se ve firmě právě mění\s*$", current_text))
-        has_follow = bool(re.search(r"(?im)^\s*##\s*Co bych teď sledoval\s*$", current_text))
+        has_change = bool(re.search(r"(?im)^\s*CHANGE\s*:\s*.+$", current_text))
+        has_follow = bool(re.search(r"(?im)^\s*FOLLOW\s*:\s*.+$", current_text))
         finish_bad = current_finish.lower() in {"length", "max_tokens"}
         tail = next((line.strip() for line in reversed(current_text.splitlines()) if line.strip()), "")
         incomplete_tail = bool(tail and not re.search(r"[.!?…:]$|\]$|\)$|\*\*$", tail))
@@ -3137,7 +3123,7 @@ EVIDENCE:
     def call(payload):
         return requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.28.34"},
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.28.35"},
             json=payload, timeout=60
         )
 
@@ -3380,16 +3366,64 @@ def analyst_story_hypothesis(q, annual, quarterly, news, sec, ai_result=None):
 
     profile_m = re.search(r"(?im)^\s*PROFILE\s*:\s*(.+)$", source)
     profile_text = profile_m.group(1).strip() if profile_m else ""
-    changes = _analyst_recovery_changes_text(deterministic)
+    # Keep section 6 distinct from section 2: never paste the full deterministic
+    # financial series a second time. Use compact arithmetic from annual rows and
+    # only consume AI's short thesis/risk fields when present.
+    rows = []
+    if annual is not None and not annual.empty:
+        for _, row in annual.iterrows():
+            try:
+                rev = safe_float(row.get("Revenue"))
+                op = safe_float(row.get("Operating Income"))
+                fcf = safe_float(row.get("FCF"))
+                period = clean_text(row.get("Období")) or "FY"
+                opm = (float(op) / float(rev) * 100) if not pd.isna(op) and not pd.isna(rev) and float(rev) else None
+                rows.append({"period": period, "revenue": None if pd.isna(rev) else float(rev), "opm": opm, "fcf": None if pd.isna(fcf) else float(fcf)})
+            except Exception:
+                continue
+    valid_rows = [r for r in rows if r["revenue"] is not None and r["opm"] is not None]
+    rationale = []
+    if len(valid_rows) >= 2:
+        first, last = valid_rows[0], valid_rows[-1]
+        revenue_change = (last["revenue"] / first["revenue"] - 1) * 100 if first["revenue"] else None
+        margin_change = last["opm"] - first["opm"]
+        if revenue_change is not None:
+            rev_txt = f"{revenue_change:.1f}".replace(".", ",")
+            margin_txt = f"{margin_change:+.1f}".replace(".", ",")
+            rationale.append(f"V dostupné roční řadě tržby vzrostly o {rev_txt} % a provozní marže se změnila o {margin_txt} procentního bodu ({first['period']} až {last['period']}).")
+        fcf_rows = [r for r in rows if r["fcf"] is not None]
+        if len(fcf_rows) >= 3:
+            fcf_vals = [r["fcf"] for r in fcf_rows]
+            if any(fcf_vals[i] < fcf_vals[i-1] for i in range(1, len(fcf_vals))):
+                rationale.append("FCF v mezilehlých letech kolísal, takže zlepšení nelze popsat jako plynulý trend.")
+    pe = safe_float(q.get("pe")) if q else float("nan")
+    fpe = safe_float(q.get("forward_pe")) if q else float("nan")
+    if not pd.isna(pe):
+        if not pd.isna(fpe) and fpe < pe:
+            pe_txt = f"{pe:.1f}".replace(".", ",")
+            fpe_txt = f"{fpe:.1f}".replace(".", ",")
+            rationale.append(f"Při P/E {pe_txt}× a forward P/E {fpe_txt}× cena předpokládá růst zisku; výhodnost ocenění tím sama prokázána není.")
+        else:
+            pe_txt = f"{pe:.1f}".replace(".", ",")
+            rationale.append(f"P/E {pe_txt}× samo o sobě neprokazuje, že je akcie levná.")
+    def field(label):
+        m = re.search(rf"(?im)^\s*{label}\s*:\s*(.+)$", source)
+        return m.group(1).strip() if m else ""
+    thesis, threat, counter = field("THESIS"), field("THREAT"), field("COUNTER")
     lines = [
         f"**Pracovní příběh:** {title}",
-        "*Jde o pracovní hypotézu AI, nikoli automaticky potvrzený investiční závěr.*"
+        "*Jde o pracovní hypotézu, nikoli investiční doporučení.*"
     ]
     if profile_text:
         lines.append("**Obchodní model:** " + profile_text)
-    if changes:
-        lines.append(changes)
-    lines.append("**Hranice závěru:** Finanční řady ukazují, co se změnilo; samy o sobě nedokazují příčinu, konkurenční výhodu ani trvalost změny.")
+    if thesis:
+        lines.append("**Teze AI:** " + thesis)
+    lines.extend(rationale)
+    if threat:
+        lines.append("**Hlavní riziko:** " + threat)
+    if counter:
+        lines.append("**Protiargument:** " + counter)
+    lines.append("**Hranice závěru:** Roční čísla dokládají finanční vývoj, nikoli sama o sobě jeho příčinu ani trvalost.")
     return title, "\n\n".join(lines)
 
 
@@ -3607,7 +3641,7 @@ def analyst_render(ticker_input):
     # The former V6.28.x diagnostic block is intentionally removed from the
     # normal UI so it cannot interrupt the analytical workflow.
 
-    # V6.28.34: HARD IDENTITY FIREWALL. The exact Yahoo Chart symbol is the
+    # V6.28.35: HARD IDENTITY FIREWALL. The exact Yahoo Chart symbol is the
     # authoritative ticker-identity check. Yahoo Search is optional enrichment: if
     # it returns an exact quote, use its fields; if it returns nothing, do not block
     # a valid exact Chart result. Never accept an approximate Search result.
@@ -3621,12 +3655,12 @@ def analyst_render(ticker_input):
             f"{q.get('identity_reason') or 'Neznámý důvod.'} Analýza byla z bezpečnostních důvodů zastavena."
         )
         st.info(
-            "Analytik V6.28.34 nepoužije přibližně nalezenou firmu ani data z jiného titulu. "
+            "Analytik V6.28.35 nepoužije přibližně nalezenou firmu ani data z jiného titulu. "
             "Pokud se zastavení opakuje, pošli mi diagnostický výpis – nebudeme to obcházet dalším fallbackem."
         )
         return
 
-    # V6.28.34: supplement sparse Yahoo Search quote fields only from yfinance
+    # V6.28.35: supplement sparse Yahoo Search quote fields only from yfinance
     # when its info.symbol exactly matches the already-verified Yahoo ticker.
     quote_fallback = _analyst_yfinance_quote_fallback(yahoo_ticker)
     q["quote_fallback_status"] = quote_fallback.get("fallback_status", "nedostupné")
@@ -3709,7 +3743,7 @@ def analyst_render(ticker_input):
     status.success("5/5 Analytické jádro dokončeno.")
 
     st.markdown(f"## {company}")
-    st.caption(f"Ticker **{ticker}** · Yahoo **{yahoo_ticker}** · {exchange} · profil **{profile}** · načteno {datetime.now().strftime('%d.%m.%Y %H:%M')} · build **V6.28.34 / 20261013-A**")
+    st.caption(f"Ticker **{ticker}** · Yahoo **{yahoo_ticker}** · {exchange} · profil **{profile}** · načteno {datetime.now().strftime('%d.%m.%Y %H:%M')} · build **V6.28.35 / 20261013-B**")
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Cena", f"{analyst_human_number(q.get('price'), 2)} {q.get('currency', '')}")
@@ -3731,7 +3765,7 @@ def analyst_render(ticker_input):
 
     with st.expander("🧠 2. Co se ve firmě právě mění", expanded=True):
         completion_status = ai_result.get("completion_status", "unknown") if isinstance(ai_result, dict) else "unknown"
-        st.caption("V6.28.34: finanční čísla a jejich časové řady v této sekci počítá přímo aplikace. AI může navrhnout pracovní příběh, ale její text nenahrazuje finanční data ani nedokazuje příčiny změn.")
+        st.caption("V6.28.35: finanční čísla a jejich časové řady v této sekci počítá přímo aplikace. AI může navrhnout pracovní příběh, ale její text nenahrazuje finanční data ani nedokazuje příčiny změn.")
         if isinstance(ai_result, dict) and not ai_result.get("ok"):
             st.warning("AI syntéza není dostupná. Finanční přehled níže přesto zůstává k dispozici, protože se počítá přímo z načtených ročních dat.")
         elif completion_status == "ai_recovery":
@@ -3829,7 +3863,7 @@ def analyst_render(ticker_input):
         st.write(f"Evidence položek: {ai_result.get('evidence_count', '—')}")
         st.write(f"AI model: {ai_result.get('model', '—')}")
         st.write(f"Kontrola kódu fallbacku: {ANALYST_FALLBACK_REVISION}")
-        st.write("Pravidlo V6.28.34 / DF34-A: sekce 2 i finanční zdůvodnění pracovního příběhu se vždy počítají z ročních dat; nepřebírají finanční tvrzení z AI.")
+        st.write("Pravidlo V6.28.35 / DF35-A: sekce 2 i finanční zdůvodnění pracovního příběhu se vždy počítají z ročních dat; nepřebírají finanční tvrzení z AI.")
         st.write(f"Stav dokončení AI: { {'primary_ai': 'původní odpověď formálně úplná', 'ai_recovery': 'použita záchranná AI odpověď', 'deterministic_fallback': 'použit datový fallback'}.get(ai_result.get('completion_status'), 'stav není k dispozici') }")
         diag = ai_result.get("completion_diagnostics") or {}
         if diag:
