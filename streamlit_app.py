@@ -15,7 +15,7 @@ from datetime import datetime
 st.set_page_config(page_title="Stock-Screener", page_icon="🔎", layout="wide")
 
 RUNTIME_LOG = Path("/tmp/stock_screener_runtime.json")
-ANALYST_FALLBACK_REVISION = "DF33-A · přímý datový výpočet bez parsování AI textu; oddělení datového výpočtu od AI interpretace"
+ANALYST_FALLBACK_REVISION = "DF34-A · stručná syntéza, TPM-aware dávkování a přímý datový fallback"
 
 @st.cache_resource(show_spinner=False)
 def get_runtime_state():
@@ -54,7 +54,7 @@ def update_runtime(status=None, stage=None, message=None, error=None, run_id=Non
 
 
 st.title("📊 Stock-Screener")
-st.caption("V6.28.33 · BUILD 20261012-I – Screener · samostatný modul Analytik je dostupný v menu vlevo")
+st.caption("V6.28.34 · BUILD 20261013-A – Screener · samostatný modul Analytik je dostupný v menu vlevo")
 
 NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 NYSE_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
@@ -1756,7 +1756,7 @@ def _analyst_yahoo_search_quote(yahoo_ticker):
 @st.cache_data(ttl=1800, show_spinner=False)
 def analyst_get_quote_data(yahoo_ticker):
     """
-    V6.28.33 DETERMINISTIC FINANCIAL SECTION + AI INTERPRETATION SEPARATION + COMPLETION DIAGNOSTICS.
+    V6.28.34 DETERMINISTIC FINANCIAL SECTION + AI INTERPRETATION SEPARATION + COMPLETION DIAGNOSTICS.
 
     A company may be accepted only when BOTH independent Yahoo layers agree
     on the exact requested Yahoo symbol:
@@ -2755,9 +2755,9 @@ def _analyst_price_evidence(price):
 def groq_connection_diagnostics(api_key, model="openai/gpt-oss-120b"):
     results = []
     base = "https://api.groq.com"
-    headers = {"Authorization": f"Bearer {api_key}", "User-Agent": "Stock-Screener/6.28.33"}
+    headers = {"Authorization": f"Bearer {api_key}", "User-Agent": "Stock-Screener/6.28.34"}
     try:
-        r = requests.get(base + "/", headers={"User-Agent": "Stock-Screener/6.28.33"}, timeout=12)
+        r = requests.get(base + "/", headers={"User-Agent": "Stock-Screener/6.28.34"}, timeout=12)
         results.append({"test": "api.groq.com – základní dostupnost", "status": r.status_code, "detail": r.text[:300]})
     except Exception as e:
         results.append({"test": "api.groq.com – základní dostupnost", "status": "ERROR", "detail": f"{type(e).__name__}: {e}"})
@@ -2818,338 +2818,252 @@ def analyst_profile_guidance(profile):
 
 @st.cache_data(ttl=900, show_spinner=False)
 def analyst_ai_synthesis(company, ticker, exchange, q, annual, quarterly, news, sec, price=None, profile="Seriózní"):
+    """Short, evidence-bounded synthesis with TPM-aware retries and deterministic fallback."""
     try:
         api_key = st.secrets["GROQ_API_KEY"]
     except Exception:
         return {"ok": False, "error": "Chybí GROQ_API_KEY ve Streamlit Secrets.", "text": "", "model": "openai/gpt-oss-120b"}
 
     pack = analyst_build_evidence_pack(company, ticker, exchange, q, annual, quarterly, news, sec)
-    evidence = _analyst_evidence_text(pack, max_chars=4700)
     fin = _analyst_financial_change_summary(annual, quarterly)
-    price_ctx = _analyst_price_evidence(price)
-
-    allowed_stories = [
-        "Kvalitní compounder", "Kvalita za rozumnou cenu", "Růst za rozumnou cenu",
-        "Value / levná firma", "Provozní turnaround", "Cyklické zotavení",
-        "Aktivové / finanční zotavení", "Realitní hodnota", "Provozní zlepšení",
-        "Růstové zotavení", "Vysoký růst / dražší příběh", "Value trap – varování",
-        "Nejasný / smíšený příběh"
+    controls = analyst_interpretation_controls(annual, quarterly, q)
+    # Keep identity/business evidence and a few recent non-financial sources; the
+    # financial table is independently rendered by the application and need not be
+    # repeated in the model prompt.
+    profile_items = pack[:6]
+    non_financial_items = [
+        item for item in pack[6:]
+        if str(item.get("source", "")).lower() not in {"yahoo finance", "yahoo finance (direct)"}
     ]
+    story_items = profile_items + non_financial_items[:5]
+    story_evidence = _analyst_evidence_text(story_items, max_chars=2100)
+    fin_short = (fin or "Roční finanční řada není k dispozici.")[:1050]
+    controls_short = (controls or "Automatické kontroly nejsou k dispozici.")[:420]
 
-    profile_guidance = analyst_profile_guidance(profile)
-    prompt = f"""Jsi seniorní analytik veřejně obchodované společnosti {company} ({ticker}, {exchange}).
+    allowed_stories = (
+        "Kvalitní compounder; Kvalita za rozumnou cenu; Růst za rozumnou cenu; "
+        "Value / levná firma; Provozní turnaround; Cyklické zotavení; "
+        "Aktivové / finanční zotavení; Realitní hodnota; Provozní zlepšení; "
+        "Růstové zotavení; Vysoký růst / dražší příběh; Value trap – varování; "
+        "Nejasný / smíšený příběh"
+    )
+    stance = "Naspeedovaný: formuluj jasnou dominantní tezi a nejzajímavější alternativu, ale označ nedoložené příčiny jako hypotézu." if profile == "Naspeedovaný" else "Seriózní: formuluj dominantní tezi, pokud ji podklady podporují; přesně odděluj fakta, interpretaci a hypotézy."
 
-{profile_guidance}
+    def make_prompt(evidence, financial, checks):
+        return f"""Jsi nezávislý investiční analytik společnosti {company} ({ticker}, {exchange}). {stance}
 
-HLAVNÍ ÚKOL
-Z dostupné evidence vytvoř použitelný pracovní investiční obraz firmy. Nejde jen o výčet zpráv. Hledej kauzální řetězec:
-zdroj → událost → změna ekonomiky firmy → dopad na výsledky/cash flow/riziko/ocenění → co to znamená pro pracovní příběh.
+CÍL: Neopakuj finanční tabulky. Vytvoř stručnou investiční tezi: co je na firmě zajímavé, co se právě mění, jak to může ovlivnit ekonomiku firmy a co tezi ohrožuje. Žádné Buy/Hold/Sell ani cílová cena.
 
-DŮLEŽITÉ: KONTROLA OBDOBÍ A CHYBĚJÍCÍCH DAT
-- TTM smíš označit jako dostupné pouze tehdy, když je v důkazním balíčku výslovně uveden validovaný součet čtyř úplných po sobě jdoucích čtvrtletí. Samotná existence alespoň čtyř řádků nestačí.
-- Nikdy nepoužívej hodnotu TTM z obecného firemního profilu jako náhradu chybějícího FY nebo kvartálu, pokud není její období a zdroj jednoznačně doložen.
-- Chybějící období označ konkrétním datem a chybějícími položkami. Neodvozuj růst marže, FCF ani TTM z neúplných dat.
-- Roční údaje porovnávej s ročními a čtvrtletní s čtvrtletními. Neoznačuj jedno čtvrtletí za růst či pokles celoročního FCF.
-- Pro meziroční srovnání čtvrtletí používej stejné fiskální čtvrtletí předchozího roku. Mezikvartální srovnání výslovně označ jako QoQ a upozorni na možnou sezónnost.
-- Pokud meziroční hodnoty mezi začátkem a koncem řady výrazně kolísají, nepopisuj jen změnu prvního a posledního roku jako souvislý trend. Stručně popiš cestu a významné obraty. Nepoužívej slova „stabilní“, „souvisle rostoucí“ ani „zvyšující se“ pro metriku, která v dostupné řadě výrazně kolísá.
-- U marží ověř, že čitatel i jmenovatel pocházejí ze stejného období a stejného typu výkazu. Procentní body marže nejsou procentní růst.
-- Čistá marže = čistý zisk / tržby; provozní marže = provozní zisk / tržby. Nikdy nepiš „čistá a provozní marže“ jako jeden společný ukazatel. Pokud jsou dostupné obě řady, popiš je odděleně a všimni si, zda se vyvíjejí stejně.
-- Návrhy FOLLOW/ověření musí respektovat to, co je již v tabulkách. Než požádáš o historické FY nebo kvartál, nejprve využij hodnoty, které už jsou dostupné. Žádej o chybějící vysvětlení (např. rozpad jednorázových položek), ne o opětovné získání samotného období. Nepiš „sledovat Q3–Q4 FY2025“, pokud jsou tato období již v datech.
-- U každého číselného tvrzení uveď konkrétní období a jeho typ (FY, QoQ nebo YoY). Nikdy nepoužívej „ročně“, „meziročně“ nebo „kontinuální růst“, pokud výpočet skutečně neporovnává odpovídající roční období nebo stejné fiskální čtvrtletí mezi dvěma FY. U po sobě jdoucích kvartálů napiš „QoQ“ a přesná období; neoznačuj to za YoY.
-- Pokud uvádíš součet více čtvrtletí, napiš jednotlivé hodnoty i součet. Nezaměňuj poslední jednotlivý kvartál za součet Q1–Q2 ani kvartální FCF za roční FCF.
-- Pokud poslední FY nemá klíčové finanční údaje a TTM není validní, musí to být výslovně uvedeno mezi hlavními omezeními. Příznivé kvartální hodnoty mohou být podpůrným signálem, nikoli náhradou chybějícího FY.
-- „Kvalitní compounder“ vyžaduje evidenci dlouhodobě udržitelného růstu a kvality ekonomiky podniku, ne pouze příznivý FCF v několika čtvrtletích. Pokud jsou tržby/zisk v dostupných celých FY převážně stagnující či kolísavé a poslední FY/TTM chybí, nepředkládej compounder jako silně potvrzený závěr; zvol přesnější pracovní příběh nebo jasně označ nízkou jistotu.
-- Sekce „Co má smysl dále ověřit“ je povinná: uveď 3 konkrétní ověřovací kroky navázané na největší nejistoty této firmy. Nikdy nepiš, že AI tuto sekci neposkytla.
+PRAVIDLA: Používej jen dodané podklady. Příčinu změny označ za fakt jen s přímou oporou [E#]; jinak ji nazvi hypotézou nebo napiš, že ji neznáme. Neodvozuj podíl cloudu/SaaS/BTP, úspory, cenovou sílu ani produktový mix z marží nebo cash flow. FY srovnávej s FY; kvartál YoY jen se stejným kvartálem minulého FY. Nepoužívej už známá období jako úkol k dalšímu ověření. Ocenění posuzuj odděleně od kvality podniku. „Za rozumnou cenu“ vyžaduje argument, proč násobky odpovídají očekávanému růstu; nižší forward P/E samo nestačí.
 
-DŮLEŽITÉ: ANALYTICKÁ ODVAHA
-- Nemusíš být neutrální jen proto, že existují protichůdné signály. Pokud evidence jasně podporuje určitou interpretaci, řekni ji přímo.
-- „Nejasný / smíšený příběh“ použij pouze tehdy, když skutečně nelze rozumně určit dominantní ekonomický obraz firmy.
-- Přítomnost jednoho nebo dvou negativních faktorů sama o sobě NEZNAMENÁ Nejasný příběh.
-- Pokud jsou současně silné pozitivní i negativní signály, urč dominantní základní příběh a popiš, co jej právě mění nebo ohrožuje.
-- Odděluj tři věci: (1) základní charakter podniku, (2) aktuální změnu, (3) ocenění. Jedna negativní zpráva nemá automaticky přepsat základní charakter firmy.
-- „Inference:“ používej pro vlastní analytický závěr. Nemá být omluvou ani opakováním faktů.
-- Opatrnost používej hlavně tam, kde tvrdíš konkrétní kauzalitu, kterou evidence přímo nedokládá. Např. můžeš říct „pravděpodobně zvyšuje tlak na očekávání růstu“, ale ne tvrdit „způsobilo pokles akcie“, pokud to evidence nedokládá.
-- Když je ekonomický význam dostatečně zřejmý z čísel a firemních informací, formuluj závěr jasně.
-- Posuzuj také tři podpůrné dimenze pracovního příběhu: **konkurenční výhoda/moat, management a odvětví**.
-- U moat uváděj jen skutečně doložené mechanismy (např. switching costs, síťový efekt, nákladová výhoda, rozsah, regulace, značka, IP, data, distribuce, zákaznické vazby). Pokud evidence nestačí, napiš **Neznáme:**.
-- U managementu hledej pouze doložené signály: plnění/slib vs. skutečnost, změny guidance, konzistence komunikace, přiznání chyb, pobídky, vlastnictví akcií, SBC, insider aktivita nebo personální změny. Nepřisuzuj managementu motivy bez evidence.
-- U odvětví odděluj firemně specifické změny od změn celého sektoru. Pokud zdroj dokládá pouze sektorový trend, neprezentuj jej jako specifickou výhodu či problém firmy.
-- Sílu pracovního příběhu určuj nejen podle krátkodobého FCF a marží, ale také podle toho, zda dlouhodobou ekonomiku firmy podporují konkurenční výhoda, kvalita kapitálu a udržitelnost ziskovosti. Pokud tyto informace chybí, nesnižuj příběh automaticky na „Nejasný“, ale jasně označ, co zatím není prokázáno.
-
-PŘÍSNÁ KONTROLA KAUZALITY A SEGMENTOVÝCH TVRZENÍ
-- Samotný růst provozní marže, FCF nebo pokles dluhu NEDOKAZUJE, že jej způsobil cloud, SaaS/BTP, změna produktového mixu, úspory, cenová síla nebo vyšší efektivita.
-- Pokud evidence neobsahuje přímý údaj o segmentových tržbách/maržích nebo výslovné vysvětlení vedení, nesmíš tvrdit, že daný segment změnu způsobil, ani mu přisuzovat konkrétní podíl na tržbách.
-- Nedopočítávej ani neodhaduj podíl cloudových tržeb z provozní marže, FCF nebo dluhu. Bez přímého zdroje napiš, že podíl není z této evidence zjistitelný.
-- „Pravděpodobně způsobeno“ vyžaduje konkrétní přímý důkaz. Jinak uveď maximálně „možné vysvětlení k ověření“ a nabídni nejvýše dvě alternativy, aniž bys mezi nimi bez důkazů vybíral.
-- Korelace mezi marží, FCF a dluhem není důkaz příčinné souvislosti. Popiš je jako souběžné změny, pokud zdroj nepotvrzuje mechanismus.
-- Pokud tvrzení o příčině nemá konkrétní [E#], musí být výslovně označeno jako neověřená hypotéza; čísla o segmentech bez [E#] vůbec neuváděj.
-
-PŘÍSNÁ EVIDENČNÍ PRAVIDLA
-- Používej pouze níže uvedenou evidenci. Nevymýšlej čísla, události, výroky, zdroje ani odkazy.
-- Pro finanční čísla mají přednost tabulky „FINANČNÍ KONTEXT“ a záznamy „Yahoo Finance (direct)“ před čísly v novinových titulcích, profilech nebo obecných komentářích. Pokud se čísla rozcházejí, uveď konflikt a nevytvářej vlastní kompromisní číslo.
-- Neuváděj procentní změnu QoQ, pokud zřetelně neidentifikuješ hodnotu aktuálního i bezprostředně předchozího čtvrtletí a obě hodnoty neodpovídají dodané řadě. Pokud si nejsi jistý, změnu nepočítej.
-- Faktická tvrzení označ [E#].
-- Logickou interpretaci označ **Inference:**.
-- Chybějící zásadní informaci označ **Neznáme:**.
-- Pokud zdroje odporují, ukaž konflikt; nevyrob smíření bez opory.
-- Nikdy nepřisuzuj růst/pokles konkrétnímu segmentu bez přímé evidence.
-- Nepředpokládej, že fiskální rok končí 31.12. Respektuj označení období a skutečná data konce FY.
-- TTM jsou poslední 4 dostupná čtvrtletí, nikoli automaticky kalendářní rok.
-- Nezaměňuj procentní změnu za absolutní hodnotu.
-- Jednotlivá čtvrtletí FCF jsou sezónní a nesmějí být prezentována jako „růst FCF“ pouze na základě mezikvartálního procenta. Pro trend FCF používej především celé FY nebo validované TTM; pokud porovnáváš dvě čtvrtletí, přednostně srovnej stejné fiskální čtvrtletí meziročně a jasně uveď, co přesně srovnáváš.
-- FCF je ovlivněn jak provozním cash flow, tak kapitálovými výdaji. Pokles capex sám o sobě nedokazuje vyšší provozní efektivitu, lepší produktový mix ani trvalý růst. Rozliš změnu OCF, capex a FCF.
-- Pokud finanční kontext obsahuje odvozenou řadu provozní marže (provozní zisk / tržby), skutečně ji použij při výběru hlavní změny a porovnej ji s čistou marží. Když provozní marže roste, ale čistá marže kolísá, nesmíš příběh redukovat jen na volatilitu čisté marže.
-- Nikdy neoznačuj jednotlivé kvartální FCF za „vysoké“ nebo „silné“ jen porovnáním s ročním FCF. Kvartální hodnoty porovnávej se stejným kvartálem předchozího FY; jinak popiš pouze absolutní hodnotu a její omezení.
-- Neoznačuj dluh jako „rostoucí“, pokud dostupná srovnatelná řada to nepotvrzuje. Uveď období a směr posledních hodnot; pokud řada kolísá, řekni „kolísavý“. Dluh, čistý dluh, krátkodobý dluh a Debt/Equity nejsou zaměnitelné pojmy.
-- Yahoo Debt/Equity může používat širší definici závazků než historická položka „Debt“. Nepřepočítávej jej z tabulky Debt / Equity ani neoznačuj za chybný, pokud není doloženo, že obě položky mají stejný rozsah a datum. Případný nesoulad označ jako rozdíl definic/zdrojů k ověření.
-- Nepřisuzuj změnu FCF, marže či tržeb konkrétní příčině (cloud, servisní mix, cenová síla, efektivita, akvizice, úrokové náklady) bez přímé opory v evidenci. Bez ní napiš „Inference“ jako hypotézu nebo „Neznáme“.
-- Před závěrem zkontroluj vnitřní konzistenci: směr dluhu musí odpovídat číslům; čtvrtletí a FY se nesmějí míchat; STORY v rozhodovacím jádru musí být totožný s názvem příběhu v podrobné části; pokud jsou data kolísavá, neprezentuj je jako stabilní trend.
-- Chybějící kvartál ani fiskální rok nedopočítávej z TTM minus ostatní kvartály.
-  V této aplikaci se taková rekonstrukce nepoužívá; chybějící období zůstává chybějící.
-- Opakované články o stejné události slouč do jednoho tématu.
-- Žádné Buy/Hold/Sell, skóre, pořadí nebo doporučení.
-
-POVOLENÉ NÁZVY PRACOVNÍHO PŘÍBĚHU
-{'; '.join(allowed_stories)}
-
-FIRMA: {company}
-SEKTOR: {clean_text(q.get('sector'))} | ODVĚTVÍ: {clean_text(q.get('industry'))}
-
-FINANČNÍ KONTEXT:
-{fin or 'Není k dispozici.'}
-
-AUTOMATICKÁ KONTROLA ÚPLNOSTI A INTERPRETACE DAT (dodrž, nejde o firemní události):
-{analyst_interpretation_controls(annual, quarterly, q)}
-
-AKTUÁLNÍ KOTACE (JEDINÝ POVOLENÝ ZDROJ PRO AKTUÁLNÍ CENU):
-{analyst_human_number(q.get('price'), 2)} {clean_text(q.get('currency')) or ''}. Pokud je cena prázdná, aktuální kotace není spolehlivě dostupná. Neoznačuj jinou cenu z historické řady nebo ze zprávy jako aktuální cenu; případný rozdíl popiš jen jako rozdíl zdrojů/časů a nevymýšlej datum.
-
-CENOVÝ KONTEXT (historická řada, primárně výnosy a trend):
-{price_ctx or 'Není k dispozici.'}
-
-EVIDENCE:
-{evidence or 'Není k dispozici.'}
-
-VÝSTUP
-
-DŮLEŽITÉ: nejdříve vždy napiš krátké ROZHODOVACÍ JÁDRO. Je povinné a nesmí být vynecháno ani tehdy, když je odpověď dlouhá. Teprve potom pokračuj podrobnou analýzou.
-
-## ROZHODOVACÍ JÁDRO
-STORY: [jeden povolený název]
-PROFILE: [jedna až dvě stručné české věty o ekonomickém modelu firmy]
-THESIS: [jedna stručná věta: proč je tento STORY nyní dominantní]
-THREAT: [jedna stručná věta: co jej právě nejvíce ohrožuje]
-COUNTER: [jedna stručná věta: nejsilnější protiargument]
-CHANGE: [jedna stručná věta: co by muselo nastat, aby se STORY změnil]
-
+VÝSTUP: nejvýše 180 slov; stručně, bez úvodu a bez opakování. Zachovej přesně nadpisy a pořadí. Tři ověřovací kroky jsou povinné.
+STORY: [vyber přesně jeden název z: {allowed_stories}]
+PROFILE: [jedna věta o obchodním modelu, bez neověřených segmentových podílů]
+THESIS: [jedna věta: proč je příběh zajímavý, případně s odkazem [E#]]
+THREAT: [největší konkrétní riziko]
+COUNTER: [nejsilnější protiargument proti hlavní tezi]
+CHANGE: [hlavní aktuální změna; neodvozuj příčinu bez důkazu]
 ## Pracovní investiční příběh
-**Základní charakter firmy:** [stručná ekonomická charakteristika, ne povolený štítek]
-**Aktuální stav:** [co se právě mění]
-**Valuační kontext:** [co říká dostupné ocenění o očekáváních; bez falešné přesnosti]
-**Hlavní pracovní příběh:** **[stejný povolený název jako STORY]**
-**Proč:** nejvýše 3 krátké argumenty s [E#] a jedna jasná **Inference:**
-**Co tento příběh právě ohrožuje:** [jedna věta]
-**Protiargument / alternativní interpretace:** [jedna až dvě věty]
-**Co by změnilo můj pracovní příběh:** [jedna konkrétní podmínka]
-Nevypisuj zde znovu celé změny z předchozí sekce; nepřekračuj 180 slov.
-
-Pozor: „Protiargument“ ani „Alternativní interpretace“ nesmí automaticky vést k Nejasnému příběhu. Je normální, že pracovní příběh má protiváhu.
-
+**Hlavní pracovní příběh:** [název]. [Důvod a hlavní nejistota v jedné až dvou větách.]
 ## Co se ve firmě právě mění
-Vyber 1 hlavní změnu; druhou uveď pouze tehdy, je-li skutečně nezávislá a má pro investiční tezi podobnou důležitost. Neopakuj jeden příběh ve více variantách. Každé téma zpracuj úsporně, nejvýše 6 krátkými řádky (spoj související pole, ale zachovej fakta, hypotézu a ověření).
-Pro každé téma:
-### 1. [konkrétní změna]
-**Co víme:** ... [E#]
-**Co se mění:** ...
-**Ekonomický dopad:** ...
-**Inference:** ...
-**Neznáme:** ...
-**Charakter změny:** strukturální / cyklická / dočasná / jednorázová / nejasná
-**Co by ji potvrdilo nebo vyvrátilo:** ...
-
+- **Co víme:** [konkrétní důkaz s [E#], je-li k dispozici]
+- **Ekonomický dopad:** [stručně]
+- **Inference:** [pracovní výklad, ne vydávaný za fakt]
+- **Neznáme:** [hlavní chybějící důkaz]
+- **Co ověřit:** [konkrétní chybějící vysvětlení]
 ## Vztah k finančním výsledkům
-**Co vidíme v číslech:** ...
-**Co to podle mě znamená:** ...
-**Co z čísel nelze zjistit:** ...
-
+[Jedna věta s přesným obdobím; pokud finanční data neprokazují příčinu, řekni to.]
 ## Co si navzájem potvrzují nebo odporují zdroje
-Uveď pouze skutečné vazby nebo konflikty. Pokud evidence převážně souhlasí, řekni to stručně.
-
+[Jedna věta; nevymýšlej konflikt, který zdroje nedokládají.]
 ## Co bych teď sledoval
-Přesně 3 konkrétní ověřitelné věci, pouze v krátkých odrážkách. Nežádáš znovu o kontrolu období, která už jsou v tabulkách k dispozici: nejprve je sám porovnej (zejména stejná fiskální čtvrtletí meziročně). Navrhni budoucí ověření nebo skutečně chybějící údaj, ne už známá historická data.
-"""
+1. [ověřovací krok]
+2. [ověřovací krok]
+3. [ověřovací krok]
 
-    payload = {
-        "model": "openai/gpt-oss-120b",
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.15,
-        "max_completion_tokens": 1300,
-        "reasoning_effort": "low",
-        "include_reasoning": False
-    }
-    def _groq_call(current_payload):
-        return requests.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.28.33"},
-            json=current_payload, timeout=90
-        )
-
-    def _is_tpm_limit(response):
-        if response.status_code not in (413, 429):
-            return False
-        try:
-            body = response.json()
-            message = clean_text((body.get("error") or {}).get("message"))
-        except Exception:
-            message = response.text
-        low = message.lower()
-        return any(term in low for term in ("tokens per minute", "tpm"))
-
-    def _compact_retry_payload():
-        # A short, independent fallback prompt is materially smaller than replacing
-        # only the evidence in the full prompt. This is needed when the full prompt
-        # plus its completion budget exceeds Groq's 8k TPM allowance.
-        compact_evidence = _analyst_evidence_text(pack, max_chars=1500)
-        compact_fin = (fin or "Není k dispozici.")[:1400]
-        compact_controls = analyst_interpretation_controls(annual, quarterly, q)[:700]
-        compact_prompt = f"""Jsi analytik firmy {company} ({ticker}, {exchange}). Používej pouze podklady níže; nevymýšlej příčiny ani čísla.
-{profile_guidance}
-
-VYHODNOŤ: co se změnilo, proč (jen pokud doloženo), ekonomický dopad, co nevíme. Odděluj fakt [E#] od hypotézy **Inference:**. U každého čísla uveď přesné období. FY srovnávej s FY, kvartál YoY se stejným kvartálem minulého FY; sousední kvartály jsou QoQ a mohou být sezónní. Nikdy nezaměňuj jeden kvartál za součet více kvartálů. Chybějící FY/kvartál nedopočítávej. Pokud chybí poslední FY a validované TTM, sniž jistotu. Nepřisuzuj změnu cloudu/SaaS/BTP, produktovému mixu, efektivitě, cenám ani úsporám bez přímého důkazu. Růst marže + FCF + pokles dluhu samy neprokazují příčinu. Neodhaduj podíl cloudu na tržbách z marží nebo cash flow; bez přímého segmentového údaje napiš „podíl z dodané evidence nelze určit“. Slovo „pravděpodobně“ u příčiny použij pouze tehdy, pokud ji přímo podporuje konkrétní [E#]; jinak jde nanejvýš o alternativu k ověření, nikoli o hlavní vysvětlení.
-
-Vyber dominantní pracovní příběh z těchto možností: Kvalitní compounder; Kvalita za rozumnou cenu; Růst za rozumnou cenu; Value / levná firma; Provozní turnaround; Cyklické zotavení; Aktivové / finanční zotavení; Realitní hodnota; Provozní zlepšení; Růstové zotavení; Vysoký růst / dražší příběh; Value trap – varování; Nejasný / smíšený příběh. Nepoužívej automaticky Nejasný; ale „Kvalitní compounder“ vyžaduje důkazy dlouhodobé udržitelnosti.
-
-Vrať všechny níže uvedené části přesně v tomto pořadí; žádnou nevynechávej. PROFILE musí být vyplněn i tehdy, když je hlavní příčina nejasná. Každá část stručně, bez opakování.
-STORY: [jeden přesný povolený název]
-PROFILE: [jedna věta o obchodním modelu; nepřidávej neověřené podíly segmentů]
-THESIS: [jedna věta]
-THREAT: [jedna věta]
-COUNTER: [jedna věta]
-CHANGE: [jedna věta]
-## Pracovní investiční příběh
-**Hlavní pracovní příběh:** **[stejný název]**. Jeden důvod s [E#] a jedna nejistota.
-## Co se ve firmě právě mění
-Pouze 1 hlavní změna a nejvýše 5 krátkých odrážek: **Co víme** [E#]; **Co se mění / dopad**; **Inference**; **Neznáme**; **Co ověřit**. Nepřisuzuj příčinu bez přímého [E#].
-## Vztah k finančním výsledkům
-Jedna věta s konkrétním obdobím.
-## Co si navzájem potvrzují nebo odporují zdroje
-Jedna věta; pokud není doložen konflikt, řekni to.
-## Co bych teď sledoval
-Přesně 3 krátké konkrétní ověřovací kroky. Žádné Buy/Hold/Sell.
-
-FINANČNÍ KONTEXT:
-{compact_fin}
-AUTOMATICKÁ KONTROLA ÚPLNOSTI:
-{compact_controls}
+FINANČNÍ KONTEXT (jen pro orientaci; neopsat celý):
+{financial}
+AUTOMATICKÉ KONTROLY:
+{checks}
 EVIDENCE:
-{compact_evidence}
-CENA: {analyst_human_number(q.get('price'), 2)} {clean_text(q.get('currency')) or ''}."""
+{evidence}
+CENA: {analyst_human_number(q.get('price'), 2)} {clean_text(q.get('currency')) or ''}; dostupné násobky používej jen pokud jsou uvedeny v evidenci."""
+
+    def make_payload(prompt_text, max_tokens):
         return {
             "model": "openai/gpt-oss-120b",
-            "messages": [{"role": "user", "content": compact_prompt}],
+            "messages": [{"role": "user", "content": prompt_text}],
             "temperature": 0.15,
-            "max_completion_tokens": 1050,
+            "max_completion_tokens": max_tokens,
             "reasoning_effort": "low",
-            "include_reasoning": False
+            "include_reasoning": False,
         }
 
+    def call(payload):
+        return requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.28.34"},
+            json=payload, timeout=90,
+        )
+
+    def error_message(response):
+        try:
+            return clean_text((response.json().get("error") or {}).get("message"))
+        except Exception:
+            return clean_text(response.text)
+
+    def is_tpm(response):
+        msg = error_message(response).lower()
+        return response.status_code in (413, 429) and ("tokens per minute" in msg or "tpm" in msg)
+
+    def parse_wait_value(value):
+        value = clean_text(value)
+        if not value:
+            return None
+        # Supports numeric seconds and values such as "7.66s" or "1m2.3s".
+        if re.fullmatch(r"\d+(?:\.\d+)?", value):
+            return float(value)
+        mins = re.search(r"(\d+(?:\.\d+)?)\s*m", value, re.I)
+        secs = re.search(r"(\d+(?:\.\d+)?)\s*s", value, re.I)
+        if mins or secs:
+            return (float(mins.group(1)) * 60 if mins else 0) + (float(secs.group(1)) if secs else 0)
+        return None
+
+    def wait_for_capacity(response):
+        # Prefer provider guidance. For a plain rate-window exhaustion without a
+        # usable header, wait one full minute; do not sleep when the request itself
+        # is larger than the TPM cap, because only a smaller request can fix that.
+        msg = error_message(response).lower()
+        if "requested" in msg and "limit" in msg and "tokens per minute" in msg:
+            return 0.0
+        wait = parse_wait_value(response.headers.get("retry-after"))
+        if wait is None:
+            wait = parse_wait_value(response.headers.get("x-ratelimit-reset-tokens"))
+        if wait is None:
+            m = re.search(r"try again in\s+([0-9.]+)s", msg, re.I)
+            wait = float(m.group(1)) if m else 60.0
+        wait = min(75.0, max(2.0, wait + 1.0))
+        time.sleep(wait)
+        return wait
+
+    attempts = []
+    first_error = ""
+    current_text = ""
+    current_data = {}
+    current_finish = "—"
+    attempt_used = "short_primary"
+    wait_seconds = 0.0
+    prompts = [
+        (make_prompt(story_evidence, fin_short, controls_short), 850, "short_primary"),
+        (make_prompt(_analyst_evidence_text(profile_items + non_financial_items[:2], max_chars=900), fin_short[:650], controls_short[:250]), 600, "compact_retry"),
+        (make_prompt(_analyst_evidence_text(profile_items, max_chars=420), fin_short[:420], controls_short[:150]), 450, "minimal_retry"),
+    ]
     try:
-        r = _groq_call(payload)
-        attempt_used = "full_prompt"
-        first_attempt_status = r.status_code
-        first_attempt_error = ""
-        # HTTP 413 can also mean the TPM budget was exceeded, not only a body-size
-        # problem. Retry once with a genuinely shorter prompt and smaller output cap.
-        if r.status_code == 413 or _is_tpm_limit(r):
-            attempt_used = "compact_retry"
-            first_attempt_error = clean_text(r.text)[:300]
-            if _is_tpm_limit(r):
-                error_message = r.text
-                wait_match = re.search(r"try again in\s+([0-9.]+)s", error_message, re.I)
-                wait_seconds = min(12.0, max(2.0, float(wait_match.group(1)) + 0.5)) if wait_match else 6.0
-                time.sleep(wait_seconds)
-            r = _groq_call(_compact_retry_payload())
-        if r.status_code != 200:
-            return {"ok": False, "error": f"Groq HTTP {r.status_code}: {r.text[:1200]}", "text": "", "model": "openai/gpt-oss-120b", "evidence_count": len(pack)}
-        data = r.json()
-        choice = (data.get("choices") or [{}])[0]
-        text = clean_text((choice.get("message") or {}).get("content"))
-        finish = choice.get("finish_reason")
-        if len(text) < 250:
-            return {"ok": False, "error": f"Groq vrátil příliš krátkou odpověď (finish_reason={finish}).", "text": text, "model": "openai/gpt-oss-120b", "evidence_count": len(pack)}
-        result = {"ok": True, "error": "", "text": text, "model": "openai/gpt-oss-120b", "evidence_count": len(pack), "finish_reason": finish, "usage": data.get("usage", {})}
-        # Detect truncation even when STORY/PROFILE/current-change headings exist.
-        # Previously such answers could be rendered as if complete although they ended mid-sentence.
-        # Recover a short complete answer whenever the model reports a length stop or omits FOLLOW.
-        # The compact recovery is intentionally short and preserves profile-specific stance.
-        has_story_title = bool(
-            re.search(r"(?im)^\s*STORY\s*:\s*(?:\*{0,2})[^\n]+", text)
-            or re.search(r"(?im)^\s*\*{0,2}Hlavní pracovní příběh\s*:\s*\*{0,2}[^\n]+", text)
-        )
-        has_profile = bool(
-            re.search(r"(?im)^\s*PROFILE\s*:\s*[^\n]+", text)
-            or re.search(r"(?im)^\s*\*{0,2}Základní charakter firmy\s*:", text)
-        )
-        has_changes = bool(re.search(r"(?im)^\s*##\s*Co se ve firmě právě mění\s*$", text))
-        has_follow = bool(re.search(r"(?im)^\s*##\s*Co bych teď sledoval\s*$", text))
-        tail = next((line.strip() for line in reversed(text.splitlines()) if line.strip()), "")
-        incomplete_tail = bool(
-            re.search(r"(?:\*\*|__|\b(?:pravděpodobně|protože|Inference:)\s*)\s*$", text)
-            or (tail and not re.search(r"[.!?…:]$|\]$|\)$|\*\*$", tail))
-        )
-        truncated = str(finish or "").lower() in {"length", "max_tokens"} or not has_follow or incomplete_tail
-        missing_parts = []
-        if not has_story_title: missing_parts.append("STORY")
-        if not has_profile: missing_parts.append("PROFILE")
-        if not has_changes: missing_parts.append("sekce změn")
-        if not has_follow: missing_parts.append("sekce ověření")
-        if incomplete_tail: missing_parts.append("podezřelý konec odpovědi")
-        if str(finish or "").lower() in {"length", "max_tokens"}: missing_parts.append(f"limit výstupu ({finish})")
-        result["completion_diagnostics"] = {
-            "primary_chars": len(text),
-            "primary_attempt": attempt_used,
-            "first_attempt_status": first_attempt_status,
-            "first_attempt_error": first_attempt_error,
-            "primary_finish_reason": finish or "neuvedeno",
-            "primary_complete_by_structure": bool(has_story_title and has_profile and has_changes and has_follow and not incomplete_tail and str(finish or "").lower() not in {"length", "max_tokens"}),
-            "missing_parts": list(dict.fromkeys(missing_parts)),
-            "usage": data.get("usage", {}) or {},
+        for index, (prompt_text, token_cap, label) in enumerate(prompts):
+            response = call(make_payload(prompt_text, token_cap))
+            attempts.append(f"{label}: HTTP {response.status_code}")
+            if response.status_code != 200:
+                msg = error_message(response)
+                if not first_error:
+                    first_error = msg[:500]
+                if is_tpm(response) and index < len(prompts) - 1:
+                    # An individual request estimated above the TPM ceiling must be
+                    # shortened immediately; only a temporary remaining-quota error
+                    # benefits from waiting for the rate window to reset.
+                    if not ("requested" in msg.lower() and "limit" in msg.lower() and "tokens per minute" in msg.lower()):
+                        wait_seconds += wait_for_capacity(response)
+                    continue
+                if response.status_code in (429, 413) and index < len(prompts) - 1:
+                    continue
+                break
+
+            data = response.json()
+            choice = (data.get("choices") or [{}])[0]
+            current_text = clean_text((choice.get("message") or {}).get("content"))
+            current_finish = clean_text(choice.get("finish_reason")) or "—"
+            current_data = data
+            attempt_used = label
+            # If a model reports a length stop, prefer a smaller retry over rendering
+            # a half-finished thesis. The next prompt is shorter and has a lower cap.
+            has_story = bool(re.search(r"(?im)^\s*STORY\s*:\s*[^\n]+", current_text))
+            has_profile = bool(re.search(r"(?im)^\s*PROFILE\s*:\s*[^\n]+", current_text))
+            has_change = bool(re.search(r"(?im)^\s*##\s*Co se ve firmě právě mění\s*$", current_text))
+            has_follow = bool(re.search(r"(?im)^\s*##\s*Co bych teď sledoval\s*$", current_text))
+            finish_bad = current_finish.lower() in {"length", "max_tokens"}
+            tail = next((line.strip() for line in reversed(current_text.splitlines()) if line.strip()), "")
+            incomplete_tail = bool(tail and not re.search(r"[.!?…:]$|\]$|\)$|\*\*$", tail))
+            if has_story and has_profile and has_change and has_follow and not finish_bad and not incomplete_tail:
+                break
+            if index < len(prompts) - 1:
+                attempts.append(f"kontrola úplnosti: odpověď neúplná ({current_finish}); zkouším kratší zadání")
+                continue
+            break
+
+        usage = current_data.get("usage", {}) or {}
+        has_story = bool(re.search(r"(?im)^\s*STORY\s*:\s*[^\n]+", current_text))
+        has_profile = bool(re.search(r"(?im)^\s*PROFILE\s*:\s*[^\n]+", current_text))
+        has_change = bool(re.search(r"(?im)^\s*##\s*Co se ve firmě právě mění\s*$", current_text))
+        has_follow = bool(re.search(r"(?im)^\s*##\s*Co bych teď sledoval\s*$", current_text))
+        finish_bad = current_finish.lower() in {"length", "max_tokens"}
+        tail = next((line.strip() for line in reversed(current_text.splitlines()) if line.strip()), "")
+        incomplete_tail = bool(tail and not re.search(r"[.!?…:]$|\]$|\)$|\*\*$", tail))
+        valid = bool(current_text and has_story and has_profile and has_change and has_follow and not finish_bad and not incomplete_tail)
+
+        result = {
+            "ok": True,
+            "error": "" if valid else "AI syntéza nebyla úplná; použit deterministický fallback pro finanční část a pracovní příběh.",
+            "text": current_text if valid else "",
+            "model": "openai/gpt-oss-120b",
+            "evidence_count": len(pack),
+            "finish_reason": current_finish,
+            "usage": usage,
+            "completion_status": "primary_ai" if valid else "deterministic_fallback",
+            "completion_diagnostics": {
+                "primary_chars": len(current_text),
+                "primary_attempt": attempt_used,
+                "first_attempt_status": attempts[0] if attempts else "—",
+                "first_attempt_error": first_error,
+                "primary_finish_reason": current_finish,
+                "primary_complete_by_structure": valid,
+                "missing_parts": [name for name, present in [("STORY", has_story), ("PROFILE", has_profile), ("sekce změn", has_change), ("sekce ověření", has_follow)] if not present] + (["limit výstupu (length)"] if finish_bad else []),
+                "usage": usage,
+                "retry_attempts": attempts,
+                "wait_seconds": round(wait_seconds, 1),
+                "recovery_status": "nebyla potřeba" if valid else "deterministic_fallback",
+                "recovery_error": "" if valid else "AI odpověď nebyla úplná; bez dalšího dlouhého volání.",
+                "recovery_chars": 0,
+                "recovery_finish_reason": "—",
+                "recovery_usage": {},
+            },
         }
-        # A complete-looking STORY is not sufficient: if the answer hit its token
-        # ceiling or omitted a required section, try a compact AI recovery.
-        if not has_story_title or not has_profile or not has_changes or truncated:
-            recovery = analyst_ai_recovery(company, ticker, exchange, q, annual, quarterly, news, sec, price, profile)
-            if recovery.get("ok"):
-                recovery["source"] = "ai_recovery"
-                result["completion_status"] = "ai_recovery"
-            else:
-                failed_recovery = recovery or {}
-                recovery = {
-                    "ok": True,
-                    "source": "deterministic_fallback",
-                    "text": _analyst_deterministic_recovery(annual, quarterly, profile, company, q),
-                    "error": "Záchranná AI odpověď nebyla úplná; použit datový fallback bez domýšlení příčin. " + clean_text(failed_recovery.get("error", ""))[:500],
-                    "attempts": failed_recovery.get("attempts", []),
-                    "finish_reason": failed_recovery.get("finish_reason", "—"),
-                    "usage": failed_recovery.get("usage", {}) or {},
-                    "chars": failed_recovery.get("chars", len(failed_recovery.get("text", ""))),
-                    "has_placeholder": failed_recovery.get("has_placeholder", False),
-                }
-                result["completion_status"] = "deterministic_fallback"
-            result["recovery"] = recovery
-            result["completion_diagnostics"]["recovery_status"] = recovery.get("source", "ai_recovery")
-            result["completion_diagnostics"]["recovery_error"] = recovery.get("error", "")
-            result["completion_diagnostics"]["recovery_chars"] = len(recovery.get("text", ""))
-            result["completion_diagnostics"]["recovery_finish_reason"] = recovery.get("finish_reason", "—")
-            result["completion_diagnostics"]["recovery_usage"] = recovery.get("usage", {}) or {}
-            result["completion_diagnostics"]["recovery_chars"] = recovery.get("chars", len(recovery.get("text", "")))
+        if not valid:
+            fallback_text = _analyst_deterministic_recovery(annual, quarterly, profile, company, q)
+            result["completion_diagnostics"]["recovery_chars"] = len(fallback_text)
+            result["recovery"] = {
+                "ok": True,
+                "source": "deterministic_fallback",
+                "text": fallback_text,
+                "error": result["error"],
+                "attempts": attempts,
+                "finish_reason": current_finish,
+                "usage": usage,
+                "chars": len(fallback_text),
+                "has_placeholder": False,
+            }
         else:
-            result["completion_status"] = "primary_ai"
-            result["completion_diagnostics"]["recovery_status"] = "nebyla potřeba"
-            result["completion_diagnostics"]["recovery_error"] = ""
+            result["recovery"] = {"ok": False, "source": "none", "text": "", "error": ""}
         return result
-    except Exception as e:
-        return {"ok": False, "error": f"{type(e).__name__}: {e}", "text": "", "model": "openai/gpt-oss-120b", "evidence_count": len(pack)}
+    except Exception as exc:
+        fallback_text = _analyst_deterministic_recovery(annual, quarterly, profile, company, q)
+        return {
+            "ok": True,
+            "error": f"AI požadavek selhal: {type(exc).__name__}: {exc}; použit deterministický fallback.",
+            "text": "",
+            "model": "openai/gpt-oss-120b",
+            "evidence_count": len(pack),
+            "completion_status": "deterministic_fallback",
+            "recovery": {"ok": True, "source": "deterministic_fallback", "text": fallback_text, "error": "AI požadavek selhal.", "chars": len(fallback_text)},
+            "completion_diagnostics": {"primary_attempt": attempt_used, "first_attempt_error": first_error, "retry_attempts": attempts, "wait_seconds": round(wait_seconds, 1), "recovery_status": "deterministic_fallback", "recovery_error": "AI požadavek selhal.", "recovery_chars": len(fallback_text), "recovery_finish_reason": "—", "recovery_usage": {}},
+        }
 
 
 def _analyst_extract_section(text, heading):
@@ -3223,7 +3137,7 @@ EVIDENCE:
     def call(payload):
         return requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.28.33"},
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.28.34"},
             json=payload, timeout=60
         )
 
@@ -3693,7 +3607,7 @@ def analyst_render(ticker_input):
     # The former V6.28.x diagnostic block is intentionally removed from the
     # normal UI so it cannot interrupt the analytical workflow.
 
-    # V6.28.33: HARD IDENTITY FIREWALL. The exact Yahoo Chart symbol is the
+    # V6.28.34: HARD IDENTITY FIREWALL. The exact Yahoo Chart symbol is the
     # authoritative ticker-identity check. Yahoo Search is optional enrichment: if
     # it returns an exact quote, use its fields; if it returns nothing, do not block
     # a valid exact Chart result. Never accept an approximate Search result.
@@ -3707,12 +3621,12 @@ def analyst_render(ticker_input):
             f"{q.get('identity_reason') or 'Neznámý důvod.'} Analýza byla z bezpečnostních důvodů zastavena."
         )
         st.info(
-            "Analytik V6.28.33 nepoužije přibližně nalezenou firmu ani data z jiného titulu. "
+            "Analytik V6.28.34 nepoužije přibližně nalezenou firmu ani data z jiného titulu. "
             "Pokud se zastavení opakuje, pošli mi diagnostický výpis – nebudeme to obcházet dalším fallbackem."
         )
         return
 
-    # V6.28.33: supplement sparse Yahoo Search quote fields only from yfinance
+    # V6.28.34: supplement sparse Yahoo Search quote fields only from yfinance
     # when its info.symbol exactly matches the already-verified Yahoo ticker.
     quote_fallback = _analyst_yfinance_quote_fallback(yahoo_ticker)
     q["quote_fallback_status"] = quote_fallback.get("fallback_status", "nedostupné")
@@ -3795,7 +3709,7 @@ def analyst_render(ticker_input):
     status.success("5/5 Analytické jádro dokončeno.")
 
     st.markdown(f"## {company}")
-    st.caption(f"Ticker **{ticker}** · Yahoo **{yahoo_ticker}** · {exchange} · profil **{profile}** · načteno {datetime.now().strftime('%d.%m.%Y %H:%M')} · build **V6.28.33 / 20261012-I**")
+    st.caption(f"Ticker **{ticker}** · Yahoo **{yahoo_ticker}** · {exchange} · profil **{profile}** · načteno {datetime.now().strftime('%d.%m.%Y %H:%M')} · build **V6.28.34 / 20261013-A**")
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Cena", f"{analyst_human_number(q.get('price'), 2)} {q.get('currency', '')}")
@@ -3817,7 +3731,7 @@ def analyst_render(ticker_input):
 
     with st.expander("🧠 2. Co se ve firmě právě mění", expanded=True):
         completion_status = ai_result.get("completion_status", "unknown") if isinstance(ai_result, dict) else "unknown"
-        st.caption("V6.28.33: finanční čísla a jejich časové řady v této sekci počítá přímo aplikace. AI může navrhnout pracovní příběh, ale její text nenahrazuje finanční data ani nedokazuje příčiny změn.")
+        st.caption("V6.28.34: finanční čísla a jejich časové řady v této sekci počítá přímo aplikace. AI může navrhnout pracovní příběh, ale její text nenahrazuje finanční data ani nedokazuje příčiny změn.")
         if isinstance(ai_result, dict) and not ai_result.get("ok"):
             st.warning("AI syntéza není dostupná. Finanční přehled níže přesto zůstává k dispozici, protože se počítá přímo z načtených ročních dat.")
         elif completion_status == "ai_recovery":
@@ -3915,7 +3829,7 @@ def analyst_render(ticker_input):
         st.write(f"Evidence položek: {ai_result.get('evidence_count', '—')}")
         st.write(f"AI model: {ai_result.get('model', '—')}")
         st.write(f"Kontrola kódu fallbacku: {ANALYST_FALLBACK_REVISION}")
-        st.write("Pravidlo V6.28.33 / DF33-A: sekce 2 i finanční zdůvodnění pracovního příběhu se vždy počítají z ročních dat; nepřebírají finanční tvrzení z AI.")
+        st.write("Pravidlo V6.28.34 / DF34-A: sekce 2 i finanční zdůvodnění pracovního příběhu se vždy počítají z ročních dat; nepřebírají finanční tvrzení z AI.")
         st.write(f"Stav dokončení AI: { {'primary_ai': 'původní odpověď formálně úplná', 'ai_recovery': 'použita záchranná AI odpověď', 'deterministic_fallback': 'použit datový fallback'}.get(ai_result.get('completion_status'), 'stav není k dispozici') }")
         diag = ai_result.get("completion_diagnostics") or {}
         if diag:
@@ -3932,7 +3846,7 @@ def analyst_render(ticker_input):
             if diag.get("recovery_status") == "ai_recovery":
                 st.write(f"Záchranná AI odpověď: {diag.get('recovery_chars', '—')} znaků; finish_reason={diag.get('recovery_finish_reason', '—')}; completion tokeny={rec_usage.get('completion_tokens', '—')}")
             elif diag.get("recovery_status") == "deterministic_fallback":
-                st.write(f"Záchranná AI odpověď odmítnuta: {diag.get('recovery_chars', '—')} znaků; finish_reason={diag.get('recovery_finish_reason', '—')}; completion tokeny={rec_usage.get('completion_tokens', '—')}")
+                st.write(f"Použit deterministický fallback: {diag.get('recovery_chars', '—')} znaků; další AI volání nebylo provedeno.")
             if diag.get("recovery_error"):
                 st.caption(diag["recovery_error"])
             recovery_obj = ai_result.get("recovery") or {}
