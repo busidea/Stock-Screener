@@ -15,7 +15,7 @@ from datetime import datetime
 st.set_page_config(page_title="Stock-Screener", page_icon="🔎", layout="wide")
 
 RUNTIME_LOG = Path("/tmp/stock_screener_runtime.json")
-ANALYST_FALLBACK_REVISION = "DF31-A · přímý datový výpočet bez parsování AI textu; prodloužená kontrolovaná AI obnova"
+ANALYST_FALLBACK_REVISION = "DF32-A · přímý datový výpočet bez parsování AI textu; prodloužená kontrolovaná AI obnova"
 
 @st.cache_resource(show_spinner=False)
 def get_runtime_state():
@@ -54,7 +54,7 @@ def update_runtime(status=None, stage=None, message=None, error=None, run_id=Non
 
 
 st.title("📊 Stock-Screener")
-st.caption("V6.28.31 · BUILD 20261012-G – Screener · samostatný modul Analytik je dostupný v menu vlevo")
+st.caption("V6.28.32 · BUILD 20261012-H – Screener · samostatný modul Analytik je dostupný v menu vlevo")
 
 NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 NYSE_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
@@ -1756,7 +1756,7 @@ def _analyst_yahoo_search_quote(yahoo_ticker):
 @st.cache_data(ttl=1800, show_spinner=False)
 def analyst_get_quote_data(yahoo_ticker):
     """
-    V6.28.31 COMPLETION DIAGNOSTICS + EXPLICIT AI/FALLBACK STATUS + GROQ USAGE TRACE.
+    V6.28.32 COMPLETION DIAGNOSTICS + EXPLICIT AI/FALLBACK STATUS + GROQ USAGE TRACE.
 
     A company may be accepted only when BOTH independent Yahoo layers agree
     on the exact requested Yahoo symbol:
@@ -2983,7 +2983,7 @@ Přesně 3 konkrétní ověřitelné věci, pouze v krátkých odrážkách. Ne�
         "model": "openai/gpt-oss-120b",
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.15,
-        "max_completion_tokens": 1500,
+        "max_completion_tokens": 1300,
         "reasoning_effort": "low",
         "include_reasoning": False
     }
@@ -3048,7 +3048,7 @@ CENA: {analyst_human_number(q.get('price'), 2)} {clean_text(q.get('currency')) o
             "model": "openai/gpt-oss-120b",
             "messages": [{"role": "user", "content": compact_prompt}],
             "temperature": 0.15,
-            "max_completion_tokens": 1250,
+            "max_completion_tokens": 1050,
             "reasoning_effort": "low",
             "include_reasoning": False
         }
@@ -3193,16 +3193,16 @@ AUTOMATICKÉ KONTROLY:
 
 Pravidla: FY porovnávej jen s FY. Pokud údaj pro daný FY chybí, napiš, že chybí; neodhaduj ho podle trendu a nepoužívej přibližnou náhradu. Žádné zástupné hodnoty jako „35,?“. Procentní změnu uváděj jen při známé výchozí i koncové hodnotě. Nevyvozuj příčinu z pouhé souběžnosti marže, FCF a dluhu. Bez přímého segmentového údaje neodhaduj podíl cloudu a netvrď, že cloud způsobil růst marže. Pokles dluhu nedokazuje budoucí dividendy ani odkupy. Nezaměňuj provozní a čistou marži. Neoznačuj FY2025 za nadcházející období.
 
-Vrať úplnou, úspornou odpověď v PŘESNĚ tomto formátu. Celkem nejvýše 450–600 slov; žádné úvody ani opakování. PROFILE a přesně 3 kroky FOLLOW jsou povinné:
+Vrať úplnou, úspornou odpověď v PŘESNĚ tomto formátu. Celkem nejvýše 220 slov; žádné úvody ani opakování. Každá část má být stručná, zpravidla jedna věta. PROFILE a přesně 3 krátké kroky FOLLOW jsou povinné. Nevyčerpávej tokeny dlouhým rozborem; dokonči FOLLOW:
 STORY: [jeden z názvů: Kvalitní compounder; Kvalita za rozumnou cenu; Růst za rozumnou cenu; Value / levná firma; Provozní turnaround; Cyklické zotavení; Aktivové / finanční zotavení; Realitní hodnota; Provozní zlepšení; Růstové zotavení; Vysoký růst / dražší příběh; Value trap – varování; Nejasný / smíšený příběh]
 PROFILE: [jedna věta o obchodním modelu bez neověřených segmentových podílů]
 CHANGES:
 ### 1. [hlavní změna]
-**Co víme:** [jedno nebo dvě ověřená čísla s přesným FY a [E#]]
-**Interpretace:** [jedna věta; příčinu označ za hypotézu, pokud není přímo doložena]
-**Neznáme / jistota:** [jedna věta]
-**Co ověřit:** [jeden budoucí nebo skutečně chybějící údaj]
-FOLLOW: krok 1 | krok 2 | krok 3
+**Co víme:** [jedno ověřené číslo nebo řada s FY a [E#]]
+**Interpretace:** [jedna krátká věta; příčinu neodhaduj]
+**Neznáme:** [jedna krátká věta]
+**Co ověřit:** [jeden skutečně chybějící údaj]
+FOLLOW: 1) [krátký krok] | 2) [krátký krok] | 3) [krátký krok]
 
 FINANČNÍ KONTEXT:
 {annual_context or 'Není k dispozici.'}
@@ -3365,7 +3365,7 @@ def _analyst_deterministic_recovery(annual, quarterly, profile="Naspeedovaný", 
         opm_sentence=(f"Provozní marže se mezi první a poslední dostupnou FY změnila o {fmt(opm_delta)} p. b.; "
                       + ("celkově vzrostla, ale mezilehlá cesta je důležitá." if opm_delta>0 else "celkově klesla; příčina z poměrů samotných nevyplývá."))
         story="Provozní zlepšení" if opm_delta>1 else "Nejasný / smíšený příběh"
-        change_title="Vývoj provozní marže a rozdíl proti čistému zisku"
+        change_title="Vývoj provozní marže a tržeb"
         change=(
             f"### 1. {change_title}\n"
             f"**Co víme:** Provozní marže podle provozního zisku / tržeb: {opm_path}. Tržby: {revenue_path}.\n"
@@ -3404,7 +3404,7 @@ def analyst_current_developments(company, q, annual, quarterly, news, sec, ticke
     # wastes quota and can produce a different answer from the one used by the
     # story section.
     result = ai_result if isinstance(ai_result, dict) else analyst_ai_synthesis(company, ticker, exchange, q, annual, quarterly, news, sec, price)
-    # V6.28.31 / DF31-A: when both AI responses failed validation, never parse or
+    # V6.28.32 / DF32-A: when both AI responses failed validation, never parse or
     # display any text returned by the model as section 2. Recompute directly from
     # the current annual dataframe so model-invented values/causes cannot leak in.
     if result.get("ok") and result.get("completion_status") == "deterministic_fallback":
@@ -3708,7 +3708,7 @@ def analyst_render(ticker_input):
     # The former V6.28.x diagnostic block is intentionally removed from the
     # normal UI so it cannot interrupt the analytical workflow.
 
-    # V6.28.31: HARD IDENTITY FIREWALL. The exact Yahoo Chart symbol is the
+    # V6.28.32: HARD IDENTITY FIREWALL. The exact Yahoo Chart symbol is the
     # authoritative ticker-identity check. Yahoo Search is optional enrichment: if
     # it returns an exact quote, use its fields; if it returns nothing, do not block
     # a valid exact Chart result. Never accept an approximate Search result.
@@ -3722,12 +3722,12 @@ def analyst_render(ticker_input):
             f"{q.get('identity_reason') or 'Neznámý důvod.'} Analýza byla z bezpečnostních důvodů zastavena."
         )
         st.info(
-            "Analytik V6.28.31 nepoužije přibližně nalezenou firmu ani data z jiného titulu. "
+            "Analytik V6.28.32 nepoužije přibližně nalezenou firmu ani data z jiného titulu. "
             "Pokud se zastavení opakuje, pošli mi diagnostický výpis – nebudeme to obcházet dalším fallbackem."
         )
         return
 
-    # V6.28.31: supplement sparse Yahoo Search quote fields only from yfinance
+    # V6.28.32: supplement sparse Yahoo Search quote fields only from yfinance
     # when its info.symbol exactly matches the already-verified Yahoo ticker.
     quote_fallback = _analyst_yfinance_quote_fallback(yahoo_ticker)
     q["quote_fallback_status"] = quote_fallback.get("fallback_status", "nedostupné")
@@ -3810,7 +3810,7 @@ def analyst_render(ticker_input):
     status.success("5/5 Analytické jádro dokončeno.")
 
     st.markdown(f"## {company}")
-    st.caption(f"Ticker **{ticker}** · Yahoo **{yahoo_ticker}** · {exchange} · profil **{profile}** · načteno {datetime.now().strftime('%d.%m.%Y %H:%M')} · build **V6.28.31 / 20261012-G**")
+    st.caption(f"Ticker **{ticker}** · Yahoo **{yahoo_ticker}** · {exchange} · profil **{profile}** · načteno {datetime.now().strftime('%d.%m.%Y %H:%M')} · build **V6.28.32 / 20261012-H**")
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Cena", f"{analyst_human_number(q.get('price'), 2)} {q.get('currency', '')}")
@@ -3932,7 +3932,7 @@ def analyst_render(ticker_input):
         st.write(f"Evidence položek: {ai_result.get('evidence_count', '—')}")
         st.write(f"AI model: {ai_result.get('model', '—')}")
         st.write(f"Kontrola kódu fallbacku: {ANALYST_FALLBACK_REVISION}")
-        st.write("Pravidlo V6.28.31: při deterministic_fallback se sekce 2 počítá přímo z ročních dat; nepřebírá text z AI.")
+        st.write("Pravidlo V6.28.32: při deterministic_fallback se sekce 2 počítá přímo z ročních dat; nepřebírá text z AI.")
         st.write(f"Stav dokončení AI: { {'primary_ai': 'původní odpověď formálně úplná', 'ai_recovery': 'použita záchranná AI odpověď', 'deterministic_fallback': 'použit datový fallback'}.get(ai_result.get('completion_status'), 'stav není k dispozici') }")
         diag = ai_result.get("completion_diagnostics") or {}
         if diag:
