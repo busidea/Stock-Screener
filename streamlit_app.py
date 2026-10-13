@@ -15,7 +15,7 @@ from datetime import datetime
 st.set_page_config(page_title="Stock-Screener", page_icon="🔎", layout="wide")
 
 RUNTIME_LOG = Path("/tmp/stock_screener_runtime.json")
-ANALYST_FALLBACK_REVISION = "DF41-A · monitoring textu, výběr teze z celé řady a smysluplný protiargument"
+ANALYST_FALLBACK_REVISION = "DF42-A · deduplikace a aktuálnost zpráv, kontrola protiargumentu a valuace"
 
 @st.cache_resource(show_spinner=False)
 def get_runtime_state():
@@ -54,7 +54,7 @@ def update_runtime(status=None, stage=None, message=None, error=None, run_id=Non
 
 
 st.title("📊 Stock-Screener")
-st.caption("V6.28.41 · BUILD 20261013-H – Screener · samostatný modul Analytik je dostupný v menu vlevo")
+st.caption("V6.28.42 · BUILD 20261013-I – Screener · samostatný modul Analytik je dostupný v menu vlevo")
 
 NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 NYSE_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
@@ -1756,7 +1756,7 @@ def _analyst_yahoo_search_quote(yahoo_ticker):
 @st.cache_data(ttl=1800, show_spinner=False)
 def analyst_get_quote_data(yahoo_ticker):
     """
-    V6.28.41 DETERMINISTIC FINANCIAL SECTION + AI INTERPRETATION SEPARATION + COMPLETION DIAGNOSTICS.
+    V6.28.42 DETERMINISTIC FINANCIAL SECTION + AI INTERPRETATION SEPARATION + COMPLETION DIAGNOSTICS.
 
     A company may be accepted only when BOTH independent Yahoo layers agree
     on the exact requested Yahoo symbol:
@@ -2309,8 +2309,32 @@ def analyst_google_news(company_name, ticker, ir_website=""):
         except Exception:
             continue
     if not rows: return pd.DataFrame()
-    out=pd.DataFrame(rows).drop_duplicates(subset=["Název"])
-    return out.sort_values(["Relevance","Datum"],ascending=[False,False]).head(35).reset_index(drop=True)
+    out = pd.DataFrame(rows)
+    # Current sentiment must not be diluted by old background articles.
+    # Retain only items dated within the last 365 days; if the date is missing,
+    # keep the item but make its age visible in the monitoring label.
+    now_utc = pd.Timestamp.now(tz="UTC")
+    parsed_dates = pd.to_datetime(out["Datum"], errors="coerce", utc=True)
+    out["_DatumParsed"] = parsed_dates
+    cutoff = now_utc - pd.Timedelta(days=365)
+    out = out[parsed_dates.isna() | (parsed_dates >= cutoff)].copy()
+    # Deduplicate across publishers / Google News mirrors by normalized headline.
+    def _norm_headline(value):
+        text = clean_text(value).lower()
+        # Remove common publisher suffixes appended after the headline.
+        if " - " in text:
+            left, right = text.rsplit(" - ", 1)
+            if "." in right or right.startswith("www") or right in {"volkswagen ag", "volkswagen group", "simply wall st", "ad hoc news"}:
+                text = left
+        text = re.sub(r"https?://\S+", " ", text)
+        text = re.sub(r"[^a-z0-9à-ž]+", " ", text)
+        return re.sub(r"\s+", " ", text).strip()
+    out["_HeadlineKey"] = out["Název"].map(_norm_headline)
+    out = out.sort_values(["Relevance", "_DatumParsed"], ascending=[False, False], na_position="last")
+    out = out.drop_duplicates(subset=["_HeadlineKey"], keep="first")
+    out["Stáří"] = out["_DatumParsed"].map(lambda d: "Datum neověřeno" if pd.isna(d) else (f"{(now_utc-d).days} dní"))
+    out = out.drop(columns=["_DatumParsed", "_HeadlineKey"], errors="ignore")
+    return out.sort_values(["Relevance", "Datum"], ascending=[False, False]).head(35).reset_index(drop=True)
 
 
 def _analyst_fmt_pct(v):
@@ -3542,11 +3566,11 @@ def analyst_story_hypothesis(q, annual, quarterly, news, sec, ai_result=None):
             if abs(recent_revenue_change) <= 3:
                 counter = ("Navzdory poklesu marže zůstaly tržby v posledním roce přibližně stabilní; dostupná řada zatím neukazuje prudký propad prodejů.")
             elif len(valid_rows) >= 2 and revenue_change_pct >= 5:
-                counter = ("Tržby za celé sledované období vzrostly, takže zhoršení marže zatím neprovází celkový pokles tržeb.")
+                counter = ("Tržby za celé sledované období vzrostly, takže zhoršení marže zatím neprovází celkový pokles tržeb; samotný růst výnosů ale nedokazuje sílu poptávky ani udržitelnost zisků.")
             else:
                 counter = ("Dostupná data nenabízejí silný pozitivní protiargument; tento limit je nutné zachovat místo umělého vyvažování rizika.")
         elif len(valid_rows) >= 2 and revenue_change_pct >= 5:
-            counter = ("Tržby za celé sledované období vzrostly, což je dílčí protiváha k popsanému riziku.")
+            counter = ("Tržby za celé sledované období vzrostly, což je dílčí protiváha k poklesu ziskovosti; samo o sobě to ale nedokazuje sílu poptávky ani kvalitu zisků.")
         else:
             counter = ("Dostupná data nenabízejí silný pozitivní protiargument; tento limit je nutné zachovat místo umělého vyvažování rizika.")
 
@@ -3850,7 +3874,7 @@ def analyst_render(ticker_input):
     # The former V6.28.x diagnostic block is intentionally removed from the
     # normal UI so it cannot interrupt the analytical workflow.
 
-    # V6.28.41: HARD IDENTITY FIREWALL. The exact Yahoo Chart symbol is the
+    # V6.28.42: HARD IDENTITY FIREWALL. The exact Yahoo Chart symbol is the
     # authoritative ticker-identity check. Yahoo Search is optional enrichment: if
     # it returns an exact quote, use its fields; if it returns nothing, do not block
     # a valid exact Chart result. Never accept an approximate Search result.
@@ -3864,12 +3888,12 @@ def analyst_render(ticker_input):
             f"{q.get('identity_reason') or 'Neznámý důvod.'} Analýza byla z bezpečnostních důvodů zastavena."
         )
         st.info(
-            "Analytik V6.28.41 nepoužije přibližně nalezenou firmu ani data z jiného titulu. "
+            "Analytik V6.28.42 nepoužije přibližně nalezenou firmu ani data z jiného titulu. "
             "Pokud se zastavení opakuje, pošli mi diagnostický výpis – nebudeme to obcházet dalším fallbackem."
         )
         return
 
-    # V6.28.41: supplement sparse Yahoo Search quote fields only from yfinance
+    # V6.28.42: supplement sparse Yahoo Search quote fields only from yfinance
     # when its info.symbol exactly matches the already-verified Yahoo ticker.
     quote_fallback = _analyst_yfinance_quote_fallback(yahoo_ticker)
     q["quote_fallback_status"] = quote_fallback.get("fallback_status", "nedostupné")
@@ -3952,7 +3976,7 @@ def analyst_render(ticker_input):
     status.success("5/5 Analytické jádro dokončeno.")
 
     st.markdown(f"## {company}")
-    st.caption(f"Ticker **{ticker}** · Yahoo **{yahoo_ticker}** · {exchange} · profil **{profile}** · načteno {datetime.now().strftime('%d.%m.%Y %H:%M')} · build **V6.28.41 / 20261013-H**")
+    st.caption(f"Ticker **{ticker}** · Yahoo **{yahoo_ticker}** · {exchange} · profil **{profile}** · načteno {datetime.now().strftime('%d.%m.%Y %H:%M')} · build **V6.28.42 / 20261013-I**")
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Cena", f"{analyst_human_number(q.get('price'), 2)} {q.get('currency', '')}")
@@ -3974,7 +3998,7 @@ def analyst_render(ticker_input):
 
     with st.expander("🧠 2. Co se ve firmě právě mění", expanded=True):
         completion_status = ai_result.get("completion_status", "unknown") if isinstance(ai_result, dict) else "unknown"
-        st.caption("V6.28.41: finanční čísla a jejich časové řady v této sekci počítá přímo aplikace. AI může navrhnout pracovní příběh, ale její text nenahrazuje finanční data ani nedokazuje příčiny změn.")
+        st.caption("V6.28.42: finanční čísla a jejich časové řady v této sekci počítá přímo aplikace. AI může navrhnout pracovní příběh, ale její text nenahrazuje finanční data ani nedokazuje příčiny změn.")
         if isinstance(ai_result, dict) and not ai_result.get("ok"):
             st.warning("AI syntéza není dostupná. Finanční přehled níže přesto zůstává k dispozici, protože se počítá přímo z načtených ročních dat.")
         elif completion_status == "ai_recovery":
@@ -3986,10 +4010,10 @@ def analyst_render(ticker_input):
     with st.expander("📰 Monitoring tisku – témata, tón a rozpory", expanded=True):
         monitoring_summary, monitoring_count = analyst_news_monitoring_text(news, ai_result)
         st.write(monitoring_summary)
-        st.caption(f"Načteno {monitoring_count} relevantních zpráv. Monitoring shrnuje dostupné titulky/popisky; nejde automaticky o ověřená fakta ani reprezentativní průzkum celého tisku.")
+        st.caption(f"Načteno {monitoring_count} relevantních zpráv. Monitoring používá pouze zprávy z posledních 365 dní (datum neznámé je označeno); titulky jsou deduplikovány. Jde o dostupné titulky/popisky, nikoli ověřená fakta ani reprezentativní průzkum celého tisku.")
         if news is not None and not news.empty:
             display_news = news.copy()
-            keep = [c for c in ["Datum", "Zdroj", "Název", "Popis", "Odkaz"] if c in display_news.columns]
+            keep = [c for c in ["Datum", "Stáří", "Zdroj", "Název", "Popis", "Odkaz"] if c in display_news.columns]
             display_news = display_news[keep].head(8)
             if "Odkaz" in display_news.columns:
                 display_news = display_news.rename(columns={"Odkaz": "Odkaz na zdroj"})
@@ -4028,6 +4052,9 @@ def analyst_render(ticker_input):
             st.warning("Zdroj v tomto běhu nedodal násobky ocenění a dostupné vstupy neumožnily jejich bezpečný výpočet. Před závěrem o levnosti je nutné ověřit cenu, počet akcií / tržní kapitalizaci a odpovídající zisk, tržby či vlastní kapitál; chybějící násobky se nesmějí nahrazovat odhadem.")
         else:
             st.write(_analyst_valuation_comment(q, price))
+        _val_ps = safe_float(q.get("ps")); _val_pb = safe_float(q.get("pb")); _val_pe = safe_float(q.get("pe"))
+        if ((not pd.isna(_val_ps) and 0 < _val_ps < 0.2) or (not pd.isna(_val_pb) and 0 < _val_pb < 0.3)):
+            st.warning("Kontrola srovnatelnosti: P/S nebo P/B je mimořádně nízké. Než to vyložíš jako výrazné podhodnocení, ověř, zda tržní kapitalizace zahrnuje všechny relevantní třídy akcií a zda je srovnávána se skupinovými tržbami a vlastním kapitálem. U firem s více třídami akcií mohou být tato čísla nesouměřitelná.")
         st.caption("Průměr oboru se zobrazí pouze tehdy, pokud je k dispozici srovnatelný, zdrojově doložený údaj. Aktuální a forward hodnoty nejsou zaměnitelné; valuace není sama o sobě výpočtem férové ceny.")
 
     with st.expander("🧩 6. Pracovní investiční příběh", expanded=True):
@@ -4086,7 +4113,7 @@ def analyst_render(ticker_input):
         st.write(f"Evidence položek: {ai_result.get('evidence_count', '—')}")
         st.write(f"AI model: {ai_result.get('model', '—')}")
         st.write(f"Kontrola kódu fallbacku: {ANALYST_FALLBACK_REVISION}")
-        st.write("Pravidlo V6.28.41 / DF41-A: finanční část se počítá z ročních dat; monitoring používá stejnou sadu zpráv a stejnou AI odpověď, bez dalšího API volání; teze a protiargument se kontrolují vůči celé roční řadě.")
+        st.write("Pravidlo V6.28.42 / DF42-A: zprávy starší než 365 dní se nezapočítávají do aktuálního monitoringu; titulky se deduplikují po normalizaci; finanční teze vychází z celé roční řady; valuace dostává varování při podezřele nízkých násobcích, které mohou vycházet z nesouladu kapitalizace a skupinových výkazů.")
         st.write(f"Stav dokončení AI: { {'primary_ai': 'původní odpověď formálně úplná', 'ai_recovery': 'použita záchranná AI odpověď', 'deterministic_fallback': 'použit datový fallback'}.get(ai_result.get('completion_status'), 'stav není k dispozici') }")
         diag = ai_result.get("completion_diagnostics") or {}
         if diag:
