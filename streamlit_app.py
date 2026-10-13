@@ -15,7 +15,7 @@ from datetime import datetime
 st.set_page_config(page_title="Stock-Screener", page_icon="🔎", layout="wide")
 
 RUNTIME_LOG = Path("/tmp/stock_screener_runtime.json")
-ANALYST_FALLBACK_REVISION = "DF43-A · priorita posledního vývoje, investiční zdroje a srovnání FY/YoY"
+ANALYST_FALLBACK_REVISION = "DF44-A · priorita aktuálních zpráv, restrukturalizace a posledního vývoje"
 
 @st.cache_resource(show_spinner=False)
 def get_runtime_state():
@@ -54,7 +54,7 @@ def update_runtime(status=None, stage=None, message=None, error=None, run_id=Non
 
 
 st.title("📊 Stock-Screener")
-st.caption("V6.28.43 · BUILD 20261014-J – Screener · samostatný modul Analytik je dostupný v menu vlevo")
+st.caption("V6.28.44 · BUILD 20261015-K – Screener · samostatný modul Analytik je dostupný v menu vlevo")
 
 NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 NYSE_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
@@ -1756,7 +1756,7 @@ def _analyst_yahoo_search_quote(yahoo_ticker):
 @st.cache_data(ttl=1800, show_spinner=False)
 def analyst_get_quote_data(yahoo_ticker):
     """
-    V6.28.43 DETERMINISTIC FINANCIAL SECTION + AI INTERPRETATION SEPARATION + COMPLETION DIAGNOSTICS.
+    V6.28.44 DETERMINISTIC FINANCIAL SECTION + AI INTERPRETATION SEPARATION + COMPLETION DIAGNOSTICS.
 
     A company may be accepted only when BOTH independent Yahoo layers agree
     on the exact requested Yahoo symbol:
@@ -2259,6 +2259,9 @@ def _analyst_company_tokens(company):
 def _analyst_news_relevant(title, description, company, ticker):
     text=(clean_text(title)+" "+clean_text(description)).lower()
     if not text: return False, 0
+    # Generic quote/profile/archive pages add noise but rarely provide current company evidence.
+    generic_page_terms = ("stock price, quote, news & analysis", "stock price quote news analysis", "earnings call transcripts", "competitor stock analysis", "stock - morningstar", "stock analysis -", "page 2 |", "page 3 |", "page 49 |")
+    if any(term in text for term in generic_page_terms): return False, 0
     bad={"hockey","nhl","leafs","prospect","training camp","football","soccer","basketball","baseball","cricket","fantasy","match report","recipe","weather"}
     if any(x in text for x in bad): return False, 0
     name=clean_text(company).lower()
@@ -2268,7 +2271,7 @@ def _analyst_news_relevant(title, description, company, ticker):
     token_hits=sum(1 for x in tokens[:4] if x in text)
     score=(8 if exact_name else 0)+(2*token_hits)
     if ticker_clean and re.search(rf"\b{re.escape(ticker_clean)}\b",text): score+=3
-    event_terms=["earnings","results","guidance","outlook","revenue","profit","margin","orders","demand","china","tariff","regulation","acquisition","acquire","divest","sale","spin-off","spinoff","restructur","separation","ceo","cfo","management","debt","buyback","dividend","launch","approval","recall","settlement","lawsuit","factory","capacity"]
+    event_terms=["earnings","results","guidance","outlook","revenue","profit","margin","orders","demand","china","tariff","regulation","acquisition","acquire","divest","sale","spin-off","spinoff","restructur","separation","ceo","cfo","management","debt","buyback","dividend","launch","approval","recall","settlement","lawsuit","factory","capacity","labor","labour","union","collective agreement","collective bargaining","tariff agreement","layoff","layoffs","job cuts","workforce reduction","cost cutting","cost cuts","cost reduction","savings","redundancies","strike","restructuring","profit warning","deliveries","shipment","shipments"]
     score += sum(1 for w in event_terms if w in text)
     # Company name is the strongest identity test. If neither exact name nor multiple name tokens appear, reject.
     if not exact_name and token_hits < 2 and score < 6:
@@ -2292,7 +2295,9 @@ def analyst_google_news(company_name, ticker, ir_website=""):
     queries=[
         f'"{company}" earnings results latest guidance outlook after:{search_after}',
         f'"{company}" strategy restructuring acquisition divestment separation after:{search_after}',
-        f'"{company}" demand orders margin China regulation tariff after:{search_after}',
+        f'"{company}" demand orders deliveries China market share profit warning after:{search_after}',
+        f'"{company}" restructuring cost cuts layoffs jobs union collective agreement labor negotiations after:{search_after}',
+        f'"{company}" restructuring savings workforce reduction plant closure outlook margin after:{search_after}',
         f'"{company}" investment thesis valuation bull case bear case analyst',
         f'"{company}" investor analysis earnings outlook valuation margin',
         f'"{company}" site:seekingalpha.com OR site:simplywall.st OR site:investing.com OR site:marketscreener.com',
@@ -3033,7 +3038,7 @@ def analyst_ai_synthesis(company, ticker, exchange, q, annual, quarterly, news, 
         "Value / levná firma; Provozní turnaround; Cyklické zotavení; "
         "Aktivové / finanční zotavení; Realitní hodnota; Provozní zlepšení; "
         "Růstové zotavení; Vysoký růst / dražší příběh; Value trap – varování; "
-        "Nejasný / smíšený příběh; Růst tržeb při tlaku na ziskovost"
+        "Nejasný / smíšený příběh; Růst tržeb při tlaku na ziskovost; Zhoršující se výhled a restrukturalizace"
     )
     stance = "Naspeedovaný: formuluj jasnou dominantní tezi a nejzajímavější alternativu, ale označ nedoložené příčiny jako hypotézu." if profile == "Naspeedovaný" else "Seriózní: formuluj dominantní tezi, pokud ji podklady podporují; přesně odděluj fakta, interpretaci a hypotézy."
 
@@ -3594,10 +3599,38 @@ def analyst_news_monitoring_text(news, ai_result=None):
             m = re.search(r"(?im)^\s*MONITORING\s*:\s*(.+)$", source)
             if m and m.group(1).strip():
                 candidates.append(m.group(1).strip())
-    if candidates:
+    # Build a topic-aware synthesis from actual fetched headlines before trusting
+    # the short AI summary, which can miss salient labor/cost/outlook developments.
+    count = 0 if news is None or getattr(news, "empty", True) else len(news)
+    topic_summary = ""
+    if count and news is not None:
+        title_col = "Název" if "Název" in news.columns else None
+        if title_col:
+            dated = news.copy()
+            if "Datum" in dated.columns:
+                dated["_parsed"] = pd.to_datetime(dated["Datum"], errors="coerce", utc=True)
+                dated = dated.sort_values("_parsed", ascending=False, na_position="last")
+            headlines = [clean_text(x) for x in dated[title_col].dropna().astype(str).tolist()]
+            all_titles = " ".join(headlines).lower()
+            labor_hits = [h for h in headlines if re.search(r"(?i)(collective agreement|collective bargaining|union|labor|labour|workforce|job cuts|layoffs|redundanc|tarifvertrag|odbory|náklad|restrukturaliz|restructur)", h)]
+            outlook_hits = [h for h in headlines if re.search(r"(?i)(profit warning|outlook|guidance|forecast|výhled|profit margin|operating margin|profit warning)", h)]
+            delivery_hits = [h for h in headlines if re.search(r"(?i)(deliveries|delivery|shipment|sales decline|China weakness|dodávk|prodejů)", h)]
+            decline_hits = [h for h in headlines if re.search(r"(?i)(cut|lower|reduc|downgrad|drop|declin|fall|slashed|sníž|pokles|propad)", h)]
+            themes = []
+            if labor_hits:
+                themes.append(f"restrukturalizace, náklady a pracovní vztahy ({len(labor_hits)} titulků; např. „{labor_hits[0]}“)")
+            if outlook_hits and decline_hits:
+                themes.append(f"zhoršení výhledu či ziskovosti ({len(outlook_hits)} výhledových a {len([h for h in outlook_hits if re.search(r'(?i)(cut|lower|reduc|downgrad|sníž|zhorš)', h)] )} výslovně negativních titulků)")
+            if delivery_hits:
+                themes.append(f"vývoj dodávek/prodejů ({len(delivery_hits)} titulků; nejnovější relevantní: „{delivery_hits[0]}“)")
+            if themes:
+                theme_text = "; ".join(themes)
+                topic_summary = "Hlavní témata monitoringu: " + theme_text + ". Tón dostupných zpráv je smíšený až varovný; jde o syntézu titulků, nikoli nezávislé ověření všech tvrzení."
+    if topic_summary:
+        summary = topic_summary
+    elif candidates:
         summary = candidates[0]
     else:
-        count = 0 if news is None or getattr(news, "empty", True) else len(news)
         if count == 0:
             summary = "Monitoring nedodal žádné relevantní zprávy; nelze určit mediální tón ani formulovat příběh."
         elif count < 3:
@@ -3615,7 +3648,8 @@ def analyst_story_hypothesis(q, annual, quarterly, news, sec, ai_result=None):
         "Value / levná firma", "Provozní turnaround", "Cyklické zotavení",
         "Aktivové / finanční zotavení", "Realitní hodnota", "Provozní zlepšení",
         "Růstové zotavení", "Vysoký růst / dražší příběh", "Value trap – varování",
-        "Nejasný / smíšený příběh", "Růst tržeb při tlaku na ziskovost"
+        "Nejasný / smíšený příběh", "Růst tržeb při tlaku na ziskovost",
+        "Zhoršující se výhled a restrukturalizace"
     }
     primary = (ai_result or {}).get("text", "") if isinstance(ai_result, dict) else ""
     recovery = (ai_result or {}).get("recovery") or {} if isinstance(ai_result, dict) else {}
@@ -3668,6 +3702,25 @@ def analyst_story_hypothesis(q, annual, quarterly, news, sec, ai_result=None):
         if rev_delta >= 5 and margin_delta <= -1.0:
             title = "Růst tržeb při tlaku na ziskovost"
 
+    # Current material events outrank a historical multi-year revenue increase.
+    # This is a working story label, not a claim that restructuring will succeed.
+    news_titles = ""
+    if news is not None and not getattr(news, "empty", True):
+        for col in ("Název", "Popis"):
+            if col in news.columns:
+                news_titles += " " + " ".join(clean_text(x) for x in news[col].dropna().astype(str).tolist())
+    news_lower = news_titles.lower()
+    restructuring_signal = bool(re.search(
+        r"(?i)(restructur|cost.?cut|cost.?reduc|lay.?off|job.?cut|workforce reduction|collective agreement|collective bargaining|union|labor negotiation|labour negotiation|kündigt.{0,30}tarif|tarifvertrag|restrukturaliz|snižování nákladů|výpověď.{0,30}smluv|odbory)",
+        news_lower
+    ))
+    outlook_deterioration = bool(re.search(
+        r"(?i)(profit warning|outlook.{0,35}(cut|lower|reduc|downgrad)|guidance.{0,35}(cut|lower|reduc|downgrad)|výhled.{0,35}(sníž|zhorš)|sníž.{0,35}výhled)",
+        news_lower
+    ))
+    if restructuring_signal and outlook_deterioration:
+        title = "Zhoršující se výhled a restrukturalizace"
+
     profile_m = re.search(r"(?im)^\s*PROFILE\s*:\s*(.+)$", source)
     profile_text = profile_m.group(1).strip() if profile_m else ""
     # Keep section 6 distinct from section 2: never paste the full deterministic
@@ -3694,7 +3747,18 @@ def analyst_story_hypothesis(q, annual, quarterly, news, sec, ai_result=None):
         if revenue_change is not None:
             rev_txt = f"{revenue_change:.1f}".replace(".", ",")
             margin_txt = f"{margin_change:+.1f}".replace(".", ",")
-            rationale.append(f"V dostupné roční řadě tržby vzrostly o {rev_txt} % a provozní marže se změnila o {margin_txt} procentního bodu ({first['period']} až {last['period']}).")
+            # Lead with the latest year-on-year direction; never headline a multi-year
+            # revenue increase when the latest year shows deterioration.
+            if len(valid_rows) >= 2:
+                prev_latest, latest = valid_rows[-2], valid_rows[-1]
+                latest_rev_yoy = ((latest["revenue"] / prev_latest["revenue"] - 1) * 100) if prev_latest["revenue"] else None
+                if latest_rev_yoy is not None and (latest_rev_yoy < -0.5 or latest["opm"] < prev_latest["opm"] - 0.5):
+                    latest_rev_text = f"tržby {latest_rev_yoy:+.1f} % YoY".replace(".", ",")
+                    latest_margin_text = f"marže {prev_latest['opm']:.1f} % → {latest['opm']:.1f} %".replace(".", ",")
+                    rationale.append(f"Hlavní signál je poslední FY: {latest_rev_text}; {latest_margin_text}.")
+                    rationale.append(f"V delším období ({first['period']} až {last['period']}) se tržby změnily o {rev_txt} % a marže o {margin_txt} procentního bodu; tento historický součet nepřebíjí aktuální zhoršení.")
+                else:
+                    rationale.append(f"V dostupné roční řadě tržby vzrostly o {rev_txt} % a provozní marže se změnila o {margin_txt} procentního bodu ({first['period']} až {last['period']}).")
         fcf_rows = [r for r in rows if r["fcf"] is not None]
         if len(fcf_rows) >= 3:
             fcf_vals = [r["fcf"] for r in fcf_rows]
@@ -4051,7 +4115,7 @@ def analyst_render(ticker_input):
     # The former V6.28.x diagnostic block is intentionally removed from the
     # normal UI so it cannot interrupt the analytical workflow.
 
-    # V6.28.43: HARD IDENTITY FIREWALL. The exact Yahoo Chart symbol is the
+    # V6.28.44: HARD IDENTITY FIREWALL. The exact Yahoo Chart symbol is the
     # authoritative ticker-identity check. Yahoo Search is optional enrichment: if
     # it returns an exact quote, use its fields; if it returns nothing, do not block
     # a valid exact Chart result. Never accept an approximate Search result.
@@ -4065,12 +4129,12 @@ def analyst_render(ticker_input):
             f"{q.get('identity_reason') or 'Neznámý důvod.'} Analýza byla z bezpečnostních důvodů zastavena."
         )
         st.info(
-            "Analytik V6.28.43 nepoužije přibližně nalezenou firmu ani data z jiného titulu. "
+            "Analytik V6.28.44 nepoužije přibližně nalezenou firmu ani data z jiného titulu. "
             "Pokud se zastavení opakuje, pošli mi diagnostický výpis – nebudeme to obcházet dalším fallbackem."
         )
         return
 
-    # V6.28.43: supplement sparse Yahoo Search quote fields only from yfinance
+    # V6.28.44: supplement sparse Yahoo Search quote fields only from yfinance
     # when its info.symbol exactly matches the already-verified Yahoo ticker.
     quote_fallback = _analyst_yfinance_quote_fallback(yahoo_ticker)
     q["quote_fallback_status"] = quote_fallback.get("fallback_status", "nedostupné")
@@ -4153,7 +4217,7 @@ def analyst_render(ticker_input):
     status.success("5/5 Analytické jádro dokončeno.")
 
     st.markdown(f"## {company}")
-    st.caption(f"Ticker **{ticker}** · Yahoo **{yahoo_ticker}** · {exchange} · profil **{profile}** · načteno {datetime.now().strftime('%d.%m.%Y %H:%M')} · build **V6.28.43 / 20261014-J**")
+    st.caption(f"Ticker **{ticker}** · Yahoo **{yahoo_ticker}** · {exchange} · profil **{profile}** · načteno {datetime.now().strftime('%d.%m.%Y %H:%M')} · build **V6.28.44 / 20261015-K**")
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Cena", f"{analyst_human_number(q.get('price'), 2)} {q.get('currency', '')}")
@@ -4175,7 +4239,7 @@ def analyst_render(ticker_input):
 
     with st.expander("🧠 2. Co se ve firmě právě mění", expanded=True):
         completion_status = ai_result.get("completion_status", "unknown") if isinstance(ai_result, dict) else "unknown"
-        st.caption("V6.28.43: finanční čísla počítá aplikace; poslední FY a nejnovější srovnatelné období mají přednost, starší roky slouží hlavně jako základna. AI text nedokazuje příčiny změn.")
+        st.caption("V6.28.44: aktuální firemní události z monitoringu (výhled, náklady, restrukturalizace, odbory, dodávky) mohou převážit nad historickým růstem; finanční příčiny se nepředpokládají bez důkazu.")
         if isinstance(ai_result, dict) and not ai_result.get("ok"):
             st.warning("AI syntéza není dostupná. Finanční přehled níže přesto zůstává k dispozici, protože se počítá přímo z načtených ročních dat.")
         elif completion_status == "ai_recovery":
@@ -4290,7 +4354,7 @@ def analyst_render(ticker_input):
         st.write(f"Evidence položek: {ai_result.get('evidence_count', '—')}")
         st.write(f"AI model: {ai_result.get('model', '—')}")
         st.write(f"Kontrola kódu fallbacku: {ANALYST_FALLBACK_REVISION}")
-        st.write("Pravidlo V6.28.43 / DF43-A: aktuální příběh váží nejnovější FY proti předchozímu FY a dostupné kvartální YoY/TTM výše než starší roky; starší období jsou srovnávací základna. Monitoring hledá také investiční/analytické zdroje, zohledňuje aktuálnost a deduplikuje titulky; valuace zůstává zdrojově podmíněná.")
+        st.write("Pravidlo V6.28.44 / DF44-A: příběh upřednostňuje poslední FY a aktuální firemní události před dlouhodobým kumulativním růstem; monitoring tematicky zachycuje také restrukturalizaci, snižování nákladů, pracovní vztahy, výhled a dodávky. Obecné cenové/profilové stránky se filtrují; titulky zůstávají signály, ne ověřená fakta.")
         st.write(f"Stav dokončení AI: { {'primary_ai': 'původní odpověď formálně úplná', 'ai_recovery': 'použita záchranná AI odpověď', 'deterministic_fallback': 'použit datový fallback'}.get(ai_result.get('completion_status'), 'stav není k dispozici') }")
         diag = ai_result.get("completion_diagnostics") or {}
         if diag:
