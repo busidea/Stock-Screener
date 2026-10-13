@@ -15,7 +15,7 @@ from datetime import datetime
 st.set_page_config(page_title="Stock-Screener", page_icon="🔎", layout="wide")
 
 RUNTIME_LOG = Path("/tmp/stock_screener_runtime.json")
-ANALYST_FALLBACK_REVISION = "DF42-A · deduplikace a aktuálnost zpráv, kontrola protiargumentu a valuace"
+ANALYST_FALLBACK_REVISION = "DF43-A · priorita posledního vývoje, investiční zdroje a srovnání FY/YoY"
 
 @st.cache_resource(show_spinner=False)
 def get_runtime_state():
@@ -54,7 +54,7 @@ def update_runtime(status=None, stage=None, message=None, error=None, run_id=Non
 
 
 st.title("📊 Stock-Screener")
-st.caption("V6.28.42 · BUILD 20261013-I – Screener · samostatný modul Analytik je dostupný v menu vlevo")
+st.caption("V6.28.43 · BUILD 20261014-J – Screener · samostatný modul Analytik je dostupný v menu vlevo")
 
 NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 NYSE_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
@@ -1756,7 +1756,7 @@ def _analyst_yahoo_search_quote(yahoo_ticker):
 @st.cache_data(ttl=1800, show_spinner=False)
 def analyst_get_quote_data(yahoo_ticker):
     """
-    V6.28.42 DETERMINISTIC FINANCIAL SECTION + AI INTERPRETATION SEPARATION + COMPLETION DIAGNOSTICS.
+    V6.28.43 DETERMINISTIC FINANCIAL SECTION + AI INTERPRETATION SEPARATION + COMPLETION DIAGNOSTICS.
 
     A company may be accepted only when BOTH independent Yahoo layers agree
     on the exact requested Yahoo symbol:
@@ -2285,14 +2285,20 @@ def analyst_google_news(company_name, ticker, ir_website=""):
     domain=""
     try: domain=urlparse(clean_text(ir_website)).netloc.replace("www.","")
     except Exception: pass
+    # Search both current company events and investment-oriented analysis.
+    # Use a rolling cutoff rather than a hard-coded date.
+    search_after = (pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=365)).strftime("%Y-%m-%d")
+    # Specialist queries are additive: general financial/official reporting remains eligible.
     queries=[
-        f'"{company}" earnings results guidance outlook',
-        f'"{company}" strategy restructuring acquisition divestment separation',
-        f'"{company}" demand orders margin China regulation tariff',
-        f'"{company}" CEO CFO management investor',
-        f'"{company}" product launch approval capacity factory',
+        f'"{company}" earnings results latest guidance outlook after:{search_after}',
+        f'"{company}" strategy restructuring acquisition divestment separation after:{search_after}',
+        f'"{company}" demand orders margin China regulation tariff after:{search_after}',
+        f'"{company}" investment thesis valuation bull case bear case analyst',
+        f'"{company}" investor analysis earnings outlook valuation margin',
+        f'"{company}" site:seekingalpha.com OR site:simplywall.st OR site:investing.com OR site:marketscreener.com',
+        f'"{company}" site:morningstar.com OR site:reuters.com OR site:ft.com OR site:investors.com',
     ]
-    if domain: queries.append(f'"{company}" site:{domain}')
+    if domain: queries.append(f'"{company}" site:{domain} after:{search_after}')
     rows=[]
     for query in queries:
         try:
@@ -2311,13 +2317,15 @@ def analyst_google_news(company_name, ticker, ir_website=""):
     if not rows: return pd.DataFrame()
     out = pd.DataFrame(rows)
     # Current sentiment must not be diluted by old background articles.
-    # Retain only items dated within the last 365 days; if the date is missing,
-    # keep the item but make its age visible in the monitoring label.
+    # Retain only dated items from the last 365 days. Undated articles are not
+    # allowed to influence a conclusion about the current news sentiment.
     now_utc = pd.Timestamp.now(tz="UTC")
     parsed_dates = pd.to_datetime(out["Datum"], errors="coerce", utc=True)
     out["_DatumParsed"] = parsed_dates
     cutoff = now_utc - pd.Timedelta(days=365)
-    out = out[parsed_dates.isna() | (parsed_dates >= cutoff)].copy()
+    out = out[parsed_dates.notna() & (parsed_dates >= cutoff)].copy()
+    if out.empty:
+        return pd.DataFrame()
     # Deduplicate across publishers / Google News mirrors by normalized headline.
     def _norm_headline(value):
         text = clean_text(value).lower()
@@ -2330,11 +2338,37 @@ def analyst_google_news(company_name, ticker, ir_website=""):
         text = re.sub(r"[^a-z0-9à-ž]+", " ", text)
         return re.sub(r"\s+", " ", text).strip()
     out["_HeadlineKey"] = out["Název"].map(_norm_headline)
-    out = out.sort_values(["Relevance", "_DatumParsed"], ascending=[False, False], na_position="last")
+    # Give a modest evidence-quality boost to investment research and primary/major
+    # financial sources; do not let source reputation override relevance or freshness.
+    def _source_bonus(row):
+        source = (clean_text(row.get("Zdroj")) + " " + clean_text(row.get("Odkaz"))).lower()
+        title = clean_text(row.get("Název")).lower()
+        bonus = 0
+        specialist = ("seeking alpha", "seekingalpha", "simply wall street", "simplywall.st",
+                      "investing.com", "marketscreener", "morningstar", "investors.com",
+                      "fool.com", "the motley fool", "barron's", "zacks")
+        major_financial = ("reuters", "financial times", "ft.com", "bloomberg", "wall street journal", "wsj.com")
+        official = (domain.lower(),) if domain else tuple()
+        if any(x and x in source for x in official): bonus += 3
+        if any(x in source for x in specialist): bonus += 3
+        elif any(x in source for x in major_financial): bonus += 2
+        if any(x in title for x in ("investment thesis", "valuation", "bull case", "bear case", "earnings analysis", "investor analysis")):
+            bonus += 1
+        return bonus
+    out["_SourceBonus"] = out.apply(_source_bonus, axis=1)
+    out["_AgeDays"] = (now_utc - out["_DatumParsed"]).dt.days
+    # A small, transparent recency boost means a current company update can beat
+    # a more keyword-dense but older item. Unknown dates receive no recency boost.
+    out["_RecencyBonus"] = out["_AgeDays"].map(lambda d: 3 if pd.notna(d) and d <= 30 else 2 if pd.notna(d) and d <= 90 else 1 if pd.notna(d) and d <= 180 else 0)
+    out["_Rank"] = out["Relevance"].fillna(0) + out["_SourceBonus"] + out["_RecencyBonus"]
+    out = out.sort_values(["_Rank", "_DatumParsed"], ascending=[False, False], na_position="last")
     out = out.drop_duplicates(subset=["_HeadlineKey"], keep="first")
-    out["Stáří"] = out["_DatumParsed"].map(lambda d: "Datum neověřeno" if pd.isna(d) else (f"{(now_utc-d).days} dní"))
-    out = out.drop(columns=["_DatumParsed", "_HeadlineKey"], errors="ignore")
-    return out.sort_values(["Relevance", "Datum"], ascending=[False, False]).head(35).reset_index(drop=True)
+    out["Stáří"] = out["_DatumParsed"].map(lambda d: f"{(now_utc-d).days} dní")
+    # Carry the combined relevance + source + recency score into downstream sorting.
+    out["Relevance"] = out["_Rank"]
+    out = out.sort_values(["Relevance", "_DatumParsed"], ascending=[False, False], na_position="last")
+    out = out.drop(columns=["_DatumParsed", "_HeadlineKey", "_SourceBonus", "_AgeDays", "_RecencyBonus", "_Rank"], errors="ignore")
+    return out.head(35).reset_index(drop=True)
 
 
 def _analyst_fmt_pct(v):
@@ -2346,6 +2380,48 @@ def analyst_financial_summary(annual, quarterly):
     if annual is None or annual.empty:
         return "Finanční trend se nepodařilo z veřejných dat spolehlivě sestavit."
     parts=[]
+    # Put the latest year-on-year movement first. Older FYs remain the baseline,
+    # but must not dominate the interpretation of the current company situation.
+    valid_annual = annual.copy()
+    if "Období" in valid_annual.columns:
+        valid_annual = valid_annual.sort_values("Období", kind="stable")
+    if len(valid_annual) >= 2:
+        prev_row, last_row = valid_annual.iloc[-2], valid_annual.iloc[-1]
+        latest_label = clean_text(last_row.get("Období")) or "poslední FY"
+        previous_label = clean_text(prev_row.get("Období")) or "předchozí FY"
+        recent_bits = []
+        for col, label in [("Revenue", "tržby"), ("Net Income", "čistý zisk")]:
+            a, b = safe_float(prev_row.get(col)), safe_float(last_row.get(col))
+            if not pd.isna(a) and not pd.isna(b):
+                change = ((b/a)-1)*100 if a != 0 else np.nan
+                direction = "vzrostly" if b > a else "klesly" if b < a else "zůstaly stejné"
+                change_txt = f" ({analyst_pct(change,1)} YoY)" if not pd.isna(change) else ""
+                recent_bits.append(f"{label} {direction}{change_txt}: {analyst_human_number(a)} → {analyst_human_number(b)}")
+        if "Operating Income" in valid_annual.columns and "Revenue" in valid_annual.columns:
+            margins=[]
+            for row in (prev_row, last_row):
+                rev, op = safe_float(row.get("Revenue")), safe_float(row.get("Operating Income"))
+                margins.append(op/rev*100 if not pd.isna(rev) and rev != 0 and not pd.isna(op) else np.nan)
+            if not any(pd.isna(x) for x in margins):
+                delta = margins[1]-margins[0]
+                direction = "vzrostla" if delta > 0 else "klesla" if delta < 0 else "se nezměnila"
+                recent_bits.append(f"provozní marže {direction} o {analyst_pct(delta,1)} p. b. ({margins[0]:.1f} % → {margins[1]:.1f} %)".replace(".", ","))
+        if "FCF" in valid_annual.columns:
+            a, b = safe_float(prev_row.get("FCF")), safe_float(last_row.get("FCF"))
+            if not pd.isna(a) and not pd.isna(b):
+                if a < 0 <= b:
+                    trend = "se změnil ze záporného na nezáporný"
+                elif a >= 0 > b:
+                    trend = "se změnil z nezáporného na záporný"
+                elif b > a:
+                    trend = "se zlepšil"
+                elif b < a:
+                    trend = "se zhoršil"
+                else:
+                    trend = "se nezměnil"
+                recent_bits.append(f"FCF {trend}: {analyst_human_number(a)} → {analyst_human_number(b)}")
+        if recent_bits:
+            parts.append(f"**Priorita posledního vývoje – {latest_label} proti {previous_label}:** " + "; ".join(recent_bits) + ". Starší období slouží jako srovnávací základna, nikoli jako hlavní důkaz současného trendu.")
     def series_change(df,col):
         if col not in df.columns: return np.nan
         s=pd.to_numeric(df[col],errors="coerce").dropna()
@@ -2695,6 +2771,59 @@ def _analyst_financial_change_summary(annual, quarterly):
     parts = []
     if annual is not None and not annual.empty:
         parts.append(f"Dostupná roční řada: {len(annual)} fiskálních období; období jsou označena skutečným datem konce FY.")
+        # If available, prioritize the latest same-quarter YoY movement above historical paths.
+        if quarterly is not None and not quarterly.empty and "Období" in quarterly.columns:
+            qwork = quarterly.copy()
+            qparsed = qwork["Období"].astype(str).str.extract(r"Q([1-4])\s+FY(\d+)")
+            qwork["_q"] = qparsed[0]
+            qwork["_qnum"] = pd.to_numeric(qparsed[0], errors="coerce")
+            qwork["_fy"] = pd.to_numeric(qparsed[1], errors="coerce")
+            qwork = qwork.dropna(subset=["_q", "_fy"]).sort_values(["_fy", "_qnum"])
+            if not qwork.empty:
+                latest_q = qwork.iloc[-1]
+                same_q = qwork[(qwork["_q"] == latest_q["_q"]) & (qwork["_fy"] < latest_q["_fy"])].sort_values("_fy")
+                if not same_q.empty:
+                    previous_q = same_q.iloc[-1]
+                    q_bits=[]
+                    for col, label in [("Revenue", "tržby"), ("Net Income", "čistý zisk"), ("FCF", "FCF")]:
+                        a, b = safe_float(previous_q.get(col)), safe_float(latest_q.get(col))
+                        if pd.isna(a) or pd.isna(b):
+                            continue
+                        if col == "FCF":
+                            ch = " (změna znaménka)" if (a < 0 <= b or a >= 0 > b) else ""
+                        elif a != 0:
+                            ch = f" ({(b/a-1)*100:+.1f} % YoY)"
+                        else:
+                            ch = ""
+                        q_bits.append(f"{label}: {analyst_human_number(a)} → {analyst_human_number(b)}{ch}")
+                    if q_bits:
+                        parts.append(f"NEJNOVĚJŠÍ SROVNATELNÉ ČTVRTLETÍ – priorita pro aktuální příběh: {clean_text(previous_q.get('Období'))} → {clean_text(latest_q.get('Období'))}; " + "; ".join(q_bits) + ". Starší FY jsou kontext, ne náhrada aktuálního vývoje.")
+        ordered_annual = annual.sort_values("Období", kind="stable") if "Období" in annual.columns else annual
+        if len(ordered_annual) >= 2:
+            prev_row, latest_row = ordered_annual.iloc[-2], ordered_annual.iloc[-1]
+            latest_period = clean_text(latest_row.get("Období")) or "poslední FY"
+            previous_period = clean_text(prev_row.get("Období")) or "předchozí FY"
+            recent = []
+            for col, label in [("Revenue", "tržby"), ("Net Income", "čistý zisk"), ("FCF", "FCF"), ("Debt", "dluh")]:
+                a, b = safe_float(prev_row.get(col)), safe_float(latest_row.get(col))
+                if pd.isna(a) or pd.isna(b):
+                    continue
+                if col == "FCF":
+                    change_text = " (změna znaménka)" if (a < 0 <= b or a >= 0 > b) else ""
+                elif a != 0:
+                    change_text = f" ({(b/a-1)*100:+.1f} % YoY)"
+                else:
+                    change_text = ""
+                recent.append(f"{label}: {analyst_human_number(a)} → {analyst_human_number(b)}{change_text}")
+            if "Revenue" in ordered_annual.columns and "Operating Income" in ordered_annual.columns:
+                margin_values=[]
+                for row in (prev_row, latest_row):
+                    rev, op = safe_float(row.get("Revenue")), safe_float(row.get("Operating Income"))
+                    margin_values.append(op/rev*100 if not pd.isna(rev) and rev != 0 and not pd.isna(op) else np.nan)
+                if not any(pd.isna(x) for x in margin_values):
+                    recent.append(f"provozní marže: {margin_values[0]:.1f} % → {margin_values[1]:.1f} % ({margin_values[1]-margin_values[0]:+.1f} p. b.)")
+            if recent:
+                parts.append("NEJDŮLEŽITĚJŠÍ AKTUÁLNÍ SROVNÁNÍ – poslední FY proti předchozímu FY (priorita pro příběh): " + "; ".join(recent) + ". Starší FY používej hlavně jako základnu a kontext.")
         # Operating margin is derived transparently from operating income / revenue
         # for each same fiscal year; it is not interchangeable with net margin.
         if "Operating Income" in annual.columns and "Revenue" in annual.columns:
@@ -2789,9 +2918,9 @@ def _analyst_price_evidence(price):
 def groq_connection_diagnostics(api_key, model="openai/gpt-oss-120b"):
     results = []
     base = "https://api.groq.com"
-    headers = {"Authorization": f"Bearer {api_key}", "User-Agent": "Stock-Screener/6.28.40"}
+    headers = {"Authorization": f"Bearer {api_key}", "User-Agent": "Stock-Screener/6.28.43"}
     try:
-        r = requests.get(base + "/", headers={"User-Agent": "Stock-Screener/6.28.40"}, timeout=12)
+        r = requests.get(base + "/", headers={"User-Agent": "Stock-Screener/6.28.43"}, timeout=12)
         results.append({"test": "api.groq.com – základní dostupnost", "status": r.status_code, "detail": r.text[:300]})
     except Exception as e:
         results.append({"test": "api.groq.com – základní dostupnost", "status": "ERROR", "detail": f"{type(e).__name__}: {e}"})
@@ -2896,8 +3025,8 @@ def analyst_ai_synthesis(company, ticker, exchange, q, annual, quarterly, news, 
                 line += f" | {item['extra']}"
             lines.append(line)
         return "\n".join(lines)[:max_chars]
-    fin_short = (fin or "Roční finanční řada není k dispozici.")[:700]
-    controls_short = (controls or "Automatické kontroly nejsou k dispozici.")[:250]
+    fin_short = (fin or "Roční finanční řada není k dispozici.")[:1150]
+    controls_short = (controls or "Automatické kontroly nejsou k dispozici.")[:350]
 
     allowed_stories = (
         "Kvalitní compounder; Kvalita za rozumnou cenu; Růst za rozumnou cenu; "
@@ -2913,7 +3042,7 @@ def analyst_ai_synthesis(company, ticker, exchange, q, annual, quarterly, news, 
 
 CÍL: Neopakuj finanční tabulky. Vytvoř stručnou investiční tezi: co je na firmě zajímavé, co se právě mění, jak to může ovlivnit ekonomiku firmy a co tezi ohrožuje. Žádné Buy/Hold/Sell ani cílová cena.
 
-PRAVIDLA: Používej jen dodané podklady. Příčinu změny označ za fakt jen s přímou oporou [E#]; jinak ji nazvi hypotézou nebo napiš, že ji neznáme. V monitoringu hodnotíš tón pouze vůči této společnosti a konkrétnímu tématu, ne obecnou náladu trhu; rozliš opakované téma, protichůdné zprávy a nedostatek důkazů. Titulek zprávy dovoluje tvrdit jen to, co skutečně říká; nerozšiřuj jej o příčiny (např. „AI-poháněná řešení“), které v něm nejsou. Zvlášť u zpráv o výhledu porovnej všechny dodané titulky: pokud některé píší o snížení a jiné o zvýšení výhledu, nesmíš jedno z toho vydávat za potvrzený fakt; uveď rozpor a doporuč ověření v primárním firemním zdroji. Neodvozuj podíl cloudu/SaaS/BTP, úspory, cenovou sílu ani produktový mix z marží nebo cash flow. FY srovnávej s FY; kvartál YoY jen se stejným kvartálem minulého FY. Nepoužívej už známá období jako úkol k dalšímu ověření. Ocenění posuzuj odděleně od kvality podniku. „Za rozumnou cenu“ vyžaduje argument, proč násobky odpovídají očekávanému růstu; nižší forward P/E samo nestačí.
+PRAVIDLA: Používej jen dodané podklady. ČASOVÁ PRIORITA: při určování současného příběhu dej největší váhu poslednímu dostupnému FY proti předchozímu FY a zejména nejnovějšímu srovnatelnému kvartálu/TTM, pokud je doložen. Starší roky používej jako základnu, cyklický kontext a kontrolu, ne jako hlavní důkaz aktuální situace. Výslovně pojmenuj, zda se trend v posledním období zlepšil, zhoršil, nebo změnil směr. Pokud chybí aktuální srovnatelné období, řekni to a sniž jistotu. Příčinu změny označ za fakt jen s přímou oporou [E#]; jinak ji nazvi hypotézou nebo napiš, že ji neznáme. V monitoringu hodnotíš tón pouze vůči této společnosti a konkrétnímu tématu, ne obecnou náladu trhu; rozliš opakované téma, protichůdné zprávy a nedostatek důkazů. Preferuj aktuální investiční/analytické články a oficiální oznámení; rozliš kvalitu zdroje a počet nezávislých článků od prostého počtu RSS položek. Titulek zprávy dovoluje tvrdit jen to, co skutečně říká; nerozšiřuj jej o příčiny (např. „AI-poháněná řešení“), které v něm nejsou. Zvlášť u zpráv o výhledu porovnej všechny dodané titulky: pokud některé píší o snížení a jiné o zvýšení výhledu, nesmíš jedno z toho vydávat za potvrzený fakt; uveď rozpor a doporuč ověření v primárním firemním zdroji. Neodvozuj podíl cloudu/SaaS/BTP, úspory, cenovou sílu ani produktový mix z marží nebo cash flow. FY srovnávej s FY; kvartál YoY jen se stejným kvartálem minulého FY. Nepoužívej už známá období jako úkol k dalšímu ověření. Ocenění posuzuj odděleně od kvality podniku. „Za rozumnou cenu“ vyžaduje argument, proč násobky odpovídají očekávanému růstu; nižší forward P/E samo nestačí.
 
 VÝSTUP: nejvýše 140 slov CELKEM. Každé pole jen jedna krátká věta. Bez úvodu, bez tabulek, bez opakování číselných řad. Vyplň všechna pole a skonči po MONITORING.
 STORY: [vyber přesně jeden název z: {allowed_stories}]
@@ -2947,7 +3076,7 @@ CENA: {analyst_human_number(q.get('price'), 2)} {clean_text(q.get('currency')) o
     def call(payload):
         return requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.28.40"},
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.28.43"},
             json=payload, timeout=90,
         )
 
@@ -3183,7 +3312,7 @@ EVIDENCE:
     def call(payload):
         return requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.28.40"},
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.28.43"},
             json=payload, timeout=60
         )
 
@@ -3354,11 +3483,59 @@ def _analyst_deterministic_recovery(annual, quarterly, profile="Naspeedovaný", 
         rev_delta = ((last["revenue"] / first["revenue"] - 1) * 100
                      if first["revenue"] not in (None, 0) and last["revenue"] is not None else None)
         trend = "vzrostla" if delta_pp > 0.5 else "klesla" if delta_pp < -0.5 else "se změnila jen mírně"
+        latest_compare = ""
+        if len(rows) >= 2:
+            prev, cur = rows[-2], rows[-1]
+            compare_bits=[]
+            for key, label in (("revenue", "tržby"), ("ni", "čistý zisk")):
+                a, b = prev.get(key), cur.get(key)
+                if a is not None and b is not None:
+                    pct = ((b/a)-1)*100 if a != 0 else None
+                    change_pct = f" ({fmt(pct)} % YoY)" if pct is not None else ""
+                    direction = "vzrostly" if b > a else "klesly" if b < a else "se nezměnily"
+                    compare_bits.append(f"{label} {direction}{change_pct}")
+            if prev.get("opm") is not None and cur.get("opm") is not None:
+                d = cur["opm"] - prev["opm"]
+                compare_bits.append(f"provozní marže {prev['opm']:.1f} % → {cur['opm']:.1f} % ({d:+.1f} p. b.)".replace(".", ","))
+            if prev.get("fcf") is not None and cur.get("fcf") is not None:
+                a,b=prev["fcf"],cur["fcf"]
+                if a < 0 <= b: fcf_dir="přešla ze záporné na nezápornou"
+                elif a >= 0 > b: fcf_dir="přešla z nezáporné na zápornou"
+                elif b > a: fcf_dir="se zlepšila"
+                elif b < a: fcf_dir="se zhoršila"
+                else: fcf_dir="se nezměnila"
+                compare_bits.append(f"FCF {fcf_dir} ({fmt(a/1_000_000_000)} → {fmt(b/1_000_000_000)} mld.)")
+            if compare_bits:
+                latest_compare = f"**Nejnovější meziroční změna – {cur['period']} proti {prev['period']} (pro aktuální příběh má přednost):** " + "; ".join(compare_bits) + ". Starší roky slouží hlavně jako srovnávací základna.\n\n"
+        latest_quarter_compare = ""
+        if quarterly is not None and not quarterly.empty and "Období" in quarterly.columns:
+            qw = quarterly.copy()
+            qp = qw["Období"].astype(str).str.extract(r"Q([1-4])\s+FY(\d+)")
+            qw["_q"] = qp[0]
+            qw["_qnum"] = pd.to_numeric(qp[0], errors="coerce")
+            qw["_fy"] = pd.to_numeric(qp[1], errors="coerce")
+            qw = qw.dropna(subset=["_q", "_fy"]).sort_values(["_fy", "_qnum"])
+            if not qw.empty:
+                lq = qw.iloc[-1]
+                prev_qs = qw[(qw["_q"] == lq["_q"]) & (qw["_fy"] < lq["_fy"])].sort_values("_fy")
+                if not prev_qs.empty:
+                    pq = prev_qs.iloc[-1]
+                    qb=[]
+                    for col,label in (("Revenue","tržby"),("Net Income","čistý zisk"),("FCF","FCF")):
+                        a,b=val(pq,col),val(lq,col)
+                        if a is None or b is None: continue
+                        if col == "FCF": ch=" (změna znaménka)" if (a < 0 <= b or a >= 0 > b) else ""
+                        elif a != 0: ch=f" ({(b/a-1)*100:+.1f} % YoY)"
+                        else: ch=""
+                        qb.append(f"{label}: {analyst_human_number(a)} → {analyst_human_number(b)}{ch}")
+                    if qb:
+                        latest_quarter_compare = f"**Nejnovější srovnatelné čtvrtletí:** {clean_text(pq.get('Období'))} → {clean_text(lq.get('Období'))} " + "; ".join(qb) + ". Čtvrtletí je srovnáno se stejným kvartálem minulého FY.\n\n"
         change = (
             "### 1. Vývoj provozní marže a finančních výsledků\n"
             f"**Co víme:** Provozní marže (provozní zisk / tržby): {opm_path}. Tržby: {rev_path}.\n\n"
             f"**Další finanční řady:** Čistý zisk: {ni_path}. FCF: {fcf_path}. Dluh: {debt_path}.\n\n"
             f"**Interpretace:** Provozní marže mezi první a poslední dostupnou FY {trend} o {fmt(abs(delta_pp))} procentního bodu; změna tržeb mezi krajními dostupnými FY činí {fmt(rev_delta)} %. Meziroční cesta je vidět v uvedených hodnotách.\n\n"
+            f"{latest_compare}{latest_quarter_compare}"
             "**Ekonomický dopad:** Vyšší provozní marže může při udržení podmínek podporovat provozní zisk, ale sama nepotvrzuje udržitelnost ani příčinu. Čistý zisk, FCF a dluh jsou zobrazeny odděleně; nejsou zaměnitelné.\n\n"
             "**Inference:** Data podporují hodnocení skutečně pozorované změny provozní marže, nikoli automaticky závěr o cloudu, SaaS/BTP, úsporách nebo produktovém mixu.\n\n"
             "**Neznáme:** Bez přímého důkazu nevíme, jakou část změny vysvětlují segmenty, náklady, finanční výsledek, daně nebo jednorázové položky.\n\n"
@@ -3874,7 +4051,7 @@ def analyst_render(ticker_input):
     # The former V6.28.x diagnostic block is intentionally removed from the
     # normal UI so it cannot interrupt the analytical workflow.
 
-    # V6.28.42: HARD IDENTITY FIREWALL. The exact Yahoo Chart symbol is the
+    # V6.28.43: HARD IDENTITY FIREWALL. The exact Yahoo Chart symbol is the
     # authoritative ticker-identity check. Yahoo Search is optional enrichment: if
     # it returns an exact quote, use its fields; if it returns nothing, do not block
     # a valid exact Chart result. Never accept an approximate Search result.
@@ -3888,12 +4065,12 @@ def analyst_render(ticker_input):
             f"{q.get('identity_reason') or 'Neznámý důvod.'} Analýza byla z bezpečnostních důvodů zastavena."
         )
         st.info(
-            "Analytik V6.28.42 nepoužije přibližně nalezenou firmu ani data z jiného titulu. "
+            "Analytik V6.28.43 nepoužije přibližně nalezenou firmu ani data z jiného titulu. "
             "Pokud se zastavení opakuje, pošli mi diagnostický výpis – nebudeme to obcházet dalším fallbackem."
         )
         return
 
-    # V6.28.42: supplement sparse Yahoo Search quote fields only from yfinance
+    # V6.28.43: supplement sparse Yahoo Search quote fields only from yfinance
     # when its info.symbol exactly matches the already-verified Yahoo ticker.
     quote_fallback = _analyst_yfinance_quote_fallback(yahoo_ticker)
     q["quote_fallback_status"] = quote_fallback.get("fallback_status", "nedostupné")
@@ -3976,7 +4153,7 @@ def analyst_render(ticker_input):
     status.success("5/5 Analytické jádro dokončeno.")
 
     st.markdown(f"## {company}")
-    st.caption(f"Ticker **{ticker}** · Yahoo **{yahoo_ticker}** · {exchange} · profil **{profile}** · načteno {datetime.now().strftime('%d.%m.%Y %H:%M')} · build **V6.28.42 / 20261013-I**")
+    st.caption(f"Ticker **{ticker}** · Yahoo **{yahoo_ticker}** · {exchange} · profil **{profile}** · načteno {datetime.now().strftime('%d.%m.%Y %H:%M')} · build **V6.28.43 / 20261014-J**")
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Cena", f"{analyst_human_number(q.get('price'), 2)} {q.get('currency', '')}")
@@ -3998,7 +4175,7 @@ def analyst_render(ticker_input):
 
     with st.expander("🧠 2. Co se ve firmě právě mění", expanded=True):
         completion_status = ai_result.get("completion_status", "unknown") if isinstance(ai_result, dict) else "unknown"
-        st.caption("V6.28.42: finanční čísla a jejich časové řady v této sekci počítá přímo aplikace. AI může navrhnout pracovní příběh, ale její text nenahrazuje finanční data ani nedokazuje příčiny změn.")
+        st.caption("V6.28.43: finanční čísla počítá aplikace; poslední FY a nejnovější srovnatelné období mají přednost, starší roky slouží hlavně jako základna. AI text nedokazuje příčiny změn.")
         if isinstance(ai_result, dict) and not ai_result.get("ok"):
             st.warning("AI syntéza není dostupná. Finanční přehled níže přesto zůstává k dispozici, protože se počítá přímo z načtených ročních dat.")
         elif completion_status == "ai_recovery":
@@ -4010,7 +4187,7 @@ def analyst_render(ticker_input):
     with st.expander("📰 Monitoring tisku – témata, tón a rozpory", expanded=True):
         monitoring_summary, monitoring_count = analyst_news_monitoring_text(news, ai_result)
         st.write(monitoring_summary)
-        st.caption(f"Načteno {monitoring_count} relevantních zpráv. Monitoring používá pouze zprávy z posledních 365 dní (datum neznámé je označeno); titulky jsou deduplikovány. Jde o dostupné titulky/popisky, nikoli ověřená fakta ani reprezentativní průzkum celého tisku.")
+        st.caption(f"Načteno {monitoring_count} relevantních, datovaných zpráv z posledních 365 dní; nedatované položky se do aktuálního sentimentu nezapočítávají. Vyhledávání zahrnuje i investiční a analytické weby a pořadí zohledňuje aktuálnost i typ zdroje. Titulky jsou deduplikovány. Jde o dostupné titulky/popisky, nikoli ověřená fakta ani reprezentativní průzkum celého tisku.")
         if news is not None and not news.empty:
             display_news = news.copy()
             keep = [c for c in ["Datum", "Stáří", "Zdroj", "Název", "Popis", "Odkaz"] if c in display_news.columns]
@@ -4113,7 +4290,7 @@ def analyst_render(ticker_input):
         st.write(f"Evidence položek: {ai_result.get('evidence_count', '—')}")
         st.write(f"AI model: {ai_result.get('model', '—')}")
         st.write(f"Kontrola kódu fallbacku: {ANALYST_FALLBACK_REVISION}")
-        st.write("Pravidlo V6.28.42 / DF42-A: zprávy starší než 365 dní se nezapočítávají do aktuálního monitoringu; titulky se deduplikují po normalizaci; finanční teze vychází z celé roční řady; valuace dostává varování při podezřele nízkých násobcích, které mohou vycházet z nesouladu kapitalizace a skupinových výkazů.")
+        st.write("Pravidlo V6.28.43 / DF43-A: aktuální příběh váží nejnovější FY proti předchozímu FY a dostupné kvartální YoY/TTM výše než starší roky; starší období jsou srovnávací základna. Monitoring hledá také investiční/analytické zdroje, zohledňuje aktuálnost a deduplikuje titulky; valuace zůstává zdrojově podmíněná.")
         st.write(f"Stav dokončení AI: { {'primary_ai': 'původní odpověď formálně úplná', 'ai_recovery': 'použita záchranná AI odpověď', 'deterministic_fallback': 'použit datový fallback'}.get(ai_result.get('completion_status'), 'stav není k dispozici') }")
         diag = ai_result.get("completion_diagnostics") or {}
         if diag:
