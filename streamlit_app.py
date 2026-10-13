@@ -15,7 +15,7 @@ from datetime import datetime
 st.set_page_config(page_title="Stock-Screener", page_icon="🔎", layout="wide")
 
 RUNTIME_LOG = Path("/tmp/stock_screener_runtime.json")
-ANALYST_FALLBACK_REVISION = "DF35-A · stručná syntéza, TPM-aware dávkování a přímý datový fallback"
+ANALYST_FALLBACK_REVISION = "DF36-A · kontrola příběhu, stabilní ID důkazů a srovnání valuace"
 
 @st.cache_resource(show_spinner=False)
 def get_runtime_state():
@@ -54,7 +54,7 @@ def update_runtime(status=None, stage=None, message=None, error=None, run_id=Non
 
 
 st.title("📊 Stock-Screener")
-st.caption("V6.28.35 · BUILD 20261013-B – Screener · samostatný modul Analytik je dostupný v menu vlevo")
+st.caption("V6.28.36 · BUILD 20261013-C – Screener · samostatný modul Analytik je dostupný v menu vlevo")
 
 NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 NYSE_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
@@ -1756,7 +1756,7 @@ def _analyst_yahoo_search_quote(yahoo_ticker):
 @st.cache_data(ttl=1800, show_spinner=False)
 def analyst_get_quote_data(yahoo_ticker):
     """
-    V6.28.35 DETERMINISTIC FINANCIAL SECTION + AI INTERPRETATION SEPARATION + COMPLETION DIAGNOSTICS.
+    V6.28.36 DETERMINISTIC FINANCIAL SECTION + AI INTERPRETATION SEPARATION + COMPLETION DIAGNOSTICS.
 
     A company may be accepted only when BOTH independent Yahoo layers agree
     on the exact requested Yahoo symbol:
@@ -2755,9 +2755,9 @@ def _analyst_price_evidence(price):
 def groq_connection_diagnostics(api_key, model="openai/gpt-oss-120b"):
     results = []
     base = "https://api.groq.com"
-    headers = {"Authorization": f"Bearer {api_key}", "User-Agent": "Stock-Screener/6.28.35"}
+    headers = {"Authorization": f"Bearer {api_key}", "User-Agent": "Stock-Screener/6.28.36"}
     try:
-        r = requests.get(base + "/", headers={"User-Agent": "Stock-Screener/6.28.35"}, timeout=12)
+        r = requests.get(base + "/", headers={"User-Agent": "Stock-Screener/6.28.36"}, timeout=12)
         results.append({"test": "api.groq.com – základní dostupnost", "status": r.status_code, "detail": r.text[:300]})
     except Exception as e:
         results.append({"test": "api.groq.com – základní dostupnost", "status": "ERROR", "detail": f"{type(e).__name__}: {e}"})
@@ -2836,7 +2836,32 @@ def analyst_ai_synthesis(company, ticker, exchange, q, annual, quarterly, news, 
         if str(item.get("source", "")).lower() not in {"yahoo finance", "yahoo finance (direct)"}
     ]
     story_items = profile_items + non_financial_items[:5]
-    story_evidence = _analyst_evidence_text(story_items, max_chars=1500)
+    # Preserve the exact E-numbering used by the full evidence list shown to the user.
+    # Re-enumerating a filtered subset caused a serious mismatch: an AI citation such
+    # as [E7] could refer to a news item in the prompt but to FY2022 financials in UI.
+    selected_ids = {id(item) for item in story_items}
+    story_evidence_lines = []
+    for evidence_id, item in enumerate(pack, 1):
+        if id(item) not in selected_ids:
+            continue
+        line = (f"[E{evidence_id}] {item['type']} | {item['source']} | {item['date']} | "
+                f"{item['period']} | {item['claim']}")
+        if item.get("extra"):
+            line += f" | {item['extra']}"
+        story_evidence_lines.append(line)
+    story_evidence = "\n".join(story_evidence_lines)[:1500]
+    def selected_evidence_text(items, max_chars):
+        selected = {id(item) for item in items}
+        lines = []
+        for evidence_id, item in enumerate(pack, 1):
+            if id(item) not in selected:
+                continue
+            line = (f"[E{evidence_id}] {item['type']} | {item['source']} | {item['date']} | "
+                    f"{item['period']} | {item['claim']}")
+            if item.get("extra"):
+                line += f" | {item['extra']}"
+            lines.append(line)
+        return "\n".join(lines)[:max_chars]
     fin_short = (fin or "Roční finanční řada není k dispozici.")[:700]
     controls_short = (controls or "Automatické kontroly nejsou k dispozici.")[:250]
 
@@ -2887,7 +2912,7 @@ CENA: {analyst_human_number(q.get('price'), 2)} {clean_text(q.get('currency')) o
     def call(payload):
         return requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.28.35"},
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.28.36"},
             json=payload, timeout=90,
         )
 
@@ -2940,8 +2965,8 @@ CENA: {analyst_human_number(q.get('price'), 2)} {clean_text(q.get('currency')) o
     wait_seconds = 0.0
     prompts = [
         (make_prompt(story_evidence, fin_short, controls_short), 650, "short_primary"),
-        (make_prompt(_analyst_evidence_text(profile_items + non_financial_items[:2], max_chars=700), fin_short[:400], controls_short[:150]), 500, "compact_retry"),
-        (make_prompt(_analyst_evidence_text(profile_items, max_chars=300), fin_short[:250], controls_short[:100]), 400, "minimal_retry"),
+        (make_prompt(selected_evidence_text(profile_items + non_financial_items[:2], max_chars=700), fin_short[:400], controls_short[:150]), 500, "compact_retry"),
+        (make_prompt(selected_evidence_text(profile_items, max_chars=300), fin_short[:250], controls_short[:100]), 400, "minimal_retry"),
     ]
     try:
         for index, (prompt_text, token_cap, label) in enumerate(prompts):
@@ -3123,7 +3148,7 @@ EVIDENCE:
     def call(payload):
         return requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.28.35"},
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.28.36"},
             json=payload, timeout=60
         )
 
@@ -3364,6 +3389,27 @@ def analyst_story_hypothesis(q, annual, quarterly, news, sec, ai_result=None):
         proposed = dm.group(1).strip() if dm else "Nejasný / smíšený příběh"
         title = next((x for x in allowed if x.lower() == proposed.lower()), "Nejasný / smíšený příběh")
 
+    # A valid label is not necessarily a supported label. Do not accept a
+    # "turnaround" solely because margins improved when the business was not in
+    # an observable loss/revenue-collapse state in the available annual series.
+    if title == "Provozní turnaround" and annual is not None and not annual.empty:
+        revs, nis, ops = [], [], []
+        for _, row in annual.iterrows():
+            for col, target in (("Revenue", revs), ("Net Income", nis), ("Operating Income", ops)):
+                val = safe_float(row.get(col))
+                target.append(None if pd.isna(val) else float(val))
+        has_loss_to_profit = any(
+            vals[i] is not None and vals[i] <= 0 and any(v is not None and v > 0 for v in vals[i+1:])
+            for vals in (nis, ops) for i in range(len(vals)-1)
+        )
+        has_revenue_decline_then_recovery = any(
+            revs[i] is not None and revs[i+1] is not None and revs[i+1] < revs[i] * 0.9
+            and any(v is not None and v > revs[i+1] for v in revs[i+2:])
+            for i in range(max(0, len(revs)-2))
+        )
+        if not (has_loss_to_profit or has_revenue_decline_then_recovery):
+            title = "Provozní zlepšení"
+
     profile_m = re.search(r"(?im)^\s*PROFILE\s*:\s*(.+)$", source)
     profile_text = profile_m.group(1).strip() if profile_m else ""
     # Keep section 6 distinct from section 2: never paste the full deterministic
@@ -3410,6 +3456,15 @@ def analyst_story_hypothesis(q, annual, quarterly, news, sec, ai_result=None):
         m = re.search(rf"(?im)^\s*{label}\s*:\s*(.+)$", source)
         return m.group(1).strip() if m else ""
     thesis, threat, counter = field("THESIS"), field("THREAT"), field("COUNTER")
+    # Sector-relative valuation claims are not allowed unless a real, comparable
+    # sector multiple is present. This version does not load one, so replace such
+    # unsupported claims with a counterargument grounded in the available forward P/E.
+    if re.search(r"(?i)(průměr\w*\s+sektor|sektor\w*\s+průměr|nad\s+průměrem\s+sektor|pod\s+průměrem\s+sektor)", counter):
+        fpe_value = safe_float(q.get("forward_pe")) if q else float("nan")
+        if not pd.isna(fpe_value):
+            counter = (f"Forward P/E {fpe_value:.1f}× stále vyžaduje růst zisku; při zklamání může být ocenění zranitelné.").replace(".", ",", 1)
+        else:
+            counter = "Bez srovnatelného sektorového ocenění nelze tvrdit, že je firma vůči oboru dražší nebo levnější."
     lines = [
         f"**Pracovní příběh:** {title}",
         "*Jde o pracovní hypotézu, nikoli investiční doporučení.*"
@@ -3558,14 +3613,24 @@ def _analyst_display_financial_table(df):
 
 
 def _analyst_valuation_rows(q, price):
+    """Keep trailing/current and forward estimates distinct; never invent sector averages."""
+    pe = safe_float(q.get("pe"))
+    fpe = safe_float(q.get("forward_pe"))
+    ps = safe_float(q.get("ps"))
+    pb = safe_float(q.get("pb"))
     rows = []
-    labels = [("P/E", "pe"), ("Forward P/E", "forward_pe"), ("P/S", "ps"), ("P/B", "pb")]
-    for label, key in labels:
-        raw = q.get(key)
-        v = safe_float(raw)
-        if not pd.isna(v):
-            rows.append({"Ukazatel": label, "Hodnota": analyst_human_number(v, 1) + "×"})
-    return pd.DataFrame(rows, columns=["Ukazatel", "Hodnota"])
+    if not pd.isna(pe) or not pd.isna(fpe):
+        rows.append({
+            "Ukazatel": "P/E",
+            "Aktuální hodnota": "—" if pd.isna(pe) else analyst_human_number(pe, 1) + "×",
+            "Očekávaná hodnota": "—" if pd.isna(fpe) else analyst_human_number(fpe, 1) + "×",
+            "Průměr oboru": "Nedostupný",
+        })
+    if not pd.isna(ps):
+        rows.append({"Ukazatel": "P/S", "Aktuální hodnota": analyst_human_number(ps, 1) + "×", "Očekávaná hodnota": "—", "Průměr oboru": "Nedostupný"})
+    if not pd.isna(pb):
+        rows.append({"Ukazatel": "P/B", "Aktuální hodnota": analyst_human_number(pb, 1) + "×", "Očekávaná hodnota": "—", "Průměr oboru": "Nedostupný"})
+    return pd.DataFrame(rows, columns=["Ukazatel", "Aktuální hodnota", "Očekávaná hodnota", "Průměr oboru"])
 
 
 def _analyst_valuation_comment(q, price):
@@ -3573,17 +3638,21 @@ def _analyst_valuation_comment(q, price):
     ps, pb = safe_float(q.get("ps")), safe_float(q.get("pb"))
     bits = []
     if not pd.isna(pe):
-        bits.append(f"P/E {analyst_human_number(pe,1)}× znamená, že trh firmě stále přisuzuje nezanedbatelnou kvalitu a očekávání")
+        bits.append(f"Aktuální P/E je {analyst_human_number(pe,1)}×.")
     if not pd.isna(fpe) and not pd.isna(pe):
+        change = (fpe / pe - 1) * 100 if pe else np.nan
         if fpe < pe:
-            bits.append(f"Forward P/E {analyst_human_number(fpe,1)}× je nižší než současné P/E, takže ocenění předpokládá růst budoucího zisku")
+            bits.append(f"Forward P/E {analyst_human_number(fpe,1)}× je o {analyst_human_number(abs(change),1)} % nižší než aktuální P/E; to odpovídá očekávání vyššího budoucího zisku na akcii, nikoli samo o sobě důkazu levného ocenění.")
         elif fpe > pe:
-            bits.append(f"Forward P/E {analyst_human_number(fpe,1)}× je vyšší než současné P/E, což neukazuje na očekávané zlepšení zisku")
+            bits.append(f"Forward P/E {analyst_human_number(fpe,1)}× je vyšší než aktuální P/E; očekávaný zisk na akcii tedy podle těchto násobků nepřináší jejich pokles.")
+        else:
+            bits.append("Aktuální a forward P/E jsou přibližně stejné.")
     if not pd.isna(ps):
-        bits.append(f"P/S je {analyst_human_number(ps,1)}×")
+        bits.append(f"P/S je {analyst_human_number(ps,1)}×.")
     if not pd.isna(pb):
-        bits.append(f"P/B je {analyst_human_number(pb,1)}×")
-    return ". ".join(bits) + "." if bits else "Valuační data nejsou dostatečná pro smysluplný komentář."
+        bits.append(f"P/B je {analyst_human_number(pb,1)}×.")
+    bits.append("Srovnatelný průměr oboru není v této analýze dostupný; není proto možné spolehlivě tvrdit, zda je firma vůči sektoru dražší nebo levnější.")
+    return " ".join(bits) if bits else "Valuační data nejsou dostatečná pro smysluplný komentář."
 
 
 def analyst_render(ticker_input):
@@ -3641,7 +3710,7 @@ def analyst_render(ticker_input):
     # The former V6.28.x diagnostic block is intentionally removed from the
     # normal UI so it cannot interrupt the analytical workflow.
 
-    # V6.28.35: HARD IDENTITY FIREWALL. The exact Yahoo Chart symbol is the
+    # V6.28.36: HARD IDENTITY FIREWALL. The exact Yahoo Chart symbol is the
     # authoritative ticker-identity check. Yahoo Search is optional enrichment: if
     # it returns an exact quote, use its fields; if it returns nothing, do not block
     # a valid exact Chart result. Never accept an approximate Search result.
@@ -3655,12 +3724,12 @@ def analyst_render(ticker_input):
             f"{q.get('identity_reason') or 'Neznámý důvod.'} Analýza byla z bezpečnostních důvodů zastavena."
         )
         st.info(
-            "Analytik V6.28.35 nepoužije přibližně nalezenou firmu ani data z jiného titulu. "
+            "Analytik V6.28.36 nepoužije přibližně nalezenou firmu ani data z jiného titulu. "
             "Pokud se zastavení opakuje, pošli mi diagnostický výpis – nebudeme to obcházet dalším fallbackem."
         )
         return
 
-    # V6.28.35: supplement sparse Yahoo Search quote fields only from yfinance
+    # V6.28.36: supplement sparse Yahoo Search quote fields only from yfinance
     # when its info.symbol exactly matches the already-verified Yahoo ticker.
     quote_fallback = _analyst_yfinance_quote_fallback(yahoo_ticker)
     q["quote_fallback_status"] = quote_fallback.get("fallback_status", "nedostupné")
@@ -3743,7 +3812,7 @@ def analyst_render(ticker_input):
     status.success("5/5 Analytické jádro dokončeno.")
 
     st.markdown(f"## {company}")
-    st.caption(f"Ticker **{ticker}** · Yahoo **{yahoo_ticker}** · {exchange} · profil **{profile}** · načteno {datetime.now().strftime('%d.%m.%Y %H:%M')} · build **V6.28.35 / 20261013-B**")
+    st.caption(f"Ticker **{ticker}** · Yahoo **{yahoo_ticker}** · {exchange} · profil **{profile}** · načteno {datetime.now().strftime('%d.%m.%Y %H:%M')} · build **V6.28.36 / 20261013-C**")
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Cena", f"{analyst_human_number(q.get('price'), 2)} {q.get('currency', '')}")
@@ -3765,7 +3834,7 @@ def analyst_render(ticker_input):
 
     with st.expander("🧠 2. Co se ve firmě právě mění", expanded=True):
         completion_status = ai_result.get("completion_status", "unknown") if isinstance(ai_result, dict) else "unknown"
-        st.caption("V6.28.35: finanční čísla a jejich časové řady v této sekci počítá přímo aplikace. AI může navrhnout pracovní příběh, ale její text nenahrazuje finanční data ani nedokazuje příčiny změn.")
+        st.caption("V6.28.36: finanční čísla a jejich časové řady v této sekci počítá přímo aplikace. AI může navrhnout pracovní příběh, ale její text nenahrazuje finanční data ani nedokazuje příčiny změn.")
         if isinstance(ai_result, dict) and not ai_result.get("ok"):
             st.warning("AI syntéza není dostupná. Finanční přehled níže přesto zůstává k dispozici, protože se počítá přímo z načtených ročních dat.")
         elif completion_status == "ai_recovery":
@@ -3801,7 +3870,16 @@ def analyst_render(ticker_input):
     with st.expander("💰 5. Valuace – jaká očekávání jsou v ceně", expanded=False):
         valuation_rows = _analyst_valuation_rows(q, price)
         if not valuation_rows.empty:
-            st.table(valuation_rows)
+            st.dataframe(valuation_rows, hide_index=True, use_container_width=True)
+            pe_now, pe_forward = safe_float(q.get("pe")), safe_float(q.get("forward_pe"))
+            if not pd.isna(pe_now) and pe_now > 0 and not pd.isna(pe_forward) and pe_forward > 0:
+                st.markdown("**Optické srovnání násobku zisku**")
+                chart_data = pd.DataFrame(
+                    {"Násobek P/E": [float(pe_now), float(pe_forward)]},
+                    index=["Aktuální P/E", "Forward P/E"]
+                )
+                st.bar_chart(chart_data, horizontal=True)
+                st.caption("Forward P/E je odhad založený na očekávaném zisku; nejde o nezávisle vypočtenou férovou cenu.")
             st.write(_analyst_valuation_comment(q, price))
         else:
             st.write("Valuační data nejsou dostupná.")
@@ -3863,7 +3941,7 @@ def analyst_render(ticker_input):
         st.write(f"Evidence položek: {ai_result.get('evidence_count', '—')}")
         st.write(f"AI model: {ai_result.get('model', '—')}")
         st.write(f"Kontrola kódu fallbacku: {ANALYST_FALLBACK_REVISION}")
-        st.write("Pravidlo V6.28.35 / DF35-A: sekce 2 i finanční zdůvodnění pracovního příběhu se vždy počítají z ročních dat; nepřebírají finanční tvrzení z AI.")
+        st.write("Pravidlo V6.28.36 / DF36-A: sekce 2 i finanční zdůvodnění pracovního příběhu se vždy počítají z ročních dat; nepřebírají finanční tvrzení z AI.")
         st.write(f"Stav dokončení AI: { {'primary_ai': 'původní odpověď formálně úplná', 'ai_recovery': 'použita záchranná AI odpověď', 'deterministic_fallback': 'použit datový fallback'}.get(ai_result.get('completion_status'), 'stav není k dispozici') }")
         diag = ai_result.get("completion_diagnostics") or {}
         if diag:
