@@ -15,7 +15,7 @@ from datetime import datetime
 st.set_page_config(page_title="Stock-Screener", page_icon="🔎", layout="wide")
 
 RUNTIME_LOG = Path("/tmp/stock_screener_runtime.json")
-ANALYST_FALLBACK_REVISION = "DF40-A · monitoring textu a kontrola směru tržeb/marží"
+ANALYST_FALLBACK_REVISION = "DF41-A · monitoring textu, výběr teze z celé řady a smysluplný protiargument"
 
 @st.cache_resource(show_spinner=False)
 def get_runtime_state():
@@ -54,7 +54,7 @@ def update_runtime(status=None, stage=None, message=None, error=None, run_id=Non
 
 
 st.title("📊 Stock-Screener")
-st.caption("V6.28.40 · BUILD 20261013-G – Screener · samostatný modul Analytik je dostupný v menu vlevo")
+st.caption("V6.28.41 · BUILD 20261013-H – Screener · samostatný modul Analytik je dostupný v menu vlevo")
 
 NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 NYSE_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
@@ -1756,7 +1756,7 @@ def _analyst_yahoo_search_quote(yahoo_ticker):
 @st.cache_data(ttl=1800, show_spinner=False)
 def analyst_get_quote_data(yahoo_ticker):
     """
-    V6.28.40 DETERMINISTIC FINANCIAL SECTION + AI INTERPRETATION SEPARATION + COMPLETION DIAGNOSTICS.
+    V6.28.41 DETERMINISTIC FINANCIAL SECTION + AI INTERPRETATION SEPARATION + COMPLETION DIAGNOSTICS.
 
     A company may be accepted only when BOTH independent Yahoo layers agree
     on the exact requested Yahoo symbol:
@@ -2896,7 +2896,7 @@ STORY: [vyber přesně jeden název z: {allowed_stories}]
 PROFILE: [jedna krátká věta o obchodním modelu, bez neověřených podílů]
 THESIS: [jedna věta s hlavním důvodem, proč je firma zajímavá; odkaz [E#] jen pokud sedí]
 THREAT: [jedna věta o největším doloženém riziku]
-COUNTER: [jedna věta s nejsilnějším protiargumentem]
+COUNTER: [jedna věta se skutečným protiargumentem: pozitivní důkaz, který oslabuje THREAT; neopakuj další negativní údaj. Pokud data žádný silný protiargument nenabízejí, výslovně to řekni.]
 CHANGE: [jedna věta o aktuální změně; příčinu neodvozuj bez důkazu]
 FOLLOW: [kontrola 1] | [kontrola 2] | [kontrola 3]
 MONITORING: [jedna věta: jaké téma se ve zprávách opakuje, zda převažuje optimismus/obavy/směs/žádný jasný příběh; rozliš počet titulků od potvrzených faktů a u rozporů to řekni výslovně]
@@ -3514,6 +3514,42 @@ def analyst_story_hypothesis(q, annual, quarterly, news, sec, ai_result=None):
         return m.group(1).strip() if m else ""
     thesis, threat, counter = field("THESIS"), field("THREAT"), field("COUNTER")
 
+    # A thesis must reflect the full annual period, not selectively highlight an
+    # intermediate peak. If revenue rose over the period while operating margin
+    # fell, replace an interim-margin success story with the observed full-period
+    # tension. This is a cross-company descriptive rule, not a causal inference.
+    if len(valid_rows) >= 2:
+        first_row, last_row = valid_rows[0], valid_rows[-1]
+        revenue_change_pct = ((last_row["revenue"] / first_row["revenue"] - 1) * 100) if first_row["revenue"] else 0.0
+        margin_change_pp = last_row["opm"] - first_row["opm"]
+        interim_peak_thesis = bool(thesis and re.search(
+            r"(?i)(marž\w*.{0,35}(vzrost|zvýš|zlepš|vyšší)|(?:vzrost|zvýš|zlepš|vyšší).{0,35}marž)", thesis
+        ))
+        if revenue_change_pct >= 5 and margin_change_pp <= -1.0 and interim_peak_thesis:
+            thesis = ("Tržby za celé sledované období vzrostly, ale provozní marže klesla; klíčovou otázkou je, zda firma dokáže obnovit ziskovost.")
+
+    # A counterargument must actually counter the main risk. If the AI supplied
+    # another negative observation (or simply repeated the threat), prefer the
+    # strongest directly observable positive/neutral offset in annual data.
+    negative_counter_pattern = r"(?i)(kles|pokles|stagn|tlak|ztrát|záporn|rizik|slab|zhorš|snížen|dluh|propad|omezuje|zpochybň)"
+    repeats_threat = bool(counter and threat and (
+        counter.strip().lower() == threat.strip().lower()
+        or (len(set(re.findall(r"[a-zá-ž]{5,}", counter.lower())) & set(re.findall(r"[a-zá-ž]{5,}", threat.lower()))) >= 4)
+    ))
+    if counter and (re.search(negative_counter_pattern, counter) or repeats_threat):
+        if len(rows) >= 2 and rows[-2]["revenue"] is not None and rows[-1]["revenue"] is not None and rows[-2]["revenue"] > 0:
+            recent_revenue_change = (rows[-1]["revenue"] / rows[-2]["revenue"] - 1) * 100
+            if abs(recent_revenue_change) <= 3:
+                counter = ("Navzdory poklesu marže zůstaly tržby v posledním roce přibližně stabilní; dostupná řada zatím neukazuje prudký propad prodejů.")
+            elif len(valid_rows) >= 2 and revenue_change_pct >= 5:
+                counter = ("Tržby za celé sledované období vzrostly, takže zhoršení marže zatím neprovází celkový pokles tržeb.")
+            else:
+                counter = ("Dostupná data nenabízejí silný pozitivní protiargument; tento limit je nutné zachovat místo umělého vyvažování rizika.")
+        elif len(valid_rows) >= 2 and revenue_change_pct >= 5:
+            counter = ("Tržby za celé sledované období vzrostly, což je dílčí protiváha k popsanému riziku.")
+        else:
+            counter = ("Dostupná data nenabízejí silný pozitivní protiargument; tento limit je nutné zachovat místo umělého vyvažování rizika.")
+
     # Headlines are summaries, not proof of downstream financial impact.
     # If the thesis relies on cloud backlog, keep it strictly within the cited headline.
     if thesis and re.search(r"(?i)cloud.{0,50}backlog|backlog.{0,50}cloud", thesis):
@@ -3814,7 +3850,7 @@ def analyst_render(ticker_input):
     # The former V6.28.x diagnostic block is intentionally removed from the
     # normal UI so it cannot interrupt the analytical workflow.
 
-    # V6.28.40: HARD IDENTITY FIREWALL. The exact Yahoo Chart symbol is the
+    # V6.28.41: HARD IDENTITY FIREWALL. The exact Yahoo Chart symbol is the
     # authoritative ticker-identity check. Yahoo Search is optional enrichment: if
     # it returns an exact quote, use its fields; if it returns nothing, do not block
     # a valid exact Chart result. Never accept an approximate Search result.
@@ -3828,12 +3864,12 @@ def analyst_render(ticker_input):
             f"{q.get('identity_reason') or 'Neznámý důvod.'} Analýza byla z bezpečnostních důvodů zastavena."
         )
         st.info(
-            "Analytik V6.28.40 nepoužije přibližně nalezenou firmu ani data z jiného titulu. "
+            "Analytik V6.28.41 nepoužije přibližně nalezenou firmu ani data z jiného titulu. "
             "Pokud se zastavení opakuje, pošli mi diagnostický výpis – nebudeme to obcházet dalším fallbackem."
         )
         return
 
-    # V6.28.40: supplement sparse Yahoo Search quote fields only from yfinance
+    # V6.28.41: supplement sparse Yahoo Search quote fields only from yfinance
     # when its info.symbol exactly matches the already-verified Yahoo ticker.
     quote_fallback = _analyst_yfinance_quote_fallback(yahoo_ticker)
     q["quote_fallback_status"] = quote_fallback.get("fallback_status", "nedostupné")
@@ -3916,7 +3952,7 @@ def analyst_render(ticker_input):
     status.success("5/5 Analytické jádro dokončeno.")
 
     st.markdown(f"## {company}")
-    st.caption(f"Ticker **{ticker}** · Yahoo **{yahoo_ticker}** · {exchange} · profil **{profile}** · načteno {datetime.now().strftime('%d.%m.%Y %H:%M')} · build **V6.28.40 / 20261013-G**")
+    st.caption(f"Ticker **{ticker}** · Yahoo **{yahoo_ticker}** · {exchange} · profil **{profile}** · načteno {datetime.now().strftime('%d.%m.%Y %H:%M')} · build **V6.28.41 / 20261013-H**")
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Cena", f"{analyst_human_number(q.get('price'), 2)} {q.get('currency', '')}")
@@ -3938,7 +3974,7 @@ def analyst_render(ticker_input):
 
     with st.expander("🧠 2. Co se ve firmě právě mění", expanded=True):
         completion_status = ai_result.get("completion_status", "unknown") if isinstance(ai_result, dict) else "unknown"
-        st.caption("V6.28.40: finanční čísla a jejich časové řady v této sekci počítá přímo aplikace. AI může navrhnout pracovní příběh, ale její text nenahrazuje finanční data ani nedokazuje příčiny změn.")
+        st.caption("V6.28.41: finanční čísla a jejich časové řady v této sekci počítá přímo aplikace. AI může navrhnout pracovní příběh, ale její text nenahrazuje finanční data ani nedokazuje příčiny změn.")
         if isinstance(ai_result, dict) and not ai_result.get("ok"):
             st.warning("AI syntéza není dostupná. Finanční přehled níže přesto zůstává k dispozici, protože se počítá přímo z načtených ročních dat.")
         elif completion_status == "ai_recovery":
@@ -3989,7 +4025,7 @@ def analyst_render(ticker_input):
         valuation_rows = _analyst_valuation_rows(q, price)
         st.dataframe(valuation_rows, hide_index=True, use_container_width=True)
         if all(pd.isna(safe_float(q.get(k))) for k in ("pe", "forward_pe", "ps", "pb")):
-            st.warning("Zdroj v tomto běhu nedodal násobky ocenění. Tabulka zůstává viditelná, ale chybějící hodnoty nelze bezpečně dopočítat bez potřebných údajů o tržní kapitalizaci či akciích.")
+            st.warning("Zdroj v tomto běhu nedodal násobky ocenění a dostupné vstupy neumožnily jejich bezpečný výpočet. Před závěrem o levnosti je nutné ověřit cenu, počet akcií / tržní kapitalizaci a odpovídající zisk, tržby či vlastní kapitál; chybějící násobky se nesmějí nahrazovat odhadem.")
         else:
             st.write(_analyst_valuation_comment(q, price))
         st.caption("Průměr oboru se zobrazí pouze tehdy, pokud je k dispozici srovnatelný, zdrojově doložený údaj. Aktuální a forward hodnoty nejsou zaměnitelné; valuace není sama o sobě výpočtem férové ceny.")
@@ -4050,7 +4086,7 @@ def analyst_render(ticker_input):
         st.write(f"Evidence položek: {ai_result.get('evidence_count', '—')}")
         st.write(f"AI model: {ai_result.get('model', '—')}")
         st.write(f"Kontrola kódu fallbacku: {ANALYST_FALLBACK_REVISION}")
-        st.write("Pravidlo V6.28.40 / DF40-A: finanční část se počítá z ročních dat; monitoring tisku používá stejnou sadu zpráv a stejnou AI odpověď, bez dalšího API volání.")
+        st.write("Pravidlo V6.28.41 / DF41-A: finanční část se počítá z ročních dat; monitoring používá stejnou sadu zpráv a stejnou AI odpověď, bez dalšího API volání; teze a protiargument se kontrolují vůči celé roční řadě.")
         st.write(f"Stav dokončení AI: { {'primary_ai': 'původní odpověď formálně úplná', 'ai_recovery': 'použita záchranná AI odpověď', 'deterministic_fallback': 'použit datový fallback'}.get(ai_result.get('completion_status'), 'stav není k dispozici') }")
         diag = ai_result.get("completion_diagnostics") or {}
         if diag:
