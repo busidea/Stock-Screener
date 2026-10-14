@@ -15,7 +15,7 @@ from datetime import datetime
 st.set_page_config(page_title="Stock-Screener", page_icon="🔎", layout="wide")
 
 RUNTIME_LOG = Path("/tmp/stock_screener_runtime.json")
-ANALYST_FALLBACK_REVISION = "DF49-A · numerická kontrola tvrzení a export pro nezávislý výzkum ChatGPT"
+ANALYST_FALLBACK_REVISION = "DF50-A · kontrola FCF přes nulu, konzistentní marže a nezávislé ověření pro ChatGPT"
 
 @st.cache_resource(show_spinner=False)
 def get_runtime_state():
@@ -54,7 +54,7 @@ def update_runtime(status=None, stage=None, message=None, error=None, run_id=Non
 
 
 st.title("📊 Stock-Screener")
-st.caption("V6.28.49 · BUILD 20261014-P – Screener · samostatný modul Analytik je dostupný v menu vlevo")
+st.caption("V6.28.50 · BUILD 20261015-A – Screener · samostatný modul Analytik je dostupný v menu vlevo")
 
 NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 NYSE_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
@@ -2436,22 +2436,43 @@ def analyst_financial_summary(annual, quarterly):
         if col not in annual.columns:
             continue
         series = pd.to_numeric(annual[col], errors="coerce").dropna()
-        if len(series) < 2 or series.iloc[0] == 0:
+        if len(series) < 2:
             continue
-        x = (series.iloc[-1] / series.iloc[0] - 1) * 100
+        a, b = float(series.iloc[0]), float(series.iloc[-1])
         periods = annual.loc[series.index, "Období"].astype(str) if "Období" in annual.columns else pd.Series(["první dostupné FY", "poslední dostupné FY"])
         start_period = str(periods.iloc[0]) if len(periods) else "první dostupné FY"
         end_period = str(periods.iloc[-1]) if len(periods) else "poslední dostupné FY"
-        direction = "růst" if x > 5 else "pokles" if x < -5 else "jen malá změna"
-        parts.append(f"{label.capitalize()}: {direction} {analyst_pct(x,0)} mezi {start_period} a {end_period}. Jde o srovnání krajních dostupných hodnot, nikoli samo o sobě o důkaz souvislého trendu.")
+        if col == "FCF":
+            absolute_change = b - a
+            if a < 0 <= b:
+                direction = "záporný FCF přešel na nezáporný"
+            elif a >= 0 > b:
+                direction = "nezáporný FCF přešel do záporu"
+            elif absolute_change > 0:
+                direction = "FCF se zlepšil"
+            elif absolute_change < 0:
+                direction = "FCF se zhoršil"
+            else:
+                direction = "FCF se nezměnil"
+            parts.append(f"{label.capitalize()}: {direction}, {analyst_human_number(a)} → {analyst_human_number(b)} (absolutní změna {analyst_human_number(absolute_change)}) mezi {start_period} a {end_period}. Pro FCF se kvůli možnému přechodu přes nulu neuvádí zavádějící procentní změna.")
+        else:
+            if a == 0:
+                continue
+            x = (b / a - 1) * 100
+            if a < 0 <= b or a >= 0 > b:
+                direction = "změna znaménka"
+                parts.append(f"{label.capitalize()}: {direction}, {analyst_human_number(a)} → {analyst_human_number(b)} mezi {start_period} a {end_period}; procentní změna přes nulu není vhodná.")
+            else:
+                direction = "růst" if x > 5 else "pokles" if x < -5 else "jen malá změna"
+                parts.append(f"{label.capitalize()}: {direction} {analyst_pct(x,0)} mezi {start_period} a {end_period}. Jde o srovnání krajních dostupných hodnot, nikoli samo o sobě o důkaz souvislého trendu.")
         diffs = [b-a for a,b in zip(series.tolist(), series.tolist()[1:]) if abs(b-a) > max(abs(a),abs(b),1.0)*0.005]
         if len(diffs) >= 2 and any((a > 0 > b) or (a < 0 < b) for a,b in zip(diffs,diffs[1:])):
             parts.append(f"Mezilehlé hodnoty {label} kolísají; růst/pokles mezi krajními roky nelze popisovat jako nepřetržitý.")
     if "Net Margin %" in annual.columns:
         s=pd.to_numeric(annual["Net Margin %"],errors="coerce").dropna()
         if len(s)>=2:
-            d=s.iloc[-1]-s.iloc[0]
-            parts.append(f"Čistá marže se mezi nejstarším a nejnovějším dostupným FY změnila o {analyst_pct(d,1)} p. b.")
+            d=float(s.iloc[-1]-s.iloc[0])
+            parts.append(f"Čistá marže: {s.iloc[0]:.2f} % → {s.iloc[-1]:.2f} %; změna {d:+.2f} p. b. (vypočteno z nezaokrouhlených dostupných hodnot).")
     # Explicitly show operating-margin path: it can tell a different story from net margin.
     if "Operating Income" in annual.columns and "Revenue" in annual.columns:
         opm=[]
@@ -2473,6 +2494,18 @@ def analyst_financial_summary(annual, quarterly):
         x=series_change(annual,"Debt")
         if not pd.isna(x): parts.append(f"Dluh se ve stejném fiskálním období změnil o {analyst_pct(x,0)}.")
 
+    if quarterly is not None and not quarterly.empty and "Období" in quarterly.columns:
+        dated_quarters = []
+        for label in quarterly["Období"].astype(str):
+            match = re.search(r"ended (\d{4}-\d{2}-\d{2})", label)
+            if match:
+                dated_quarters.append((pd.Timestamp(match.group(1)), label))
+        dated_quarters.sort(key=lambda item: item[0])
+        for (date_a, label_a), (date_b, label_b) in zip(dated_quarters, dated_quarters[1:]):
+            gap_days = (date_b - date_a).days
+            if gap_days > 110:
+                parts.append(f"Čtvrtletní řada není souvislá: mezi {label_a} a {label_b} je mezera {gap_days} dní. Kvartální trend a TTM nelze bezpečně odvozovat, dokud se chybějící období neověří.")
+                break
     if quarterly is not None and not quarterly.empty:
         ttm=analyst_ttm_from_quarters(quarterly)
         latest_q_label = clean_text(quarterly.iloc[-1].get("Období"))
@@ -2844,11 +2877,13 @@ def analyst_build_chatgpt_handoff(company, ticker, yahoo_ticker, exchange, q, an
     """Build a portable research brief and ready-to-paste instruction for the pinned ChatGPT analyst chat."""
     now = datetime.now().strftime("%d.%m.%Y %H:%M")
     lines = [
-        "ZADÁNÍ PRO CHATGPT ANALYTIK — Stock-Screener V6.28.49",
+        "ZADÁNÍ PRO CHATGPT ANALYTIK — Stock-Screener V6.28.50",
         f"Datum vytvoření balíčku: {now}",
         "",
         "ROLE A ÚKOL",
         "Jsi nezávislý analytik veřejně obchodovaných společností. Využij dostupné nástroje ChatGPT a aktuální webový výzkum: oficiální IR, poslední výsledky a prezentace, regulatorní podání, přepisy výsledkových hovorů, relevantní nezávislé zdroje, konkurenty a valuaci. Neomezuj se na tento balíček; ověř jeho klíčová tvrzení a doplň chybějící kontext. U každého externího tvrzení uveď zdroj a datum. Pokud zdroj není dostupný, přiznej to.",
+        "DŮLEŽITÉ: Výstup Screeneru, jeho investiční příběh, profil i výběr zpráv jsou pouze pracovní podněty, nikoli výchozí závěr. Nezakotvi se na jejich interpretaci a nesnaž se ji za každou cenu potvrdit. Nejprve si vytvoř vlastní názor z ověřených zdrojů; pak teprve porovnej vlastní závěr se Screenerem a výslovně popiš podstatné rozpory.",
+        "Před interpretací ověř přesný ticker a třídu akcie, burzu, měnu, cenu, tržní kapitalizaci, fiskální kalendář a konsolidovaný rozsah dat. Zkontroluj, zda finanční řady patří ke srovnatelným obdobím a zda definice FCF, dluhu a marží odpovídají. Pokud vstupní data odporují primárním zdrojům, ukaž rozpor a použij důvěryhodnější údaj; nic tiše neopravuj.",
         "Vytvoř plastický, kritický investiční příběh: co se ve firmě skutečně mění, proč je to ekonomicky důležité, co může být strukturální/cyklické/dočasné, jak se to přenáší do marží, zisku, hotovosti, kapitálové náročnosti a hodnoty akcie. Ověř nejen tezi, ale i nejsilnější protitezi. Žádné Buy/Hold/Sell ani cílová cena.",
         "Rozlišuj: (1) doložený fakt, (2) interpretaci, (3) hypotézu, (4) neznámou věc. Firemní tvrzení nepovažuj automaticky za nezávisle potvrzený fakt. Plány odděluj od výsledků. Nezaměňuj korelaci za příčinu, účetní zisk za hotovost ani levný násobek za prokázané podhodnocení. Srovnávej stejné fiskální období a zohledni fiskální rok společnosti. U každého klíčového závěru uveď, co by ho potvrdilo nebo vyvrátilo.",
         "Na konci formuluj: dominantní investiční příběh; nejvýznamnější změny; důkazy pro a proti; co je už v ceně; scénáře a klíčové předpoklady (bez falešné přesnosti); zásadní neznámé; 3–5 konkrétních monitorovacích ukazatelů/událostí; závěr o kvalitě důkazů. Pokud jsou zdroje v tomto balíčku jen RSS titulky/popisky, nepovažuj je za přečtené články ani nezávislá potvrzení.",
@@ -2946,7 +2981,9 @@ def analyst_build_chatgpt_handoff(company, ticker, yahoo_ticker, exchange, q, an
         if item.get("extra"): line += f" | Poznámka: {item['extra']}"
         lines.append(line)
     lines.extend(["", "POKYNY K PRÁCI S TÍMTO BALÍČKEM", 
-                  "Balíček je výchozí orientace, ne hotový výzkum. Nejprve ověř identitu emitenta, nejnovější výsledky a fiskální kalendář. Vyhledej primární zdroje a nezávislé protidůkazy; otevři relevantní odkazy a rozliš datum publikace od období, kterého se výsledek týká. Nepředpokládej, že všechny titulky jsou nezávislé nebo že jejich počet měří sentiment trhu. V odpovědi cituj aktuální zdroje a uveď, co se nepodařilo ověřit."])
+                  "Balíček je výchozí orientace, ne hotový výzkum. Nejprve ověř identitu emitenta, konkrétní třídu akcie, cenu, nejnovější výsledky a fiskální kalendář. Vyhledej primární zdroje a nezávislé protidůkazy; otevři relevantní odkazy a rozliš datum publikace od období, kterého se výsledek týká. Nepředpokládej, že všechny titulky jsou nezávislé nebo že jejich počet měří sentiment trhu.",
+                  "Nepřebírej automaticky žádné číslo ani závěr z aplikace: u klíčových údajů ověř původní zdroj, jednotku, období a definici; samostatně přepočítej důležité marže, změny a oceňovací násobky. Zvlášť pečlivě zacházej s procentní změnou hodnot, které přecházejí přes nulu, a s dluhem finančních divizí. Pokud nemůžeš údaj ověřit, označ jej jako neověřený místo toho, abys jej tiše přijal či nahradil.",
+                  "Nejdřív napiš vlastní tezi bez opírání se o závěr Screeneru; až potom přidej stručné srovnání se Screenerem: shody, rozpory, nově nalezené důkazy a případné chyby vstupních dat. V odpovědi cituj aktuální zdroje a uveď, co se nepodařilo ověřit."])
     return "\n".join(lines)
 
 
@@ -4458,7 +4495,7 @@ def analyst_render(ticker_input):
     status.success("5/5 Analytické jádro dokončeno.")
 
     st.markdown(f"## {company}")
-    st.caption(f"Ticker **{ticker}** · Yahoo **{yahoo_ticker}** · {exchange} · profil **{profile}** · načteno {datetime.now().strftime('%d.%m.%Y %H:%M')} · build **V6.28.49 / 20261014-P**")
+    st.caption(f"Ticker **{ticker}** · Yahoo **{yahoo_ticker}** · {exchange} · profil **{profile}** · načteno {datetime.now().strftime('%d.%m.%Y %H:%M')} · build **V6.28.50 / 20261015-A**")
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Cena", f"{analyst_human_number(q.get('price'), 2)} {q.get('currency', '')}")
@@ -4480,7 +4517,7 @@ def analyst_render(ticker_input):
 
     with st.expander("🧠 2. Co se ve firmě právě mění", expanded=True):
         completion_status = ai_result.get("completion_status", "unknown") if isinstance(ai_result, dict) else "unknown"
-        st.caption("V6.28.49: AI syntéza se zobrazuje jen tehdy, když je úplná; jinak je výstup výslovně označen jako datový fallback. Titulky jsou signály, nikoli potvrzená fakta.")
+        st.caption("V6.28.50: AI syntéza se zobrazuje jen tehdy, když je úplná; jinak je výstup výslovně označen jako datový fallback. Titulky jsou signály, nikoli potvrzená fakta.")
         if isinstance(ai_result, dict) and not ai_result.get("ok"):
             st.warning("AI syntéza není dostupná. Finanční přehled níže přesto zůstává k dispozici, protože se počítá přímo z načtených ročních dat.")
         elif completion_status == "ai_recovery":
@@ -4616,7 +4653,7 @@ def analyst_render(ticker_input):
         st.write(f"Evidence položek: {ai_result.get('evidence_count', '—')}")
         st.write(f"AI model: {ai_result.get('model', '—')}")
         st.write(f"Kontrola kódu fallbacku: {ANALYST_FALLBACK_REVISION}")
-        st.write("Pravidlo V6.28.49 / DF49-A: AI má vybrat dominantní současnou tezi, propojit ji s posledními srovnatelnými finančními údaji, uvést nejsilnější protiargument a navrhnout konkrétní kontroly. Monitoring upřednostňuje vlastní AI syntézu; tematické počítání titulků je jen náhradní varianta. Aplikace stále pracuje převážně s RSS titulky/popisky, nikoli automaticky s plným textem každého článku.")
+        st.write("Pravidlo V6.28.50 / DF50-A: AI má vybrat dominantní současnou tezi, propojit ji s posledními srovnatelnými finančními údaji, uvést nejsilnější protiargument a navrhnout konkrétní kontroly. FCF přes nulu se popisuje absolutní změnou, nikoli zavádějícím procentem; ChatGPT má vstupní čísla a identitu instrumentu nezávisle ověřit. Monitoring upřednostňuje vlastní AI syntézu; tematické počítání titulků je jen náhradní varianta. Aplikace stále pracuje převážně s RSS titulky/popisky, nikoli automaticky s plným textem každého článku.")
         st.write(f"Stav dokončení AI: { {'primary_ai': 'původní odpověď formálně úplná', 'ai_recovery': 'použita záchranná AI odpověď', 'deterministic_fallback': 'použit datový fallback'}.get(ai_result.get('completion_status'), 'stav není k dispozici') }")
         diag = ai_result.get("completion_diagnostics") or {}
         if diag:
