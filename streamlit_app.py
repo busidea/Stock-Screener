@@ -15,7 +15,7 @@ from datetime import datetime
 st.set_page_config(page_title="Stock-Screener", page_icon="🔎", layout="wide")
 
 RUNTIME_LOG = Path("/tmp/stock_screener_runtime.json")
-ANALYST_FALLBACK_REVISION = "DF50-A · kontrola FCF přes nulu, konzistentní marže a nezávislé ověření pro ChatGPT"
+ANALYST_FALLBACK_REVISION = "DF51-A · oprava TTM po metrikách, FCF přes nulu a přesnost exportu"
 
 @st.cache_resource(show_spinner=False)
 def get_runtime_state():
@@ -54,7 +54,7 @@ def update_runtime(status=None, stage=None, message=None, error=None, run_id=Non
 
 
 st.title("📊 Stock-Screener")
-st.caption("V6.28.50 · BUILD 20261015-A – Screener · samostatný modul Analytik je dostupný v menu vlevo")
+st.caption("V6.28.51 · BUILD 20261016-A – Screener · samostatný modul Analytik je dostupný v menu vlevo")
 
 NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 NYSE_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
@@ -410,7 +410,6 @@ def yahoo_annual_growth_data(yahoo_ticker):
     except Exception:
         return empty
 
-@st.cache_data(ttl=1800, show_spinner=False)
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_fundamentals(ticker, exchange, name="", isin=""):
     """Load current fundamentals plus a small annual history used by the story engine."""
@@ -2080,7 +2079,13 @@ def _analyst_build_history_direct(yahoo_ticker, quarterly=False):
                     for name in ["Revenue", "Net Income", "Operating Income", "Operating Cash Flow", "Capital Expenditure"]:
                         if name in qfy.columns:
                             vals = pd.to_numeric(qfy[name], errors="coerce")
-                            if vals.notna().sum() == 4:
+                            # Prefer a directly reported annual value. Sum quarters only
+                            # when that annual metric is missing for this exact FY end.
+                            annual_value_missing = (
+                                end_date not in filled[name].index
+                                or pd.isna(safe_float(filled[name].loc[end_date]))
+                            )
+                            if annual_value_missing and vals.notna().sum() == 4:
                                 filled[name].loc[end_date] = float(vals.sum())
                     # Balance-sheet values are point-in-time, so use the direct
                     # annual Yahoo value when it exists; otherwise quarter-end.
@@ -2153,13 +2158,15 @@ def _analyst_dates_are_consecutive_quarters(dates):
 
 
 def analyst_ttm_from_quarters(quarterly):
-    """TTM is shown only for four complete, consecutive, non-reconstructed quarters."""
-    core = ["Revenue", "Net Income", "Operating Income", "Operating Cash Flow", "FCF"]
+    """Return a TTM row for four complete consecutive quarters, metric by metric.
+
+    Missing operating income/cash-flow fields should not erase otherwise valid
+    TTM revenue and earnings. Each flow metric is summed only when all four
+    quarter values are present; balance-sheet stocks are never summed.
+    """
     if quarterly is None or quarterly.empty or len(quarterly) < 4 or "Období" not in quarterly.columns:
         return pd.DataFrame()
     q = quarterly.tail(4).copy()
-    # A period reconstructed from trailing Yahoo data is not a report and cannot
-    # be used to manufacture a complete TTM series.
     labels = q["Období"].astype(str)
     if labels.str.contains(r"odvozeno|derived", case=False, regex=True).any():
         return pd.DataFrame()
@@ -2171,16 +2178,19 @@ def analyst_ttm_from_quarters(quarterly):
         dates.append(pd.Timestamp(match.group(1)))
     if not _analyst_dates_are_consecutive_quarters(dates):
         return pd.DataFrame()
+
     row = {"Období": f"TTM (4Q ended {clean_text(labels.iloc[-1])})"}
-    for col in core:
+    for col in ["Revenue", "Net Income", "Operating Income", "Operating Cash Flow", "Capital Expenditure", "FCF"]:
         if col not in q.columns:
-            return pd.DataFrame()
+            continue
         values = pd.to_numeric(q[col], errors="coerce")
-        if values.notna().sum() != 4:
-            return pd.DataFrame()
-        row[col] = float(values.sum())
+        if values.notna().sum() == 4:
+            row[col] = float(values.sum())
+
     revenue = safe_float(row.get("Revenue"))
     net_income = safe_float(row.get("Net Income"))
+    # Revenue and net income are the minimum useful TTM core. If either is
+    # unavailable, don't present a partial row as a complete financial TTM.
     if pd.isna(revenue) or revenue <= 0 or pd.isna(net_income):
         return pd.DataFrame()
     row["Net Margin %"] = net_income / revenue * 100
@@ -2877,7 +2887,7 @@ def analyst_build_chatgpt_handoff(company, ticker, yahoo_ticker, exchange, q, an
     """Build a portable research brief and ready-to-paste instruction for the pinned ChatGPT analyst chat."""
     now = datetime.now().strftime("%d.%m.%Y %H:%M")
     lines = [
-        "ZADÁNÍ PRO CHATGPT ANALYTIK — Stock-Screener V6.28.50",
+        "ZADÁNÍ PRO CHATGPT ANALYTIK — Stock-Screener V6.28.51",
         f"Datum vytvoření balíčku: {now}",
         "",
         "ROLE A ÚKOL",
@@ -2893,7 +2903,7 @@ def analyst_build_chatgpt_handoff(company, ticker, yahoo_ticker, exchange, q, an
         f"Sektor: {_analyst_czech_sector(q.get('sector'))}; odvětví: {q.get('industry') or '—'}; země: {_analyst_czech_country(q.get('country')) if q.get('country') else '—'}",
         f"Cena: {_analyst_handoff_value(q.get('price'))} {clean_text(q.get('currency'))}",
         f"Tržní kapitalizace: {_analyst_handoff_value(q.get('market_cap'))}; počet akcií: {_analyst_handoff_value(q.get('shares_outstanding'))}",
-        f"P/E: {_analyst_handoff_value(q.get('pe'))}; forward P/E: {_analyst_handoff_value(q.get('forward_pe'))}; P/S: {_analyst_handoff_value(q.get('ps'))}; P/B: {_analyst_handoff_value(q.get('pb'))}; ROE: {_analyst_handoff_value(q.get('roe'))}",
+        f"P/E: {_analyst_handoff_value(q.get('pe'))}; forward P/E: {_analyst_handoff_value(q.get('forward_pe'))}; P/S: {_analyst_handoff_value(q.get('ps'))}; P/B: {_analyst_handoff_value(q.get('pb'))}; ROE: {_analyst_handoff_value(safe_float(q.get('roe')) * 100 if not pd.isna(safe_float(q.get('roe'))) else np.nan)} % (zdrojová hodnota převedena z poměru na procenta)",
         f"Zdroj P/E: {q.get('pe_source') or 'neuveden'}; zdroj P/S: {q.get('ps_source') or 'neuveden'}; ověření identity: {q.get('identity_reason') or 'neuvedeno'}; doplňková kotace/valuace: {q.get('quote_fallback_status') or 'neuvedeno'}",
         "Upozornění: prázdné hodnoty jsou neznámé, nikoli nula. Odvozené násobky musí být zkontrolovány proti správné třídě akcií, počtu akcií, měně a srovnatelnému období.",
         "",
@@ -3107,10 +3117,29 @@ def _analyst_financial_change_summary(annual, quarterly):
                 last_value = safe_float(latest[col])
                 if pd.isna(first_value) or first_value == 0 or pd.isna(last_value):
                     continue
-                change = (last_value / first_value - 1) * 100
                 prev_period = clean_text(previous.get("Období")) or f"Q{qnum} FY{int(previous['_fy'])}"
                 latest_period = clean_text(latest.get("Období")) or f"Q{qnum} FY{int(latest['_fy'])}"
-                parts.append(f"Srovnání stejného fiskálního Q{qnum} pro {label}: {prev_period} {analyst_human_number(first_value)} → {latest_period} {analyst_human_number(last_value)} ({change:+.1f} % YoY; jen tato dvě doložená období, ne důkaz souvislého trendu).")
+                if col == "FCF":
+                    delta = last_value - first_value
+                    if first_value < 0 <= last_value:
+                        direction = "přešel ze záporného na nezáporný"
+                    elif first_value >= 0 > last_value:
+                        direction = "přešel z nezáporného do záporu"
+                    elif delta > 0:
+                        direction = "se zlepšil"
+                    elif delta < 0:
+                        direction = "se zhoršil"
+                    else:
+                        direction = "se nezměnil"
+                    parts.append(f"Srovnání stejného fiskálního Q{qnum} pro {label}: {prev_period} {analyst_human_number(first_value)} → {latest_period} {analyst_human_number(last_value)}; FCF {direction}, absolutní změna {analyst_human_number(delta)} (bez procenta; jen tato dvě doložená období).")
+                elif first_value != 0:
+                    change = (last_value / first_value - 1) * 100
+                    if first_value < 0 <= last_value or first_value >= 0 > last_value:
+                        parts.append(f"Srovnání stejného fiskálního Q{qnum} pro {label}: {prev_period} {analyst_human_number(first_value)} → {latest_period} {analyst_human_number(last_value)} (změna znaménka; procentní změna není vhodná).")
+                    else:
+                        parts.append(f"Srovnání stejného fiskálního Q{qnum} pro {label}: {prev_period} {analyst_human_number(first_value)} → {latest_period} {analyst_human_number(last_value)} ({change:+.1f} % YoY; jen tato dvě doložená období, ne důkaz souvislého trendu).")
+                else:
+                    parts.append(f"Srovnání stejného fiskálního Q{qnum} pro {label}: {prev_period} {analyst_human_number(first_value)} → {latest_period} {analyst_human_number(last_value)} (výchozí hodnota je nula; procentní změnu nelze vypočítat).")
     if quarterly is not None and not quarterly.empty:
         # Include the actual quarterly values for the metrics most often misread by the model.
         # This is deliberately a factual series, not an interpretation of QoQ performance.
@@ -3287,7 +3316,7 @@ DŮKAZNÍ DISCIPLÍNA: Používej pouze dodané podklady. Před napsáním každ
 
 ČAS A SROVNATELNOST: nejprve vyhodnoť poslední FY proti předchozímu FY a nejnovější srovnatelný kvartál meziročně. Starší období slouží jako kontext. FY porovnávej s FY, kvartál jen se stejným kvartálem minulého FY. Respektuj skutečný fiskální rok. Chybějící údaje nevymýšlej a sniž jistotu závěru. Ocenění posuzuj odděleně od kvality firmy.
 
-VÝSTUP: nejvýše 140 slov celkem. Žádný úvod, žádné opakování finanční řady, žádné odůvodňování postupu. Každé pole vyplň jednou krátkou větou; FOLLOW přesně 3 stručné kontroly oddělené |. Pokud důkaz chybí, napiš to jednou větou. Dokonči všechna pole a skonči po MONITORING.
+VÝSTUP: nejvýše 220 slov celkem. Žádný obecný úvod ani opakování celé finanční řady. U THESIS, THREAT, COUNTER, CHANGE a MONITORING dovol 1–3 stručné věty, pokud je to nutné pro ekonomický mechanismus, protitezi a kvalitu důkazů. FOLLOW musí obsahovat přesně 3 konkrétní kontroly oddělené |. Pokud důkaz chybí, řekni to přímo. Dokonči všechna pole a skonči po MONITORING.
 STORY: [přesně jeden název z: {allowed_stories}]
 PROFILE: [ověřitelný popis toho, jak firma vydělává; bez neověřených segmentových podílů]
 THESIS: [nejlépe podložená teze a proč je aktuální; důkaz [E#], pokud existuje]
@@ -3370,8 +3399,8 @@ CENA: {analyst_human_number(q.get('price'), 2)} {clean_text(q.get('currency')) o
     attempt_used = "short_primary"
     wait_seconds = 0.0
     prompts = [
-        (make_prompt(story_evidence, fin_short, controls_short), 1200, "advisor_primary", "low"),
-        (make_prompt(selected_evidence_text(profile_items + non_financial_items[:3], max_chars=850), fin_short[:600], controls_short[:180]), 1000, "compact_retry", "low"),
+        (make_prompt(story_evidence, fin_short, controls_short), 1400, "advisor_primary", "low"),
+        (make_prompt(selected_evidence_text(profile_items + non_financial_items[:3], max_chars=850), fin_short[:600], controls_short[:180]), 1100, "compact_retry", "low"),
         (make_prompt(selected_evidence_text(profile_items, max_chars=350), fin_short[:300], controls_short[:100]), 900, "minimal_retry", "low"),
     ]
     try:
@@ -4495,7 +4524,7 @@ def analyst_render(ticker_input):
     status.success("5/5 Analytické jádro dokončeno.")
 
     st.markdown(f"## {company}")
-    st.caption(f"Ticker **{ticker}** · Yahoo **{yahoo_ticker}** · {exchange} · profil **{profile}** · načteno {datetime.now().strftime('%d.%m.%Y %H:%M')} · build **V6.28.50 / 20261015-A**")
+    st.caption(f"Ticker **{ticker}** · Yahoo **{yahoo_ticker}** · {exchange} · profil **{profile}** · načteno {datetime.now().strftime('%d.%m.%Y %H:%M')} · build **V6.28.51 / 20261016-A**")
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Cena", f"{analyst_human_number(q.get('price'), 2)} {q.get('currency', '')}")
@@ -4517,7 +4546,7 @@ def analyst_render(ticker_input):
 
     with st.expander("🧠 2. Co se ve firmě právě mění", expanded=True):
         completion_status = ai_result.get("completion_status", "unknown") if isinstance(ai_result, dict) else "unknown"
-        st.caption("V6.28.50: AI syntéza se zobrazuje jen tehdy, když je úplná; jinak je výstup výslovně označen jako datový fallback. Titulky jsou signály, nikoli potvrzená fakta.")
+        st.caption("V6.28.51: AI syntéza se zobrazuje jen tehdy, když je úplná; jinak je výstup výslovně označen jako datový fallback. Titulky jsou signály, nikoli potvrzená fakta.")
         if isinstance(ai_result, dict) and not ai_result.get("ok"):
             st.warning("AI syntéza není dostupná. Finanční přehled níže přesto zůstává k dispozici, protože se počítá přímo z načtených ročních dat.")
         elif completion_status == "ai_recovery":
@@ -4653,7 +4682,7 @@ def analyst_render(ticker_input):
         st.write(f"Evidence položek: {ai_result.get('evidence_count', '—')}")
         st.write(f"AI model: {ai_result.get('model', '—')}")
         st.write(f"Kontrola kódu fallbacku: {ANALYST_FALLBACK_REVISION}")
-        st.write("Pravidlo V6.28.50 / DF50-A: AI má vybrat dominantní současnou tezi, propojit ji s posledními srovnatelnými finančními údaji, uvést nejsilnější protiargument a navrhnout konkrétní kontroly. FCF přes nulu se popisuje absolutní změnou, nikoli zavádějícím procentem; ChatGPT má vstupní čísla a identitu instrumentu nezávisle ověřit. Monitoring upřednostňuje vlastní AI syntézu; tematické počítání titulků je jen náhradní varianta. Aplikace stále pracuje převážně s RSS titulky/popisky, nikoli automaticky s plným textem každého článku.")
+        st.write("Pravidlo V6.28.51 / DF51-A: AI má vybrat dominantní současnou tezi, propojit ji s posledními srovnatelnými finančními údaji, uvést nejsilnější protiargument a navrhnout konkrétní kontroly. FCF přes nulu se popisuje absolutní změnou, nikoli zavádějícím procentem; ChatGPT má vstupní čísla a identitu instrumentu nezávisle ověřit. Monitoring upřednostňuje vlastní AI syntézu; tematické počítání titulků je jen náhradní varianta. Aplikace stále pracuje převážně s RSS titulky/popisky, nikoli automaticky s plným textem každého článku.")
         st.write(f"Stav dokončení AI: { {'primary_ai': 'původní odpověď formálně úplná', 'ai_recovery': 'použita záchranná AI odpověď', 'deterministic_fallback': 'použit datový fallback'}.get(ai_result.get('completion_status'), 'stav není k dispozici') }")
         diag = ai_result.get("completion_diagnostics") or {}
         if diag:
