@@ -3,5 +3,3 @@ pandas
 numpy
 yfinance
 requests
-g4f
-matplotlib
