@@ -15,7 +15,7 @@ from datetime import datetime
 st.set_page_config(page_title="Stock-Screener", page_icon="🔎", layout="wide")
 
 RUNTIME_LOG = Path("/tmp/stock_screener_runtime.json")
-ANALYST_FALLBACK_REVISION = "DF51-A · oprava TTM po metrikách, FCF přes nulu a přesnost exportu"
+ANALYST_FALLBACK_REVISION = "DF52-B · oborové režimy, příčinná analýza změn a jednodušší analytik"
 
 @st.cache_resource(show_spinner=False)
 def get_runtime_state():
@@ -54,7 +54,7 @@ def update_runtime(status=None, stage=None, message=None, error=None, run_id=Non
 
 
 st.title("📊 Stock-Screener")
-st.caption("V6.28.51 · BUILD 20261016-A – Screener · samostatný modul Analytik je dostupný v menu vlevo")
+st.caption("V6.29.0 · BUILD 20261017-B – Screener · nezávislý Analytik připravuje pracovní hypotézy pro další ověření")
 
 NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 NYSE_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
@@ -2648,20 +2648,52 @@ def _analyst_add_profile_evidence(pack, q):
         ))
 
 
+def analyst_sector_guidance(q=None):
+    """Return conditional analytical guidance matched to the company's business model."""
+    q = q or {}
+    sector = clean_text(q.get("sector")).lower()
+    industry = clean_text(q.get("industry")).lower()
+    blob = f"{sector} {industry}"
+    if any(x in blob for x in ("bank", "banking", "regional banks", "money center")):
+        return ("BANKOVNÍ REŽIM: nejprve pracuj s čistým úrokovým výnosem a marží (NII/NIM), cenou a skladbou vkladů, růstem úvěrů, neúrokovými výnosy a náklady, opravnými položkami, čistými odpisy, nevýkonnými úvěry, koncentracemi portfolia, kapitálovou přiměřeností, TBV/TBV na akcii a ROTE/ROTCE. "
+                "Běžné FCF, provozní zisk a položka dluhu z agregátoru Yahoo mohou být pro banku nevhodné nebo nesrovnatelné; nevydávej jejich chybění za nemožnost analyzovat podnik. "
+                "Pokud tyto bankovní ukazatele v balíčku nejsou, nevymýšlej je: formuluj pracovní otázku a výslovně ulož ChatGPT ověřit poslední výsledkovou zprávu, 10-Q/10-K a earnings-call transcript. Rozlišuj GAAP a upravené výsledky a ověř, zda vylučované položky jsou skutečně mimořádné.")
+    if any(x in blob for x in ("insurance", "pojišť")):
+        return ("POJIŠŤOVACÍ REŽIM: upřednostni kombinovaný poměr, škodní průběh, rezervy, růst pojistného, investiční výnosy, kapitál a solventnost. FCF ani běžný dluh neinterpretuj bez znalosti pojistného modelu.")
+    if any(x in blob for x in ("reit", "real estate", "realit")):
+        return ("REALITNÍ REŽIM: upřednostni FFO/AFFO, obsazenost, nájemné, expirace nájmů, same-property NOI, zadlužení a splatnosti, náklady refinancování a hodnotu aktiv; účetní čistý zisk může být zkreslen odpisy či přeceněním.")
+    if any(x in blob for x in ("software", "application software", "internet content", "semiconductors", "semiconductor")):
+        return ("TECHNOLOGICKÝ REŽIM: rozliš organický růst, opakované výnosy/retenci tam, kde jsou relevantní, hrubou a provozní marži, výdaje na vývoj, akciové odměny, ředění akcií a kvalitu cash flow. Nepředpokládej SaaS model bez důkazů.")
+    if any(x in blob for x in ("pharma", "biotechnology", "drug manufacturers", "pharmaceutical")):
+        return ("FARMACEUTICKÝ REŽIM: zkoumej portfolio produktů, patentové expirace, klinická a regulatorní rizika, koncentraci tržeb, výdaje na výzkum a vývoj a schopnost nahradit odcházející produkty. Odděluj schválené produkty od pipeline a firemních plánů.")
+    return ("OBECNÝ REŽIM: vyber ukazatele podle skutečného obchodního modelu. U významné změny nejprve hledej její rozklad v primárních zdrojích; nevyvozuj příčinu pouze ze souběhu tržeb, marží, zisku, FCF či dluhu. Chybějící obecný ukazatel nemusí být překážkou, pokud existují vhodnější oborové metriky.")
+
+
 def analyst_interpretation_controls(annual, quarterly, q=None):
     """Deterministic guardrails describing gaps and comparability limits in the supplied data."""
     notes = []
-    key_cols = ["Revenue", "Net Income", "Operating Income", "Operating Cash Flow", "FCF"]
-    labels = {"Revenue": "tržby", "Net Income": "čistý zisk", "Operating Income": "provozní zisk",
-              "Operating Cash Flow": "provozní cash flow", "FCF": "FCF"}
+    q = q or {}
+    sector_blob = f"{clean_text(q.get('sector')).lower()} {clean_text(q.get('industry')).lower()}"
+    is_bank = any(x in sector_blob for x in ("bank", "banking", "regional banks", "money center"))
+    if is_bank:
+        key_cols = ["Revenue", "Net Income"]
+        labels = {"Revenue": "celkové výnosy / tržby podle agregátoru", "Net Income": "čistý zisk"}
+    else:
+        key_cols = ["Revenue", "Net Income", "Operating Income", "Operating Cash Flow", "FCF"]
+        labels = {"Revenue": "tržby", "Net Income": "čistý zisk", "Operating Income": "provozní zisk",
+                  "Operating Cash Flow": "provozní cash flow", "FCF": "FCF"}
     if annual is not None and not annual.empty:
         last = annual.iloc[-1]
         period = clean_text(last.get("Období")) or "poslední FY"
         missing = [labels[c] for c in key_cols if c not in annual.columns or pd.isna(safe_float(last.get(c)))]
         if missing:
             notes.append(f"Neúplný poslední roční výkaz ({period}): chybí {', '.join(missing)}. Nevyvozovat roční trend ani meziroční změnu přes toto období, pokud není srovnatelná hodnota doložena jiným zdrojem.")
-            notes.append("DŮSLEDEK PRO PRACOVNÍ PŘÍBĚH: pokud poslední FY postrádá klíčové výsledkové/cash-flow položky a validované TTM není dostupné, výslovně sniž jistotu závěrů o aktuální kvalitě a udržitelnosti růstu. Nepopisuj krátkou řadu příznivých kvartálů jako náhradu chybějícího FY.")
-        for col, label in [("Revenue", "tržby"), ("Net Income", "čistý zisk"), ("FCF", "FCF")]:
+            if is_bank:
+                notes.append("DŮSLEDEK PRO PRACOVNÍ PŘÍBĚH: agregátor neposkytuje úplný bankovní výkaz. Nepovažuj chybějící FCF či provozní zisk za hlavní analytickou překážku; sniž jistotu jen tam, kde chybí skutečně potřebné údaje, a vyžádej si bankovní metriky z primárních zdrojů.")
+            else:
+                notes.append("DŮSLEDEK PRO PRACOVNÍ PŘÍBĚH: pokud poslední FY postrádá klíčové výsledkové/cash-flow položky a validované TTM není dostupné, výslovně sniž jistotu závěrů o aktuální kvalitě a udržitelnosti růstu. Nepopisuj krátkou řadu příznivých kvartálů jako náhradu chybějícího FY.")
+        trend_cols = [("Revenue", "tržby"), ("Net Income", "čistý zisk")] if is_bank else [("Revenue", "tržby"), ("Net Income", "čistý zisk"), ("FCF", "FCF")]
+        for col, label in trend_cols:
             if col not in annual.columns:
                 continue
             vals = pd.to_numeric(annual[col], errors="coerce").dropna().tolist()
@@ -2677,11 +2709,18 @@ def analyst_interpretation_controls(annual, quarterly, q=None):
             notes.append(f"Poslední čtvrtletí ({clean_text(last.get('Období')) or 'neznámé období'}) je neúplné: chybí {', '.join(missing)}. Nepopisovat je jako kompletní provozní trend.")
         if analyst_ttm_from_quarters(quarterly).empty:
             notes.append("Validované TTM není dostupné. Nesmí se dopočítávat ze tří čtvrtletí, z ročních údajů minus kvartály ani nahrazovat obecným údajem z profilu.")
-        notes.append("Čtvrtletní FCF a cash flow mohou být sezónní a kolísat podle pracovního kapitálu, daní a načasování plateb. Pro tvrzení o meziročním zlepšení preferovat stejné fiskální čtvrtletí předchozího roku nebo validované TTM.")
-    q = q or {}
+        if is_bank:
+            notes.append("U banky nevyvozovat výkonnost z kvartálního FCF; porovnávat stejné fiskální čtvrtletí meziročně a doplnit NII/NIM, náklady na vklady, rezervy, úvěrové ztráty a kapitál z primárních zdrojů.")
+        else:
+            notes.append("Čtvrtletní FCF a cash flow mohou být sezónní a kolísat podle pracovního kapitálu, daní a načasování plateb. Pro tvrzení o meziročním zlepšení preferovat stejné fiskální čtvrtletí předchozího roku nebo validované TTM.")
     if not pd.isna(safe_float(q.get("debt_to_equity"))):
         notes.append("Debt/Equity z kotace a položka Debt v historické tabulce nemusí mít totožnou definici ani rozsah. Nekontrolovat ani nepřepočítávat D/E jako Debt děleno Equity, pokud zdroj výslovně nepotvrzuje stejné položky a datum.")
-    notes.append("Pokles kapitálových výdajů může krátkodobě zvýšit FCF, ale sám o sobě nedokazuje vyšší provozní efektivitu ani trvalé zlepšení. Rozlišit změnu provozního cash flow, kapitálových výdajů a FCF.")
+    sector_text = analyst_sector_guidance(q)
+    blob = f"{clean_text(q.get('sector')).lower()} {clean_text(q.get('industry')).lower()}"
+    if not any(x in blob for x in ("bank", "banking", "regional banks", "money center")):
+        notes.append("Pokles kapitálových výdajů může krátkodobě zvýšit FCF, ale sám o sobě nedokazuje vyšší provozní efektivitu ani trvalé zlepšení. Rozlišit změnu provozního cash flow, kapitálových výdajů a FCF.")
+    else:
+        notes.append("BANKOVNÍ OMEZENÍ: FCF, capex, provozní zisk a obecná položka dluhu z Yahoo Finance nejsou samy o sobě vhodným základem pro posouzení bankovní ekonomiky. Prioritně ověřit NII/NIM, cenu vkladů, kvalitu úvěrů, opravné položky, kapitál, TBV/TBV na akcii a ROTE/ROTCE v primárních zdrojích.")
     notes.append("Každé vysvětlení příčiny (cloud, servisní mix, cenová síla, úspory, akvizice, úroky apod.) musí mít přímou oporu ve zdroji; jinak ho označit pouze jako hypotézu nebo uvést Neznáme.")
     return "\n".join(f"- {x}" for x in notes)
 
@@ -2882,18 +2921,18 @@ def _analyst_handoff_value(value, digits=2):
 
 
 def analyst_build_chatgpt_handoff(company, ticker, yahoo_ticker, exchange, q, annual, quarterly, news, sec,
-                                  ai_result, user_question="", user_thesis="", profile="Seriózní", price=None,
+                                  ai_result, user_question="", user_thesis="", price=None,
                                   numerical_audit=None):
     """Build a portable research brief and ready-to-paste instruction for the pinned ChatGPT analyst chat."""
     now = datetime.now().strftime("%d.%m.%Y %H:%M")
     lines = [
-        "ZADÁNÍ PRO CHATGPT ANALYTIK — Stock-Screener V6.28.51",
+        "ZADÁNÍ PRO CHATGPT ANALYTIK — Stock-Screener V6.29.0",
         f"Datum vytvoření balíčku: {now}",
         "",
         "ROLE A ÚKOL",
         "Jsi nezávislý analytik veřejně obchodovaných společností. Využij dostupné nástroje ChatGPT a aktuální webový výzkum: oficiální IR, poslední výsledky a prezentace, regulatorní podání, přepisy výsledkových hovorů, relevantní nezávislé zdroje, konkurenty a valuaci. Neomezuj se na tento balíček; ověř jeho klíčová tvrzení a doplň chybějící kontext. U každého externího tvrzení uveď zdroj a datum. Pokud zdroj není dostupný, přiznej to.",
-        "DŮLEŽITÉ: Výstup Screeneru, jeho investiční příběh, profil i výběr zpráv jsou pouze pracovní podněty, nikoli výchozí závěr. Nezakotvi se na jejich interpretaci a nesnaž se ji za každou cenu potvrdit. Nejprve si vytvoř vlastní názor z ověřených zdrojů; pak teprve porovnej vlastní závěr se Screenerem a výslovně popiš podstatné rozpory.",
-        "Před interpretací ověř přesný ticker a třídu akcie, burzu, měnu, cenu, tržní kapitalizaci, fiskální kalendář a konsolidovaný rozsah dat. Zkontroluj, zda finanční řady patří ke srovnatelným obdobím a zda definice FCF, dluhu a marží odpovídají. Pokud vstupní data odporují primárním zdrojům, ukaž rozpor a použij důvěryhodnější údaj; nic tiše neopravuj.",
+        "DŮLEŽITÉ: Výstup Screeneru, jeho pracovní příběh, obchodní profil i výběr zpráv jsou pouze podněty, nikoli výchozí závěr. Nezakotvi se na jejich interpretaci a nesnaž se ji za každou cenu potvrdit. Nejprve si vytvoř vlastní názor z ověřených zdrojů; pak teprve porovnej vlastní závěr se Screenerem a výslovně popiš podstatné rozpory.",
+        "Před interpretací ověř přesný ticker a třídu akcie, burzu, měnu, cenu, tržní kapitalizaci, fiskální kalendář a konsolidovaný rozsah dat. Zkontroluj, zda finanční řady patří ke srovnatelným obdobím a zda definice ukazatelů odpovídají obchodnímu modelu. Pokud vstupní data odporují primárním zdrojům, ukaž rozpor a použij důvěryhodnější údaj; nic tiše neopravuj.",
         "Vytvoř plastický, kritický investiční příběh: co se ve firmě skutečně mění, proč je to ekonomicky důležité, co může být strukturální/cyklické/dočasné, jak se to přenáší do marží, zisku, hotovosti, kapitálové náročnosti a hodnoty akcie. Ověř nejen tezi, ale i nejsilnější protitezi. Žádné Buy/Hold/Sell ani cílová cena.",
         "Rozlišuj: (1) doložený fakt, (2) interpretaci, (3) hypotézu, (4) neznámou věc. Firemní tvrzení nepovažuj automaticky za nezávisle potvrzený fakt. Plány odděluj od výsledků. Nezaměňuj korelaci za příčinu, účetní zisk za hotovost ani levný násobek za prokázané podhodnocení. Srovnávej stejné fiskální období a zohledni fiskální rok společnosti. U každého klíčového závěru uveď, co by ho potvrdilo nebo vyvrátilo.",
         "Na konci formuluj: dominantní investiční příběh; nejvýznamnější změny; důkazy pro a proti; co je už v ceně; scénáře a klíčové předpoklady (bez falešné přesnosti); zásadní neznámé; 3–5 konkrétních monitorovacích ukazatelů/událostí; závěr o kvalitě důkazů. Pokud jsou zdroje v tomto balíčku jen RSS titulky/popisky, nepovažuj je za přečtené články ani nezávislá potvrzení.",
@@ -2901,6 +2940,7 @@ def analyst_build_chatgpt_handoff(company, ticker, yahoo_ticker, exchange, q, an
         "IDENTITA A TRŽNÍ DATA",
         f"Společnost: {company}", f"Zadaný ticker: {ticker}", f"Yahoo Finance ticker: {yahoo_ticker}", f"Trh: {exchange}",
         f"Sektor: {_analyst_czech_sector(q.get('sector'))}; odvětví: {q.get('industry') or '—'}; země: {_analyst_czech_country(q.get('country')) if q.get('country') else '—'}",
+        "OBOROVÝ ANALYTICKÝ REŽIM: " + analyst_sector_guidance(q),
         f"Cena: {_analyst_handoff_value(q.get('price'))} {clean_text(q.get('currency'))}",
         f"Tržní kapitalizace: {_analyst_handoff_value(q.get('market_cap'))}; počet akcií: {_analyst_handoff_value(q.get('shares_outstanding'))}",
         f"P/E: {_analyst_handoff_value(q.get('pe'))}; forward P/E: {_analyst_handoff_value(q.get('forward_pe'))}; P/S: {_analyst_handoff_value(q.get('ps'))}; P/B: {_analyst_handoff_value(q.get('pb'))}; ROE: {_analyst_handoff_value(safe_float(q.get('roe')) * 100 if not pd.isna(safe_float(q.get('roe'))) else np.nan)} % (zdrojová hodnota převedena z poměru na procenta)",
@@ -2910,7 +2950,7 @@ def analyst_build_chatgpt_handoff(company, ticker, yahoo_ticker, exchange, q, an
         "OTÁZKA A PRACOVNÍ TEZE UŽIVATELE",
         f"Otázka: {clean_text(user_question) or 'Není zadána; samostatně určete nejdůležitější aktuální otázku investora.'}",
         f"Pracovní teze k nezávislému ověření: {clean_text(user_thesis) or 'Není zadána.'}",
-        f"Profil původní syntézy aplikace: {profile}",
+        "Úloha aplikace: předložit pracovní hypotézu a nejdůležitější rozpory; nehrát si na dokončený externí výzkum. Nezávislý ChatGPT má vlastními nástroji ověřit a rozšířit závěr.",
         "",
         "ROČNÍ FINANČNÍ DATA (Yahoo Finance; zachovat skutečné označení období)",
     ]
@@ -3182,9 +3222,9 @@ def _analyst_price_evidence(price):
 def groq_connection_diagnostics(api_key, model="openai/gpt-oss-120b"):
     results = []
     base = "https://api.groq.com"
-    headers = {"Authorization": f"Bearer {api_key}", "User-Agent": "Stock-Screener/6.28.49"}
+    headers = {"Authorization": f"Bearer {api_key}", "User-Agent": "Stock-Screener/6.29.0"}
     try:
-        r = requests.get(base + "/", headers={"User-Agent": "Stock-Screener/6.28.49"}, timeout=12)
+        r = requests.get(base + "/", headers={"User-Agent": "Stock-Screener/6.29.0"}, timeout=12)
         results.append({"test": "api.groq.com – základní dostupnost", "status": r.status_code, "detail": r.text[:300]})
     except Exception as e:
         results.append({"test": "api.groq.com – základní dostupnost", "status": "ERROR", "detail": f"{type(e).__name__}: {e}"})
@@ -3224,27 +3264,8 @@ def groq_connection_diagnostics(api_key, model="openai/gpt-oss-120b"):
     return results
 
 
-def analyst_profile_guidance(profile):
-    """Differentiate willingness to interpret, never the standard of evidence."""
-    if profile == "Naspeedovaný":
-        return """PROFIL ANALÝZY: NASPEEDOVANÝ — odvážný, ale poctivý analytik.
-- Aktivně formuluj nejpravděpodobnější investiční tezi; neschovávej se za neutralitu jen proto, že existuje protiargument.
-- Hledej i méně zjevné možnosti: co může trh podceňovat, kde se může lámat trend, co naznačují marže, cash flow, kapitálová disciplína, management a sektor.
-- Uveď jasný základní scénář a stručně i alternativu/bull case a hlavní riziko. Pojmenuj, co je na příběhu zajímavé a co by mohlo být špatně oceněné, ale tvrzení o ocenění opři o dostupné násobky a výsledky.
-- Pracuj s odvážnějšími hypotézami, pokud dávají ekonomický smysl, ale každou nedoloženou příčinu výslovně označ **Inference / hypotéza**, nikoli fakt. Přidej míru jistoty: vysoká / střední / nízká a stručně proč.
-- Můžeš navrhnout 2–3 konkurenční vysvětlení, která stojí za ověření. Bez přímé evidence ale nevybírej jedno jako „pravděpodobnou příčinu“ ani je neoznačuj za jednorázovou/strukturální změnu jako hotový závěr.
-- Nevyžaduj dokonalá data, abys vyslovil pracovní názor. Pokud chybí poslední FY/TTM, řekni, co dostupná data přesto naznačují a co zůstává neověřené. Chybějící data mají snižovat jistotu, ne automaticky mazat názor.
-- „Nejasný / smíšený příběh“ používej jen tehdy, když opravdu není rozumně dominantní teze. Žádné Buy/Hold/Sell ani cílová cena."""
-    return """PROFIL ANALÝZY: SERIÓZNÍ — disciplinovaný, důkazně orientovaný analytik.
-- Urči dominantní pracovní příběh, pokud jej data rozumně podporují; nevybírej automaticky „Nejasný / smíšený příběh“ kvůli běžným protichůdným signálům.
-- Odděluj potvrzená fakta, logickou interpretaci a spekulativní hypotézu. Kauzalitu bez přímé opory označ jako hypotézu.
-- Nepřeváděj opakování výsledku do příběhu o příčině: návrat marže po propadu sám o sobě nedokazuje jednorázový odpis, cloudové investice, lepší mix ani trvalé zlepšení efektivity.
-- Uveď nejsilnější protiargument a konkrétní ověření, které by závěr potvrdilo nebo vyvrátilo. Chybějící data snižují jistotu, ale nemusí zabránit pracovnímu závěru.
-- Žádné Buy/Hold/Sell ani cílová cena."""
-
-
 @st.cache_data(ttl=900, show_spinner=False)
-def analyst_ai_synthesis(company, ticker, exchange, q, annual, quarterly, news, sec, price=None, profile="Seriózní", user_question="", user_thesis=""):
+def analyst_ai_synthesis(company, ticker, exchange, q, annual, quarterly, news, sec, price=None, user_question="", user_thesis=""):
     """Short, evidence-bounded synthesis with TPM-aware retries and deterministic fallback."""
     try:
         api_key = st.secrets["GROQ_API_KEY"]
@@ -3299,10 +3320,12 @@ def analyst_ai_synthesis(company, ticker, exchange, q, annual, quarterly, news, 
         "Růstové zotavení; Vysoký růst / dražší příběh; Value trap – varování; "
         "Nejasný / smíšený příběh; Růst tržeb při tlaku na ziskovost; Zhoršující se výhled a restrukturalizace"
     )
-    stance = "Naspeedovaný: formuluj jasnou dominantní tezi a nejzajímavější alternativu, ale označ nedoložené příčiny jako hypotézu." if profile == "Naspeedovaný" else "Seriózní: formuluj dominantní tezi, pokud ji podklady podporují; přesně odděluj fakta, interpretaci a hypotézy."
+    sector_guidance = analyst_sector_guidance(q)
 
     def make_prompt(evidence, financial, checks):
-        return f"""Jsi nezávislý investiční analytik společnosti {company} ({ticker}, {exchange}). {stance}
+        return f"""Jsi analytik připravující PRACOVNÍ INVESTIČNÍ HYPOTÉZU pro následný nezávislý výzkum ChatGPT: {company} ({ticker}, {exchange}). Nejde o finální investiční doporučení.
+
+OBOROVÝ REŽIM: {sector_guidance}
 
 HLAVNÍ ÚKOL: zjisti, co je v ekonomice firmy právě nejdůležitější, co se skutečně změnilo a zda změna podporuje nebo oslabuje její dlouhodobou hodnotu. Neopisuj pouze ukazatele ani titulky. Propoj aktuální události s finančními výsledky a vysvětli ekonomický mechanismus, ale příčinu netvrď bez přímé opory. Žádné Buy/Hold/Sell ani cílová cena.
 
@@ -3310,13 +3333,13 @@ OTÁZKA UŽIVATELE: {clean_text(user_question) or 'Není zadána. Sám zvol nejd
 PRACOVNÍ TEZE UŽIVATELE: {clean_text(user_thesis) or 'Není zadána. Nevymýšlej uživateli předem daný názor.'}
 Zadaná otázka či teze je hypotéza k nezávislému prověření, nikoli fakt ani pokyn k jejímu potvrzení.
 
-POSTUP: (1) identifikuj nejdůležitější současnou změnu/příležitost; (2) ověř její směr v posledním dostupném FY a nejnovějším srovnatelném kvartálu/TTM; (3) porovnej oficiální firemní tvrzení s nezávislými důkazy, pokud jsou k dispozici; (4) zvaž nejsilnější alternativní vysvětlení a protiargument; (5) popiš dopad na zisk, hotovost, kapitálovou náročnost, konkurenceschopnost nebo ocenění; (6) navrhni konkrétní testy teze.
+POSTUP: (1) identifikuj nejvýznamnější pozorovanou změnu, ne pouze největší dostupnou metriku; (2) rozlož ji na možné příčiny a odliš doložené vysvětlení od hypotéz; (3) vyhodnoť poslední srovnatelné období a starší kontext; (4) uveď nejsilnější důkaz pro i proti; (5) vysvětli ekonomický mechanismus a co zůstává neznámé; (6) navrhni konkrétní testy teze. Pokud balíček neobsahuje oborově správné metriky, pojmenuj přesně které primární zdroje a ukazatele má ChatGPT doplnit, místo abys podnik prohlásil za neanalyzovatelný.
 
 DŮKAZNÍ DISCIPLÍNA: Používej pouze dodané podklady. Před napsáním každého směrového tvrzení zkontroluj přesná čísla, období a znaménko změny v FINANČNÍM KONTEXTU; pokud čísla rostou, nepopisuj stejný interval jako pokles, a naopak. U marže uváděj procentní body, nikoli procentní změnu, pokud srovnáváš dvě procentní hodnoty. Rozlišuj fakt, interpretaci a hypotézu. Příčinu označ za fakt jen při přímé oporě [E#]; jinak ji označ jako hypotézu nebo řekni, že ji neznáme. Titulek či popisek není celý článek ani nezávislé potvrzení. Více titulků o stejné události není více nezávislých důkazů. Pokud jsou k dispozici pouze titulky, výslovně to uveď. Nepřenášej produkty, segmenty, příčiny ani formulace z jiné firmy. Nezaměňuj korelaci za příčinu, plán za výsledek, účetní zisk za hotovost ani nízký násobek za prokázané podhodnocení.
 
 ČAS A SROVNATELNOST: nejprve vyhodnoť poslední FY proti předchozímu FY a nejnovější srovnatelný kvartál meziročně. Starší období slouží jako kontext. FY porovnávej s FY, kvartál jen se stejným kvartálem minulého FY. Respektuj skutečný fiskální rok. Chybějící údaje nevymýšlej a sniž jistotu závěru. Ocenění posuzuj odděleně od kvality firmy.
 
-VÝSTUP: nejvýše 220 slov celkem. Žádný obecný úvod ani opakování celé finanční řady. U THESIS, THREAT, COUNTER, CHANGE a MONITORING dovol 1–3 stručné věty, pokud je to nutné pro ekonomický mechanismus, protitezi a kvalitu důkazů. FOLLOW musí obsahovat přesně 3 konkrétní kontroly oddělené |. Pokud důkaz chybí, řekni to přímo. Dokonči všechna pole a skonči po MONITORING.
+VÝSTUP: nejvýše 280 slov celkem. Žádný obecný úvod ani opakování celé finanční řady. U THESIS, THREAT, COUNTER, CHANGE a MONITORING dovol 1–3 stručné věty, pokud je to nutné pro ekonomický mechanismus, protitezi a kvalitu důkazů. FOLLOW musí obsahovat přesně 3 konkrétní kontroly oddělené |. Pokud důkaz chybí, řekni to přímo. Dokonči všechna pole a skonči po MONITORING.
 STORY: [přesně jeden název z: {allowed_stories}]
 PROFILE: [ověřitelný popis toho, jak firma vydělává; bez neověřených segmentových podílů]
 THESIS: [nejlépe podložená teze a proč je aktuální; důkaz [E#], pokud existuje]
@@ -3347,7 +3370,7 @@ CENA: {analyst_human_number(q.get('price'), 2)} {clean_text(q.get('currency')) o
     def call(payload):
         return requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.28.49"},
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.29.0"},
             json=payload, timeout=90,
         )
 
@@ -3490,7 +3513,7 @@ CENA: {analyst_human_number(q.get('price'), 2)} {clean_text(q.get('currency')) o
             },
         }
         if not valid:
-            fallback_text = _analyst_deterministic_recovery(annual, quarterly, profile, company, q)
+            fallback_text = _analyst_deterministic_recovery(annual, quarterly, company, q)
             result["completion_diagnostics"]["recovery_chars"] = len(fallback_text)
             result["recovery"] = {
                 "ok": True,
@@ -3507,7 +3530,7 @@ CENA: {analyst_human_number(q.get('price'), 2)} {clean_text(q.get('currency')) o
             result["recovery"] = {"ok": False, "source": "none", "text": "", "error": ""}
         return result
     except Exception as exc:
-        fallback_text = _analyst_deterministic_recovery(annual, quarterly, profile, company, q)
+        fallback_text = _analyst_deterministic_recovery(annual, quarterly, company, q)
         return {
             "ok": True,
             "error": f"AI požadavek selhal: {type(exc).__name__}: {exc}; použit deterministický fallback.",
@@ -3537,7 +3560,7 @@ def _analyst_extract_section(text, heading):
 
 
 @st.cache_data(ttl=900, show_spinner=False)
-def analyst_ai_recovery(company, ticker, exchange, q, annual, quarterly, news, sec, price=None, profile="Seriózní"):
+def analyst_ai_recovery(company, ticker, exchange, q, annual, quarterly, news, sec, price=None):
     """Compact recovery with one TPM-aware retry and strict anti-placeholder validation."""
     try:
         api_key = st.secrets["GROQ_API_KEY"]
@@ -3548,11 +3571,11 @@ def analyst_ai_recovery(company, ticker, exchange, q, annual, quarterly, news, s
     evidence = _analyst_evidence_text(pack, max_chars=1300)
     annual_context = _analyst_financial_change_summary(annual, pd.DataFrame())[:1150]
     controls_context = analyst_interpretation_controls(annual, quarterly, q)[:350]
-    profile_guidance = analyst_profile_guidance(profile)
+    sector_guidance = analyst_sector_guidance(q)
 
-    prompt = f"""Jsi analytik společnosti {company} ({ticker}, {exchange}). Datum analýzy: {datetime.now().strftime("%d. %m. %Y")}.
-{profile_guidance}
-Použij jen dodané podklady. Nevymýšlej čísla, období ani příčiny.
+    prompt = f"""Jsi analytik připravující pracovní hypotézu pro následný nezávislý výzkum: {company} ({ticker}, {exchange}). Datum analýzy: {datetime.now().strftime("%d. %m. %Y")}.
+OBOROVÝ REŽIM: {sector_guidance}
+Použij jen dodané podklady. Nevymýšlej čísla, období ani příčiny. Pokud chybí oborově vhodný ukazatel, pojmenuj jej jako otázku k ověření; nepovažuj obecné chybějící pole za důkaz, že příběh nelze sestavit.
 
 ZÁVAZNÁ ROČNÍ ŘADA (období a hodnoty opisuj přesně):
 {annual_context or 'Roční finanční řada není k dispozici.'}
@@ -3591,7 +3614,7 @@ EVIDENCE:
     def call(payload):
         return requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.28.49"},
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Stock-Screener/6.29.0"},
             json=payload, timeout=60
         )
 
@@ -3707,7 +3730,7 @@ def _analyst_extract_follow(text):
     return items[:3]
 
 
-def _analyst_deterministic_recovery(annual, quarterly, profile="Naspeedovaný", company="", q=None):
+def _analyst_deterministic_recovery(annual, quarterly, company="", q=None):
     """Deterministic financial narrative. No financial values or causes are generated by AI."""
     def val(row, key):
         try:
@@ -3749,6 +3772,48 @@ def _analyst_deterministic_recovery(annual, quarterly, profile="Naspeedovaný", 
             v = r.get(key)
             bits.append(f"{r['period']}: {fmt(v if percent else (v / divisor if v is not None else None), digits)}{' %' if percent else suffix if v is not None else ''}" if v is not None else f"{r['period']}: chybí")
         return " → ".join(bits)
+
+    q = q or {}
+    sector_blob = f"{clean_text(q.get('sector')).lower()} {clean_text(q.get('industry')).lower()}"
+    is_bank = any(x in sector_blob for x in ("bank", "banking", "regional banks", "money center"))
+    if is_bank:
+        def parse_q(df):
+            if df is None or df.empty or "Období" not in df.columns:
+                return []
+            out=[]
+            for _, row in df.iterrows():
+                label=clean_text(row.get("Období"))
+                m=re.search(r"Q([1-4])\s+FY(\d{4})", label)
+                if not m:
+                    continue
+                out.append({"label":label,"q":int(m.group(1)),"fy":int(m.group(2)),
+                            "revenue":val(row,"Revenue"),"ni":val(row,"Net Income"),
+                            "fcf":val(row,"FCF"),"debt":val(row,"Debt")})
+            return sorted(out,key=lambda x:(x["fy"],x["q"]))
+        qs=parse_q(quarterly)
+        latest=qs[-1] if qs else None
+        prior=next((x for x in reversed(qs[:-1]) if latest and x["q"]==latest["q"] and x["fy"]<latest["fy"]),None) if latest else None
+        comparisons=[]
+        if latest and prior:
+            for key,label in (("revenue","tržby"),("ni","čistý zisk")):
+                a,b=prior.get(key),latest.get(key)
+                if a is not None and b is not None:
+                    if a != 0:
+                        pct=(b/a-1)*100
+                        comparisons.append(f"{label}: {prior['label']} {analyst_human_number(a)} → {latest['label']} {analyst_human_number(b)} ({pct:+.1f} % YoY)")
+                    else:
+                        comparisons.append(f"{label}: {prior['label']} {analyst_human_number(a)} → {latest['label']} {analyst_human_number(b)}; výchozí nula")
+        comparison_text="; ".join(comparisons) if comparisons else "V dodaných kvartálních datech není úplné srovnání posledního kvartálu se stejným kvartálem minulého FY."
+        story="Růst tržeb při tlaku na ziskovost" if latest and prior and latest.get("revenue") is not None and prior.get("revenue") is not None and latest["revenue"]>prior["revenue"] and latest.get("ni") is not None and prior.get("ni") is not None and latest["ni"]<prior["ni"] else "Nejasný / smíšený příběh"
+        change=("### 1. Rozpor mezi růstem výnosů a čistým ziskem\n"
+                f"**Co víme:** {comparison_text}. Jde o srovnání dostupných finančních řad; příčina není v těchto agregovaných datech doložena.\n\n"
+                "**Interpretace:** U banky tento rozpor vyžaduje rozklad čistého úrokového výnosu, nákladů na vklady, neúrokových výnosů a nákladů, opravných položek a daní; obecná provozní marže ani FCF nejsou hlavním rozhodovacím rámcem.\n\n"
+                "**Neznáme:** Z těchto dat nelze rozlišit běžné zhoršení bankovní ekonomiky od jednorázové právní, účetní či daňové položky.\n\n"
+                "**Co ověřit:** Poslední výsledkovou zprávu, 10-Q/10-K a přepis hovoru; porovnat GAAP a upravený zisk a ověřit NIM/NII, cenu vkladů, úvěrové ztráty, nevýkonné úvěry, koncentrace CRE, kapitál a TBV na akcii.")
+        follow=("Rozložit změnu GAAP čistého zisku na úrokový výnos, náklady, rezervy, daně a mimořádné položky.",
+                "Ověřit NIM/NII, náklady na vklady a růst úvěrů v posledních primárních výsledcích.",
+                "Prověřit nevýkonné úvěry, čisté odpisy, CRE koncentrace a kapitál/TBV na akcii.")
+        return (f"STORY: {story}\nPROFILE: {_analyst_profile_fallback(company, q)}\nCHANGES:\n{change}\nFOLLOW: " + " | ".join(follow))
 
     opm_rows = [r for r in rows if r["opm"] is not None]
     if len(opm_rows) >= 2:
@@ -3865,7 +3930,7 @@ def analyst_current_developments(company, q, annual, quarterly, news, sec, ticke
                 "**Pracovní příběh:** " + fields["STORY"]
             ])
     deterministic = _analyst_deterministic_recovery(
-        annual, quarterly, profile="Naspeedovaný", company=company, q=q
+        annual, quarterly, company=company, q=q
     )
     deterministic_changes = _analyst_recovery_changes_text(deterministic)
     if deterministic_changes:
@@ -3950,7 +4015,7 @@ def analyst_story_hypothesis(q, annual, quarterly, news, sec, ai_result=None):
     m = re.search(r"(?im)^\s*STORY\s*:\s*(.+)$", source)
     title = m.group(1).strip().strip("*# ") if m else ""
     title = next((x for x in allowed if x.lower() == title.lower()), "")
-    deterministic = _analyst_deterministic_recovery(annual, quarterly, profile="Naspeedovaný", company="", q=q)
+    deterministic = _analyst_deterministic_recovery(annual, quarterly, company="", q=q)
     if not title:
         dm = re.search(r"(?im)^\s*STORY\s*:\s*(.+)$", deterministic)
         proposed = dm.group(1).strip() if dm else "Nejasný / smíšený příběh"
@@ -4363,14 +4428,6 @@ def analyst_render(ticker_input):
         default_ex = 2 if str(ticker_input).upper().endswith(".DE") else 0
         exchange = st.selectbox("Trh", ["NASDAQ", "NYSE", "XETRA"], index=default_ex)
 
-    profile = st.radio(
-        "Profil analytika",
-        ["Seriózní", "Naspeedovaný"],
-        index=0,
-        horizontal=True,
-        help=("Seriózní = disciplinovaný základní názor. Naspeedovaný = odvážnější investiční hypotézy a výraznější interpretace; důkazní pravidla jsou stejná."),
-    )
-    st.caption("Oba profily používají stejná finanční data a stejné požadavky na pravdivost. Liší se hlavně odvahou a stylem interpretace.")
     user_question = st.text_area(
         "Co chceš u firmy zjistit? (nepovinné)",
         placeholder="Např. Je zhoršení marží Volkswagenu převážně cyklické, nebo strukturální?",
@@ -4513,7 +4570,7 @@ def analyst_render(ticker_input):
     news = analyst_google_news(company, ticker, q.get("ir_website") or q.get("website"))
 
     status.info("4/5 Stavím důkazní balíček a provádím AI syntézu…")
-    ai_result = analyst_ai_synthesis(company, ticker, exchange, q, annual, quarterly, news, sec, price, profile, user_question, user_thesis)
+    ai_result = analyst_ai_synthesis(company, ticker, exchange, q, annual, quarterly, news, sec, price, user_question, user_thesis)
     audit_text = (ai_result.get("text") or ((ai_result.get("recovery") or {}).get("text", ""))) if isinstance(ai_result, dict) else ""
     numerical_audit = analyst_numerical_claim_audit(audit_text, annual, quarterly)
     if isinstance(ai_result, dict):
@@ -4521,10 +4578,15 @@ def analyst_render(ticker_input):
     current = analyst_current_developments(company, q, annual, quarterly, news, sec, ticker, exchange, price, ai_result=ai_result)
     primary, story_reason = analyst_story_hypothesis(q, annual, quarterly, news, sec, ai_result)
     price_comment = analyst_price_commentary(price)
-    status.success("5/5 Analytické jádro dokončeno.")
+    if isinstance(ai_result, dict) and ai_result.get("completion_status") == "primary_ai" and ai_result.get("text"):
+        status.success("5/5 Pracovní analytická hypotéza vytvořena; externí ověření je úkolem navazujícího ChatGPT.")
+    elif isinstance(ai_result, dict) and ai_result.get("ok"):
+        status.warning("5/5 Data načtena, ale úplná AI syntéza nevznikla; zobrazuje se oborově přizpůsobený datový fallback.")
+    else:
+        status.warning("5/5 Data načtena; AI syntéza není dostupná. Výstup je omezen na dostupná data a fallback.")
 
     st.markdown(f"## {company}")
-    st.caption(f"Ticker **{ticker}** · Yahoo **{yahoo_ticker}** · {exchange} · profil **{profile}** · načteno {datetime.now().strftime('%d.%m.%Y %H:%M')} · build **V6.28.51 / 20261016-A**")
+    st.caption(f"Ticker **{ticker}** · Yahoo **{yahoo_ticker}** · {exchange} · načteno {datetime.now().strftime('%d.%m.%Y %H:%M')} · build **V6.29.0 / 20261017-B**")
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Cena", f"{analyst_human_number(q.get('price'), 2)} {q.get('currency', '')}")
@@ -4546,7 +4608,7 @@ def analyst_render(ticker_input):
 
     with st.expander("🧠 2. Co se ve firmě právě mění", expanded=True):
         completion_status = ai_result.get("completion_status", "unknown") if isinstance(ai_result, dict) else "unknown"
-        st.caption("V6.28.51: AI syntéza se zobrazuje jen tehdy, když je úplná; jinak je výstup výslovně označen jako datový fallback. Titulky jsou signály, nikoli potvrzená fakta.")
+        st.caption("V6.29.0: Analytik vytváří pracovní hypotézu, nikoli hotový externí výzkum. Pokud AI nedodá úplnou syntézu, fallback musí respektovat obchodní model; titulky jsou signály, nikoli potvrzená fakta.")
         if isinstance(ai_result, dict) and not ai_result.get("ok"):
             st.warning("AI syntéza není dostupná. Finanční přehled níže přesto zůstává k dispozici, protože se počítá přímo z načtených ročních dat.")
         elif completion_status == "ai_recovery":
@@ -4566,7 +4628,7 @@ def analyst_render(ticker_input):
         st.write("Tento export je hlavní praktický výstup pro další hloubkový výzkum. Obsahuje identitu firmy, finanční řady, mezery v datech, výstup původní AI, dostupné titulky s odkazy a přesné zadání pro ChatGPT. Zkopíruj celý text z pole nebo stáhni TXT; ChatGPT má podklady nezávisle ověřit a doplnit aktuální výzkum.")
         handoff = analyst_build_chatgpt_handoff(
             company, ticker, yahoo_ticker, exchange, q, annual, quarterly, news, sec, ai_result,
-            user_question, user_thesis, profile, price, numerical_audit
+            user_question, user_thesis, price, numerical_audit
         )
         handoff_widget_key = "analyst_chatgpt_handoff_" + hashlib.md5(handoff.encode("utf-8")).hexdigest()[:12]
         st.text_area("Kompletní zadání a důkazní balíček pro ChatGPT", value=handoff, height=420, key=handoff_widget_key)
@@ -4649,7 +4711,7 @@ def analyst_render(ticker_input):
                 # even if its final H2 heading was cut off.
                 follow_items = _analyst_extract_follow(ai_result.get("text", ""))
             if not follow_items:
-                fallback_text = _analyst_deterministic_recovery(annual, quarterly, profile, company, q)
+                fallback_text = _analyst_deterministic_recovery(annual, quarterly, company, q)
                 follow_items = _analyst_extract_follow(fallback_text)
             if follow_items:
                 st.markdown("\n".join(f"- {x}" for x in follow_items))
@@ -4682,7 +4744,7 @@ def analyst_render(ticker_input):
         st.write(f"Evidence položek: {ai_result.get('evidence_count', '—')}")
         st.write(f"AI model: {ai_result.get('model', '—')}")
         st.write(f"Kontrola kódu fallbacku: {ANALYST_FALLBACK_REVISION}")
-        st.write("Pravidlo V6.28.51 / DF51-A: AI má vybrat dominantní současnou tezi, propojit ji s posledními srovnatelnými finančními údaji, uvést nejsilnější protiargument a navrhnout konkrétní kontroly. FCF přes nulu se popisuje absolutní změnou, nikoli zavádějícím procentem; ChatGPT má vstupní čísla a identitu instrumentu nezávisle ověřit. Monitoring upřednostňuje vlastní AI syntézu; tematické počítání titulků je jen náhradní varianta. Aplikace stále pracuje převážně s RSS titulky/popisky, nikoli automaticky s plným textem každého článku.")
+        st.write("Pravidlo V6.29.0 / DF52-B: Analytik má formulovat pracovní tezi, ekonomický mechanismus, nejsilnější protitezi a konkrétní neznámé. Ukazatele se volí podle obchodního modelu; u bank nejsou běžné FCF a provozní marže hlavním rámcem. ChatGPT má tezi nezávisle ověřit z primárních zdrojů a aktuálního výzkumu. Aplikace pracuje převážně s RSS titulky/popisky, nikoli automaticky s plným textem každého článku.")
         st.write(f"Stav dokončení AI: { {'primary_ai': 'původní odpověď formálně úplná', 'ai_recovery': 'použita záchranná AI odpověď', 'deterministic_fallback': 'použit datový fallback'}.get(ai_result.get('completion_status'), 'stav není k dispozici') }")
         diag = ai_result.get("completion_diagnostics") or {}
         if diag:
