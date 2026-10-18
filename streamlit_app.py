@@ -54,7 +54,7 @@ def update_runtime(status=None, stage=None, message=None, error=None, run_id=Non
 
 
 st.title("📊 Stock-Screener")
-st.caption("V6.29.0 · BUILD 20261017-B – Screener · nezávislý Analytik připravuje pracovní hypotézy pro další ověření")
+st.caption("V6.29.1 · BUILD 20261017-C – Screener · nezávislý Analytik připravuje pracovní hypotézy pro další ověření")
 
 NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 NYSE_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
@@ -2923,10 +2923,10 @@ def _analyst_handoff_value(value, digits=2):
 def analyst_build_chatgpt_handoff(company, ticker, yahoo_ticker, exchange, q, annual, quarterly, news, sec,
                                   ai_result, user_question="", user_thesis="", price=None,
                                   numerical_audit=None):
-    """Build a portable research brief and ready-to-paste instruction for the pinned ChatGPT analyst chat."""
+    """Build a portable research brief and ready-to-paste instructions for a new ChatGPT company-analysis chat."""
     now = datetime.now().strftime("%d.%m.%Y %H:%M")
     lines = [
-        "ZADÁNÍ PRO CHATGPT ANALYTIK — Stock-Screener V6.29.0",
+        "ZADÁNÍ PRO CHATGPT ANALYTIK — Stock-Screener V6.29.1",
         f"Datum vytvoření balíčku: {now}",
         "",
         "ROLE A ÚKOL",
@@ -2936,6 +2936,11 @@ def analyst_build_chatgpt_handoff(company, ticker, yahoo_ticker, exchange, q, an
         "Vytvoř plastický, kritický investiční příběh: co se ve firmě skutečně mění, proč je to ekonomicky důležité, co může být strukturální/cyklické/dočasné, jak se to přenáší do marží, zisku, hotovosti, kapitálové náročnosti a hodnoty akcie. Ověř nejen tezi, ale i nejsilnější protitezi. Žádné Buy/Hold/Sell ani cílová cena.",
         "Rozlišuj: (1) doložený fakt, (2) interpretaci, (3) hypotézu, (4) neznámou věc. Firemní tvrzení nepovažuj automaticky za nezávisle potvrzený fakt. Plány odděluj od výsledků. Nezaměňuj korelaci za příčinu, účetní zisk za hotovost ani levný násobek za prokázané podhodnocení. Srovnávej stejné fiskální období a zohledni fiskální rok společnosti. U každého klíčového závěru uveď, co by ho potvrdilo nebo vyvrátilo.",
         "Na konci formuluj: dominantní investiční příběh; nejvýznamnější změny; důkazy pro a proti; co je už v ceně; scénáře a klíčové předpoklady (bez falešné přesnosti); zásadní neznámé; 3–5 konkrétních monitorovacích ukazatelů/událostí; závěr o kvalitě důkazů. Pokud jsou zdroje v tomto balíčku jen RSS titulky/popisky, nepovažuj je za přečtené články ani nezávislá potvrzení.",
+        "",
+        "UNIVERZÁLNÍ KONTROLA VÝZNAMNÝCH FIREMNÍCH UDÁLOSTÍ",
+        "Aktivně vyhledej a ověř významné události, které mohou změnit investiční příběh, i když je Screener nezachytil nebo nejsou mezi dodanými titulky. Neomezuj se na události předem označené aplikací. Prověř podle relevance zejména: oddělení/spin-off a distribuci akcií, prodej či nákup divize nebo aktiv, fúze a akvizice, strategickou revizi portfolia, restrukturalizaci a úsporné programy, změny vedení a kapitálové alokace, regulatorní či soudní rozhodnutí, zásadní produktové/technologické změny, financování a refinancování, změny výhledu a konkrétní blížící se milníky.",
+        "U každé materiální události uveď: (1) co se stalo a primární zdroj s datem; (2) stav — spekulace, oznámeno, schváleno/podmíněno, probíhá, nebo dokončeno; (3) mechanismus možného dopadu na tržby, marže, zisk, cash flow, rozvahu, riziko nebo ocenění; (4) pozitivní i negativní scénář a nejdůležitější podmínky; (5) zda a jak může být dopad již započten v ceně — bez předstírání, že to lze přesně změřit; (6) ověřitelné další milníky a jejich data; (7) co zatím nevíme. Rozlišuj schválený krok od pouhého záměru a probíhajícího procesu od dokončené transakce.",
+        "U událostí s více kroky rozliš jednotlivé fáze a jejich podmínky. Nepřenášej závěry z jedné transakce na jinou a nezaměňuj oznámený strategický záměr za závazné rozhodnutí. U každé události hledej také protidůkazy, možné náklady, ztrátu výnosů, daňové dopady, rizika realizace a důvody, proč by trh mohl reagovat jinak, než se čeká. Pokud událost nelze spolehlivě doložit aktuálním zdrojem, označ ji jako neověřenou a nepoužívej ji jako fakt.",
         "",
         "IDENTITA A TRŽNÍ DATA",
         f"Společnost: {company}", f"Zadaný ticker: {ticker}", f"Yahoo Finance ticker: {yahoo_ticker}", f"Trh: {exchange}",
@@ -4586,7 +4591,7 @@ def analyst_render(ticker_input):
         status.warning("5/5 Data načtena; AI syntéza není dostupná. Výstup je omezen na dostupná data a fallback.")
 
     st.markdown(f"## {company}")
-    st.caption(f"Ticker **{ticker}** · Yahoo **{yahoo_ticker}** · {exchange} · načteno {datetime.now().strftime('%d.%m.%Y %H:%M')} · build **V6.29.0 / 20261017-B**")
+    st.caption(f"Ticker **{ticker}** · Yahoo **{yahoo_ticker}** · {exchange} · načteno {datetime.now().strftime('%d.%m.%Y %H:%M')} · build **V6.29.1 / 20261017-C**")
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Cena", f"{analyst_human_number(q.get('price'), 2)} {q.get('currency', '')}")
@@ -4608,7 +4613,7 @@ def analyst_render(ticker_input):
 
     with st.expander("🧠 2. Co se ve firmě právě mění", expanded=True):
         completion_status = ai_result.get("completion_status", "unknown") if isinstance(ai_result, dict) else "unknown"
-        st.caption("V6.29.0: Analytik vytváří pracovní hypotézu, nikoli hotový externí výzkum. Pokud AI nedodá úplnou syntézu, fallback musí respektovat obchodní model; titulky jsou signály, nikoli potvrzená fakta.")
+        st.caption("V6.29.1: Analytik vytváří pracovní hypotézu, nikoli hotový externí výzkum. Pokud AI nedodá úplnou syntézu, fallback musí respektovat obchodní model; titulky jsou signály, nikoli potvrzená fakta.")
         if isinstance(ai_result, dict) and not ai_result.get("ok"):
             st.warning("AI syntéza není dostupná. Finanční přehled níže přesto zůstává k dispozici, protože se počítá přímo z načtených ročních dat.")
         elif completion_status == "ai_recovery":
@@ -4624,8 +4629,8 @@ def analyst_render(ticker_input):
         else:
             st.caption("Automatická kontrola směru číselných tvrzení nenašla zjevný rozpor. Kontrola je konzervativní a nezaručuje, že je celý text bez chyb.")
 
-    with st.expander("🧭 3. Přenosný podklad pro připnutý chat ChatGPT Analytik", expanded=True):
-        st.write("Tento export je hlavní praktický výstup pro další hloubkový výzkum. Obsahuje identitu firmy, finanční řady, mezery v datech, výstup původní AI, dostupné titulky s odkazy a přesné zadání pro ChatGPT. Zkopíruj celý text z pole nebo stáhni TXT; ChatGPT má podklady nezávisle ověřit a doplnit aktuální výzkum.")
+    with st.expander("🧭 3. Přenosný podklad pro nový chat ChatGPT – analýza této firmy", expanded=True):
+        st.write("Tento export je hlavní praktický výstup pro další hloubkový výzkum. Obsahuje identitu firmy, finanční řady, mezery v datech, výstup původní AI, dostupné titulky s odkazy a kompletní obecné zadání pro nezávislou analýzu. Zkopíruj celý text do nového chatu ChatGPT věnovaného této firmě, nebo stáhni TXT; ChatGPT má podklady nezávisle ověřit a doplnit aktuální výzkum.")
         handoff = analyst_build_chatgpt_handoff(
             company, ticker, yahoo_ticker, exchange, q, annual, quarterly, news, sec, ai_result,
             user_question, user_thesis, price, numerical_audit
@@ -4744,7 +4749,7 @@ def analyst_render(ticker_input):
         st.write(f"Evidence položek: {ai_result.get('evidence_count', '—')}")
         st.write(f"AI model: {ai_result.get('model', '—')}")
         st.write(f"Kontrola kódu fallbacku: {ANALYST_FALLBACK_REVISION}")
-        st.write("Pravidlo V6.29.0 / DF52-B: Analytik má formulovat pracovní tezi, ekonomický mechanismus, nejsilnější protitezi a konkrétní neznámé. Ukazatele se volí podle obchodního modelu; u bank nejsou běžné FCF a provozní marže hlavním rámcem. ChatGPT má tezi nezávisle ověřit z primárních zdrojů a aktuálního výzkumu. Aplikace pracuje převážně s RSS titulky/popisky, nikoli automaticky s plným textem každého článku.")
+        st.write("Pravidlo V6.29.1 / DF52-C: Analytik má formulovat pracovní tezi, ekonomický mechanismus, nejsilnější protitezi a konkrétní neznámé. Ukazatele se volí podle obchodního modelu; u bank nejsou běžné FCF a provozní marže hlavním rámcem. ChatGPT má tezi nezávisle ověřit z primárních zdrojů a aktuálního výzkumu. Aplikace pracuje převážně s RSS titulky/popisky, nikoli automaticky s plným textem každého článku.")
         st.write(f"Stav dokončení AI: { {'primary_ai': 'původní odpověď formálně úplná', 'ai_recovery': 'použita záchranná AI odpověď', 'deterministic_fallback': 'použit datový fallback'}.get(ai_result.get('completion_status'), 'stav není k dispozici') }")
         diag = ai_result.get("completion_diagnostics") or {}
         if diag:
