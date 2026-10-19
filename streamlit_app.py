@@ -54,7 +54,7 @@ def update_runtime(status=None, stage=None, message=None, error=None, run_id=Non
 
 
 st.title("📊 Stock-Screener")
-st.caption("V6.29.3 · BUILD 20261019-B – Screener · nezávislý Analytik připravuje pracovní hypotézy pro další ověření")
+st.caption("V6.29.4 · BUILD 20261019-C – Screener · nezávislý Analytik připravuje pracovní hypotézy pro další ověření")
 
 NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 NYSE_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
@@ -1636,9 +1636,27 @@ ANALYST_STORIES = [
 
 
 def analyst_yahoo_ticker(ticker, exchange):
+    """Resolve common input aliases to the verified Yahoo Finance symbol.
+
+    Alias resolution is explicit and market-scoped: it does not weaken the
+    exact-symbol identity firewall in analyst_get_quote_data().
+    """
     ticker = clean_text(ticker).upper()
     if exchange in ("NASDAQ", "NYSE"):
         return normalize_us_ticker(ticker)
+
+    # MTU Aero Engines AG is commonly referred to as "MTU", but its official
+    # Xetra symbol is MTX (Yahoo Finance: MTX.DE). Map only these explicit
+    # company aliases; do not accept approximate search results or disable the
+    # exact Yahoo Chart API identity check.
+    xetra_aliases = {
+        "MTU": "MTX.DE",
+        "MTU.DE": "MTX.DE",
+        "MTU AERO ENGINES": "MTX.DE",
+        "MTU AERO ENGINES AG": "MTX.DE",
+    }
+    if ticker in xetra_aliases:
+        return xetra_aliases[ticker]
     if ticker.endswith(".DE"):
         return ticker
     return ticker + ".DE"
@@ -2926,7 +2944,7 @@ def analyst_build_chatgpt_handoff(company, ticker, yahoo_ticker, exchange, q, an
     """Build a portable research brief and ready-to-paste instructions for a new ChatGPT company-analysis chat."""
     now = datetime.now().strftime("%d.%m.%Y %H:%M")
     lines = [
-        "ZADÁNÍ PRO CHATGPT ANALYTIK — Stock-Screener V6.29.3",
+        "ZADÁNÍ PRO CHATGPT ANALYTIK — Stock-Screener V6.29.4",
         f"Datum vytvoření balíčku: {now}",
         "",
         "ROLE A ÚKOL",
@@ -4431,9 +4449,11 @@ def analyst_render(ticker_input):
 
     c1, c2 = st.columns([3, 1])
     with c1:
-        ticker_input = st.text_input("Ticker", value=ticker_input, placeholder="např. SHL, GOOGL, ONC, AT1.DE")
+        ticker_input = st.text_input("Ticker", value=ticker_input, placeholder="např. SHL, GOOGL, ONC, AT1.DE nebo MTX.DE (MTU Aero Engines)")
     with c2:
-        default_ex = 2 if str(ticker_input).upper().endswith(".DE") else 0
+        ticker_hint = clean_text(ticker_input).upper()
+        xetra_alias_hints = {"MTU", "MTU.DE", "MTU AERO ENGINES", "MTU AERO ENGINES AG", "MTX", "MTX.DE"}
+        default_ex = 2 if ticker_hint.endswith(".DE") or ticker_hint in xetra_alias_hints else 0
         exchange = st.selectbox("Trh", ["NASDAQ", "NYSE", "XETRA"], index=default_ex)
 
     user_question = st.text_area(
@@ -4594,7 +4614,7 @@ def analyst_render(ticker_input):
         status.warning("5/5 Data načtena; AI syntéza není dostupná. Výstup je omezen na dostupná data a fallback.")
 
     st.markdown(f"## {company}")
-    st.caption(f"Ticker **{ticker}** · Yahoo **{yahoo_ticker}** · {exchange} · načteno {datetime.now().strftime('%d.%m.%Y %H:%M')} · build **V6.29.3 / 20261019-B**")
+    st.caption(f"Ticker **{ticker}** · Yahoo **{yahoo_ticker}** · {exchange} · načteno {datetime.now().strftime('%d.%m.%Y %H:%M')} · build **V6.29.4 / 20261019-C**")
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Cena", f"{analyst_human_number(q.get('price'), 2)} {q.get('currency', '')}")
@@ -4616,7 +4636,7 @@ def analyst_render(ticker_input):
 
     with st.expander("🧠 2. Co se ve firmě právě mění", expanded=True):
         completion_status = ai_result.get("completion_status", "unknown") if isinstance(ai_result, dict) else "unknown"
-        st.caption("V6.29.3: Analytik vytváří pracovní hypotézu, nikoli hotový externí výzkum. Pokud AI nedodá úplnou syntézu, fallback musí respektovat obchodní model; titulky jsou signály, nikoli potvrzená fakta.")
+        st.caption("V6.29.4: Analytik vytváří pracovní hypotézu, nikoli hotový externí výzkum. Pokud AI nedodá úplnou syntézu, fallback musí respektovat obchodní model; titulky jsou signály, nikoli potvrzená fakta.")
         if isinstance(ai_result, dict) and not ai_result.get("ok"):
             st.warning("AI syntéza není dostupná. Finanční přehled níže přesto zůstává k dispozici, protože se počítá přímo z načtených ročních dat.")
         elif completion_status == "ai_recovery":
@@ -4752,7 +4772,7 @@ def analyst_render(ticker_input):
         st.write(f"Evidence položek: {ai_result.get('evidence_count', '—')}")
         st.write(f"AI model: {ai_result.get('model', '—')}")
         st.write(f"Kontrola kódu fallbacku: {ANALYST_FALLBACK_REVISION}")
-        st.write("Pravidlo V6.29.3 / DF52-C: Analytik má formulovat pracovní tezi, ekonomický mechanismus, nejsilnější protitezi a konkrétní neznámé. Ukazatele se volí podle obchodního modelu; u bank nejsou běžné FCF a provozní marže hlavním rámcem. ChatGPT má tezi nezávisle ověřit z primárních zdrojů a aktuálního výzkumu. Aplikace pracuje převážně s RSS titulky/popisky, nikoli automaticky s plným textem každého článku.")
+        st.write("Pravidlo V6.29.4 / DF52-C: Analytik má formulovat pracovní tezi, ekonomický mechanismus, nejsilnější protitezi a konkrétní neznámé. Ukazatele se volí podle obchodního modelu; u bank nejsou běžné FCF a provozní marže hlavním rámcem. ChatGPT má tezi nezávisle ověřit z primárních zdrojů a aktuálního výzkumu. Aplikace pracuje převážně s RSS titulky/popisky, nikoli automaticky s plným textem každého článku.")
         st.write(f"Stav dokončení AI: { {'primary_ai': 'původní odpověď formálně úplná', 'ai_recovery': 'použita záchranná AI odpověď', 'deterministic_fallback': 'použit datový fallback'}.get(ai_result.get('completion_status'), 'stav není k dispozici') }")
         diag = ai_result.get("completion_diagnostics") or {}
         if diag:
