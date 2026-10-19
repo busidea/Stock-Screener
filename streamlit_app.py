@@ -54,7 +54,7 @@ def update_runtime(status=None, stage=None, message=None, error=None, run_id=Non
 
 
 st.title("📊 Stock-Screener")
-st.caption("V6.29.1 · BUILD 20261017-C – Screener · nezávislý Analytik připravuje pracovní hypotézy pro další ověření")
+st.caption("V6.29.2 · BUILD 20261019-A – Screener · nezávislý Analytik připravuje pracovní hypotézy pro další ověření")
 
 NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 NYSE_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
@@ -2926,7 +2926,7 @@ def analyst_build_chatgpt_handoff(company, ticker, yahoo_ticker, exchange, q, an
     """Build a portable research brief and ready-to-paste instructions for a new ChatGPT company-analysis chat."""
     now = datetime.now().strftime("%d.%m.%Y %H:%M")
     lines = [
-        "ZADÁNÍ PRO CHATGPT ANALYTIK — Stock-Screener V6.29.1",
+        "ZADÁNÍ PRO CHATGPT ANALYTIK — Stock-Screener V6.29.2",
         f"Datum vytvoření balíčku: {now}",
         "",
         "ROLE A ÚKOL",
@@ -2951,6 +2951,7 @@ def analyst_build_chatgpt_handoff(company, ticker, yahoo_ticker, exchange, q, an
         f"P/E: {_analyst_handoff_value(q.get('pe'))}; forward P/E: {_analyst_handoff_value(q.get('forward_pe'))}; P/S: {_analyst_handoff_value(q.get('ps'))}; P/B: {_analyst_handoff_value(q.get('pb'))}; ROE: {_analyst_handoff_value(safe_float(q.get('roe')) * 100 if not pd.isna(safe_float(q.get('roe'))) else np.nan)} % (zdrojová hodnota převedena z poměru na procenta)",
         f"Zdroj P/E: {q.get('pe_source') or 'neuveden'}; zdroj P/S: {q.get('ps_source') or 'neuveden'}; ověření identity: {q.get('identity_reason') or 'neuvedeno'}; doplňková kotace/valuace: {q.get('quote_fallback_status') or 'neuvedeno'}",
         "Upozornění: prázdné hodnoty jsou neznámé, nikoli nula. Odvozené násobky musí být zkontrolovány proti správné třídě akcií, počtu akcií, měně a srovnatelnému období.",
+        "ZVLÁŠTNÍ POZOR: měna kotace a tržní kapitalizace nemusí být měnou finančních výkazů. Aplikace načítá finanční řady z Yahoo Finance, ale tento balíček neověřuje a nepřenáší spolehlivá metadata o měně/jednotce každé finanční řady. Neodvozuj proto měnu tržeb, zisku, dluhu ani cash flow z měny akcie. Před výpočtem P/S, marží, růstu nebo jiných násobků ověř měnu, škálování a definici v primárních výkazech. Pokud to nelze ověřit, výslovně označ měnu/jednotku za neověřenou a nepočítej násobek z nesouměřitelných čísel; nic tiše nepřeváděj.",
         "",
         "OTÁZKA A PRACOVNÍ TEZE UŽIVATELE",
         f"Otázka: {clean_text(user_question) or 'Není zadána; samostatně určete nejdůležitější aktuální otázku investora.'}",
@@ -2982,6 +2983,7 @@ def analyst_build_chatgpt_handoff(company, ticker, yahoo_ticker, exchange, q, an
     financial_cols = [("Revenue","tržby"),("Net Income","čistý zisk"),("Operating Income","provozní zisk"),
                       ("Operating Cash Flow","provozní cash flow"),("Capital Expenditure","capex"),("FCF","FCF"),
                       ("Debt","dluh"),("Equity","vlastní kapitál")]
+    lines.append("Povinná kontrola před interpretací: následující finanční řady jsou zdrojové hodnoty Yahoo Finance a mohou být zobrazeny v kompaktním formátu. Měna a jednotka finančních výkazů nejsou v tomto balíčku nezávisle potvrzeny; měnu kotace nepovažuj automaticky za měnu výkazů. Nejprve je ověř proti primárnímu reportu společnosti.")
     add_table("Roční data:", annual, financial_cols, 6)
     lines.append("")
     add_table("Čtvrtletní data (posledních 8 dostupných období; chybějící čtvrtletí se nesmí domýšlet):", quarterly, financial_cols, 8)
@@ -4591,7 +4593,7 @@ def analyst_render(ticker_input):
         status.warning("5/5 Data načtena; AI syntéza není dostupná. Výstup je omezen na dostupná data a fallback.")
 
     st.markdown(f"## {company}")
-    st.caption(f"Ticker **{ticker}** · Yahoo **{yahoo_ticker}** · {exchange} · načteno {datetime.now().strftime('%d.%m.%Y %H:%M')} · build **V6.29.1 / 20261017-C**")
+    st.caption(f"Ticker **{ticker}** · Yahoo **{yahoo_ticker}** · {exchange} · načteno {datetime.now().strftime('%d.%m.%Y %H:%M')} · build **V6.29.2 / 20261019-A**")
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Cena", f"{analyst_human_number(q.get('price'), 2)} {q.get('currency', '')}")
@@ -4613,7 +4615,7 @@ def analyst_render(ticker_input):
 
     with st.expander("🧠 2. Co se ve firmě právě mění", expanded=True):
         completion_status = ai_result.get("completion_status", "unknown") if isinstance(ai_result, dict) else "unknown"
-        st.caption("V6.29.1: Analytik vytváří pracovní hypotézu, nikoli hotový externí výzkum. Pokud AI nedodá úplnou syntézu, fallback musí respektovat obchodní model; titulky jsou signály, nikoli potvrzená fakta.")
+        st.caption("V6.29.2: Analytik vytváří pracovní hypotézu, nikoli hotový externí výzkum. Pokud AI nedodá úplnou syntézu, fallback musí respektovat obchodní model; titulky jsou signály, nikoli potvrzená fakta.")
         if isinstance(ai_result, dict) and not ai_result.get("ok"):
             st.warning("AI syntéza není dostupná. Finanční přehled níže přesto zůstává k dispozici, protože se počítá přímo z načtených ročních dat.")
         elif completion_status == "ai_recovery":
@@ -4749,7 +4751,7 @@ def analyst_render(ticker_input):
         st.write(f"Evidence položek: {ai_result.get('evidence_count', '—')}")
         st.write(f"AI model: {ai_result.get('model', '—')}")
         st.write(f"Kontrola kódu fallbacku: {ANALYST_FALLBACK_REVISION}")
-        st.write("Pravidlo V6.29.1 / DF52-C: Analytik má formulovat pracovní tezi, ekonomický mechanismus, nejsilnější protitezi a konkrétní neznámé. Ukazatele se volí podle obchodního modelu; u bank nejsou běžné FCF a provozní marže hlavním rámcem. ChatGPT má tezi nezávisle ověřit z primárních zdrojů a aktuálního výzkumu. Aplikace pracuje převážně s RSS titulky/popisky, nikoli automaticky s plným textem každého článku.")
+        st.write("Pravidlo V6.29.2 / DF52-C: Analytik má formulovat pracovní tezi, ekonomický mechanismus, nejsilnější protitezi a konkrétní neznámé. Ukazatele se volí podle obchodního modelu; u bank nejsou běžné FCF a provozní marže hlavním rámcem. ChatGPT má tezi nezávisle ověřit z primárních zdrojů a aktuálního výzkumu. Aplikace pracuje převážně s RSS titulky/popisky, nikoli automaticky s plným textem každého článku.")
         st.write(f"Stav dokončení AI: { {'primary_ai': 'původní odpověď formálně úplná', 'ai_recovery': 'použita záchranná AI odpověď', 'deterministic_fallback': 'použit datový fallback'}.get(ai_result.get('completion_status'), 'stav není k dispozici') }")
         diag = ai_result.get("completion_diagnostics") or {}
         if diag:
