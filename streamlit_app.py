@@ -54,7 +54,7 @@ def update_runtime(status=None, stage=None, message=None, error=None, run_id=Non
 
 
 st.title("📊 Stock-Screener")
-st.caption("V6.29.2 · BUILD 20261019-A – Screener · nezávislý Analytik připravuje pracovní hypotézy pro další ověření")
+st.caption("V6.29.3 · BUILD 20261019-B – Screener · nezávislý Analytik připravuje pracovní hypotézy pro další ověření")
 
 NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 NYSE_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
@@ -2926,16 +2926,17 @@ def analyst_build_chatgpt_handoff(company, ticker, yahoo_ticker, exchange, q, an
     """Build a portable research brief and ready-to-paste instructions for a new ChatGPT company-analysis chat."""
     now = datetime.now().strftime("%d.%m.%Y %H:%M")
     lines = [
-        "ZADÁNÍ PRO CHATGPT ANALYTIK — Stock-Screener V6.29.2",
+        "ZADÁNÍ PRO CHATGPT ANALYTIK — Stock-Screener V6.29.3",
         f"Datum vytvoření balíčku: {now}",
         "",
         "ROLE A ÚKOL",
-        "Jsi nezávislý analytik veřejně obchodovaných společností. Využij dostupné nástroje ChatGPT a aktuální webový výzkum: oficiální IR, poslední výsledky a prezentace, regulatorní podání, přepisy výsledkových hovorů, relevantní nezávislé zdroje, konkurenty a valuaci. Neomezuj se na tento balíček; ověř jeho klíčová tvrzení a doplň chybějící kontext. U každého externího tvrzení uveď zdroj a datum. Pokud zdroj není dostupný, přiznej to.",
-        "DŮLEŽITÉ: Výstup Screeneru, jeho pracovní příběh, obchodní profil i výběr zpráv jsou pouze podněty, nikoli výchozí závěr. Nezakotvi se na jejich interpretaci a nesnaž se ji za každou cenu potvrdit. Nejprve si vytvoř vlastní názor z ověřených zdrojů; pak teprve porovnej vlastní závěr se Screenerem a výslovně popiš podstatné rozpory.",
-        "Před interpretací ověř přesný ticker a třídu akcie, burzu, měnu, cenu, tržní kapitalizaci, fiskální kalendář a konsolidovaný rozsah dat. Zkontroluj, zda finanční řady patří ke srovnatelným obdobím a zda definice ukazatelů odpovídají obchodnímu modelu. Pokud vstupní data odporují primárním zdrojům, ukaž rozpor a použij důvěryhodnější údaj; nic tiše neopravuj.",
-        "Vytvoř plastický, kritický investiční příběh: co se ve firmě skutečně mění, proč je to ekonomicky důležité, co může být strukturální/cyklické/dočasné, jak se to přenáší do marží, zisku, hotovosti, kapitálové náročnosti a hodnoty akcie. Ověř nejen tezi, ale i nejsilnější protitezi. Žádné Buy/Hold/Sell ani cílová cena.",
-        "Rozlišuj: (1) doložený fakt, (2) interpretaci, (3) hypotézu, (4) neznámou věc. Firemní tvrzení nepovažuj automaticky za nezávisle potvrzený fakt. Plány odděluj od výsledků. Nezaměňuj korelaci za příčinu, účetní zisk za hotovost ani levný násobek za prokázané podhodnocení. Srovnávej stejné fiskální období a zohledni fiskální rok společnosti. U každého klíčového závěru uveď, co by ho potvrdilo nebo vyvrátilo.",
-        "Na konci formuluj: dominantní investiční příběh; nejvýznamnější změny; důkazy pro a proti; co je už v ceně; scénáře a klíčové předpoklady (bez falešné přesnosti); zásadní neznámé; 3–5 konkrétních monitorovacích ukazatelů/událostí; závěr o kvalitě důkazů. Pokud jsou zdroje v tomto balíčku jen RSS titulky/popisky, nepovažuj je za přečtené články ani nezávislá potvrzení.",
+        "Jsi nezávislý analytik veřejně obchodovaných společností. Proveď vlastní, aktuální výzkum pomocí dostupných nástrojů ChatGPT: začni oficiálním IR, posledními výsledky a prezentacemi, regulatorními podáními a přepisy výsledkových hovorů; doplň relevantní nezávislé zdroje, konkurenty a ocenění. Neomezuj se na tento balíček: ověř důležitá tvrzení a dohledávej chybějící kontext. U externích tvrzení uváděj zdroj a datum; pokud zdroj nebo údaj nelze ověřit, výslovně to přiznej.",
+        "ZÁSADNÍ PRAVIDLO NEZÁVISLOSTI: Stock-Screener je pouze poskytovatel prvotního impulsu, identifikace společnosti, orientačních dat a případných indicií. Není partnerem do diskuse ani autoritou, vůči níž máš svou analýzu vymezovat. Nevytvářej analýzu jako reakci na Screener, neorganizuj ji podle jeho tvrzení a nevěnuj samostatnou kapitolu porovnávání, opravování či polemice s jeho výstupem. Neuváděj formulace typu ‚Screener tvrdí‘, ‚oprava vůči Screeneru‘ nebo ‚na rozdíl od Screeneru‘. Balíček používej jen jako startovní bod; jeho teze, skóre, výběr zpráv a čísla nemají žádnou zvláštní autoritu.",
+        "POVINNÉ POŘADÍ ANALÝZY: (1) začni vlastní investiční tezí a hlavní otázkou, na které závisí úspěch investice; (2) představ vlastní výzkum a důkazy, které tezi podporují nebo vyvracejí; (3) rozeber obchodní model, ekonomiku firmy, kvalitu růstu, marže, hotovost, kapitálovou náročnost a rozvahu; (4) analyzuj konkurenci, zásadní události a rizika; (5) posuď ocenění, co může být započteno v ceně a jak se liší scénáře; (6) uzavři investičním úsudkem, hlavními nejistotami a konkrétními ukazateli k dalšímu sledování. Zachovej tuto strukturu bez ohledu na to, jaké závěry nebo skóre obsahuje vstupní balíček.",
+        "Před interpretací ověř přesný ticker a třídu akcie, burzu, měnu a aktuálnost ceny, tržní kapitalizaci, fiskální kalendář a konsolidovaný rozsah dat. Zkontroluj, zda finanční řady patří ke srovnatelným obdobím a zda definice ukazatelů odpovídají obchodnímu modelu. Pokud se zdroje liší, vyřeš rozdíl podle primárních podkladů a vysvětli jej pouze tehdy, je-li pro ekonomiku firmy, ocenění nebo investiční rozhodnutí významný. Správnou ověřenou hodnotu a definici uveď bez odkazování na to, že se liší od Screeneru; nic tiše neopravuj.",
+        "Vytvoř plastický, kritický investiční příběh: co se ve firmě skutečně mění, proč je to ekonomicky důležité, co může být strukturální, cyklické či dočasné a jak se to přenáší do zisku, hotovosti, kapitálové náročnosti a hodnoty akcie. Ověř nejen hlavní tezi, ale i nejsilnější protitezi. Posuď atraktivitu akcie při ověřené aktuální ceně, nikoli jen kvalitu podniku. Nepředstírej přesnost, kterou zdroje nepodporují. Žádné Buy/Hold/Sell ani konkrétní cílová cena.",
+        "DŮKAZNÍ DISCIPLÍNA: Rozlišuj (1) doložený fakt, (2) interpretaci, (3) hypotézu a (4) neznámou věc. Firemní tvrzení nepovažuj automaticky za nezávisle potvrzený fakt. Plány odděluj od výsledků. Nezaměňuj korelaci za příčinu, účetní zisk za hotovost ani nízký násobek za prokázané podhodnocení. Srovnávej stejné fiskální období a respektuj fiskální rok společnosti. U každého klíčového závěru uveď, jaké důkazy jej podporují, co by jej vyvrátilo a jaká nejistota zůstává.",
+        "ZÁVĚREČNÝ OBSAH: shrň dominantní investiční příběh; hlavní důkazy pro a proti; kvalitu a udržitelnost ekonomických výsledků; ocenění a předpoklady obsažené v ceně; optimistický, základní a pesimistický scénář; zásadní neznámé; 3–5 konkrétních monitorovacích ukazatelů či událostí; a konečný úsudek o atraktivitě akcie při aktuální ceně. Pokud balíček obsahuje jen RSS titulky/popisky, nepovažuj je za přečtené články ani nezávislá potvrzení. Nepřidávej kapitolu o shodách či rozporech se Screenerem.",
         "",
         "UNIVERZÁLNÍ KONTROLA VÝZNAMNÝCH FIREMNÍCH UDÁLOSTÍ",
         "Aktivně vyhledej a ověř významné události, které mohou změnit investiční příběh, i když je Screener nezachytil nebo nejsou mezi dodanými titulky. Neomezuj se na události předem označené aplikací. Prověř podle relevance zejména: oddělení/spin-off a distribuci akcií, prodej či nákup divize nebo aktiv, fúze a akvizice, strategickou revizi portfolia, restrukturalizaci a úsporné programy, změny vedení a kapitálové alokace, regulatorní či soudní rozhodnutí, zásadní produktové/technologické změny, financování a refinancování, změny výhledu a konkrétní blížící se milníky.",
@@ -3037,10 +3038,10 @@ def analyst_build_chatgpt_handoff(company, ticker, yahoo_ticker, exchange, q, an
         if item.get("url"): line += f" | URL: {item['url']}"
         if item.get("extra"): line += f" | Poznámka: {item['extra']}"
         lines.append(line)
-    lines.extend(["", "POKYNY K PRÁCI S TÍMTO BALÍČKEM", 
-                  "Balíček je výchozí orientace, ne hotový výzkum. Nejprve ověř identitu emitenta, konkrétní třídu akcie, cenu, nejnovější výsledky a fiskální kalendář. Vyhledej primární zdroje a nezávislé protidůkazy; otevři relevantní odkazy a rozliš datum publikace od období, kterého se výsledek týká. Nepředpokládej, že všechny titulky jsou nezávislé nebo že jejich počet měří sentiment trhu.",
-                  "Nepřebírej automaticky žádné číslo ani závěr z aplikace: u klíčových údajů ověř původní zdroj, jednotku, období a definici; samostatně přepočítej důležité marže, změny a oceňovací násobky. Zvlášť pečlivě zacházej s procentní změnou hodnot, které přecházejí přes nulu, a s dluhem finančních divizí. Pokud nemůžeš údaj ověřit, označ jej jako neověřený místo toho, abys jej tiše přijal či nahradil.",
-                  "Nejdřív napiš vlastní tezi bez opírání se o závěr Screeneru; až potom přidej stručné srovnání se Screenerem: shody, rozpory, nově nalezené důkazy a případné chyby vstupních dat. V odpovědi cituj aktuální zdroje a uveď, co se nepodařilo ověřit."])
+    lines.extend(["", "POKYNY K PRÁCI S TÍMTO BALÍČKEM",
+                  "Balíček je pouze orientační vstup, nikoli hotový výzkum ani osnova výsledné analýzy. Nejprve ověř identitu emitenta, konkrétní třídu akcie, aktuálnost ceny, nejnovější výsledky a fiskální kalendář. Vyhledej primární zdroje a nezávislé protidůkazy; otevři relevantní odkazy a rozliš datum publikace od období, kterého se výsledek týká. Nepředpokládej, že všechny titulky jsou nezávislé nebo že jejich počet měří sentiment trhu.",
+                  "Nepřebírej automaticky žádné číslo ani závěr z balíčku: u klíčových údajů ověř původní zdroj, jednotku, období a definici; samostatně přepočítej důležité marže, změny a oceňovací násobky. Zvlášť pečlivě zacházej s procentní změnou hodnot, které přecházejí přes nulu, a s dluhem finančních divizí. Pokud nemůžeš údaj ověřit, označ jej jako neověřený místo toho, abys jej tiše přijal či nahradil.",
+                  "Výsledný text musí stát na vlastním výzkumu a dodržet pořadí analýzy stanovené výše. Nezmiňuj, že některý údaj či závěr pochází ze Screeneru, a nesrovnávej s ním své závěry. Rozdíly mezi externími zdroji vysvětli pouze tehdy, pokud jsou věcně významné. Cituj aktuální zdroje, uveď datum a výslovně přiznej, co se nepodařilo ověřit."])
     return "\n".join(lines)
 
 
@@ -4593,7 +4594,7 @@ def analyst_render(ticker_input):
         status.warning("5/5 Data načtena; AI syntéza není dostupná. Výstup je omezen na dostupná data a fallback.")
 
     st.markdown(f"## {company}")
-    st.caption(f"Ticker **{ticker}** · Yahoo **{yahoo_ticker}** · {exchange} · načteno {datetime.now().strftime('%d.%m.%Y %H:%M')} · build **V6.29.2 / 20261019-A**")
+    st.caption(f"Ticker **{ticker}** · Yahoo **{yahoo_ticker}** · {exchange} · načteno {datetime.now().strftime('%d.%m.%Y %H:%M')} · build **V6.29.3 / 20261019-B**")
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Cena", f"{analyst_human_number(q.get('price'), 2)} {q.get('currency', '')}")
@@ -4615,7 +4616,7 @@ def analyst_render(ticker_input):
 
     with st.expander("🧠 2. Co se ve firmě právě mění", expanded=True):
         completion_status = ai_result.get("completion_status", "unknown") if isinstance(ai_result, dict) else "unknown"
-        st.caption("V6.29.2: Analytik vytváří pracovní hypotézu, nikoli hotový externí výzkum. Pokud AI nedodá úplnou syntézu, fallback musí respektovat obchodní model; titulky jsou signály, nikoli potvrzená fakta.")
+        st.caption("V6.29.3: Analytik vytváří pracovní hypotézu, nikoli hotový externí výzkum. Pokud AI nedodá úplnou syntézu, fallback musí respektovat obchodní model; titulky jsou signály, nikoli potvrzená fakta.")
         if isinstance(ai_result, dict) and not ai_result.get("ok"):
             st.warning("AI syntéza není dostupná. Finanční přehled níže přesto zůstává k dispozici, protože se počítá přímo z načtených ročních dat.")
         elif completion_status == "ai_recovery":
@@ -4751,7 +4752,7 @@ def analyst_render(ticker_input):
         st.write(f"Evidence položek: {ai_result.get('evidence_count', '—')}")
         st.write(f"AI model: {ai_result.get('model', '—')}")
         st.write(f"Kontrola kódu fallbacku: {ANALYST_FALLBACK_REVISION}")
-        st.write("Pravidlo V6.29.2 / DF52-C: Analytik má formulovat pracovní tezi, ekonomický mechanismus, nejsilnější protitezi a konkrétní neznámé. Ukazatele se volí podle obchodního modelu; u bank nejsou běžné FCF a provozní marže hlavním rámcem. ChatGPT má tezi nezávisle ověřit z primárních zdrojů a aktuálního výzkumu. Aplikace pracuje převážně s RSS titulky/popisky, nikoli automaticky s plným textem každého článku.")
+        st.write("Pravidlo V6.29.3 / DF52-C: Analytik má formulovat pracovní tezi, ekonomický mechanismus, nejsilnější protitezi a konkrétní neznámé. Ukazatele se volí podle obchodního modelu; u bank nejsou běžné FCF a provozní marže hlavním rámcem. ChatGPT má tezi nezávisle ověřit z primárních zdrojů a aktuálního výzkumu. Aplikace pracuje převážně s RSS titulky/popisky, nikoli automaticky s plným textem každého článku.")
         st.write(f"Stav dokončení AI: { {'primary_ai': 'původní odpověď formálně úplná', 'ai_recovery': 'použita záchranná AI odpověď', 'deterministic_fallback': 'použit datový fallback'}.get(ai_result.get('completion_status'), 'stav není k dispozici') }")
         diag = ai_result.get("completion_diagnostics") or {}
         if diag:
