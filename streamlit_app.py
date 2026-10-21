@@ -54,7 +54,7 @@ def update_runtime(status=None, stage=None, message=None, error=None, run_id=Non
 
 
 st.title("📊 Stock-Screener")
-st.caption("V6.29.10-DIAG · BUILD 20261021-A – Diagnostika dat · screeningová logika beze změny")
+st.caption("V6.29.11-DIAG · BUILD 20261021-B – Diagnostika dat · screeningová logika beze změny")
 
 NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 NYSE_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
@@ -411,7 +411,7 @@ def yahoo_annual_growth_data(yahoo_ticker):
         return empty
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def fetch_fundamentals(ticker, exchange, name="", isin=""):
+def fetch_fundamentals(ticker, exchange, name="", isin="", diagnostic=False):
     """Load current fundamentals plus a small annual history used by the story engine."""
     time.sleep(0.20)
     requested_ticker = ticker
@@ -426,11 +426,15 @@ def fetch_fundamentals(ticker, exchange, name="", isin=""):
 
         t = yf.Ticker(yahoo_ticker)
         info = {}
+        info_error = ""
         try: info = t.info or {}
-        except Exception: pass
+        except Exception as exc:
+            info_error = f"{type(exc).__name__}: {exc}"
         fast = {}
+        fast_error = ""
         try: fast = dict(t.fast_info)
-        except Exception: pass
+        except Exception as exc:
+            fast_error = f"{type(exc).__name__}: {exc}"
 
         income = pd.DataFrame(); ttm_income = pd.DataFrame(); balance = pd.DataFrame(); cashflow = pd.DataFrame()
         try:
@@ -556,15 +560,32 @@ def fetch_fundamentals(ticker, exchange, name="", isin=""):
         if resolution != "direct": source_parts.append(f"mapping:{resolution}")
 
         sector = clean_text(info.get("sector")); industry = clean_text(info.get("industry")); quote_type = clean_text(info.get("quoteType"))
-        return {"Ticker": requested_ticker, "Yahoo Ticker": yahoo_ticker, "Name": name, "Exchange": exchange,
-                **values, "Sector": sector, "Industry": industry, "Quote Type": quote_type,
-                "Status": status, "Data Source": " + ".join(source_parts), "Mapping": resolution, "Error": ""}
+        result = {"Ticker": requested_ticker, "Yahoo Ticker": yahoo_ticker, "Name": name, "Exchange": exchange,
+                  **values, "Sector": sector, "Industry": industry, "Quote Type": quote_type,
+                  "Status": status, "Data Source": " + ".join(source_parts), "Mapping": resolution, "Error": ""}
+        if diagnostic:
+            result.update({
+                "Diag info": "ERROR" if info_error else ("OK" if info else "EMPTY"),
+                "Diag fast_info": "ERROR" if fast_error else ("OK" if fast else "EMPTY"),
+                "Diag info error": info_error,
+                "Diag fast_info error": fast_error,
+                "Diag info keys": ", ".join(sorted(info.keys())) if info else "",
+                "Diag fast_info keys": ", ".join(sorted(str(k) for k in fast.keys())) if fast else "",
+                "Diag price": price, "Diag shares": shares,
+            })
+        return result
     except Exception as e:
-        return {"Ticker": requested_ticker, "Yahoo Ticker": yahoo_ticker, "Name": name, "Exchange": exchange,
-                **{p: np.nan for p in PARAMS}, "Revenue CAGR 3Y": np.nan, "Net Income CAGR 3Y": np.nan,
-                "Net Margin": np.nan, "Margin Change 3Y": np.nan, "Revenue Prior YoY": np.nan,
-                "Net Income Prior YoY": np.nan, "Net Income Sign Recovery": False, "Revenue Trend": "", "Net Income Trend": "",
-                "Sector": "", "Industry": "", "Quote Type": "", "Status": "ERROR", "Data Source": "Yahoo", "Mapping": resolution, "Error": str(e)[:300]}
+        result = {"Ticker": requested_ticker, "Yahoo Ticker": yahoo_ticker, "Name": name, "Exchange": exchange,
+                  **{p: np.nan for p in PARAMS}, "Revenue CAGR 3Y": np.nan, "Net Income CAGR 3Y": np.nan,
+                  "Net Margin": np.nan, "Margin Change 3Y": np.nan, "Revenue Prior YoY": np.nan,
+                  "Net Income Prior YoY": np.nan, "Net Income Sign Recovery": False, "Revenue Trend": "", "Net Income Trend": "",
+                  "Sector": "", "Industry": "", "Quote Type": "", "Status": "ERROR", "Data Source": "Yahoo", "Mapping": resolution, "Error": str(e)[:300]}
+        if diagnostic:
+            result.update({"Diag info": "ERROR/UNKNOWN", "Diag fast_info": "ERROR/UNKNOWN",
+                           "Diag info error": info_error if 'info_error' in locals() else "",
+                           "Diag fast_info error": fast_error if 'fast_error' in locals() else "",
+                           "Diag info keys": "", "Diag fast_info keys": "", "Diag price": np.nan, "Diag shares": np.nan})
+        return result
 
 
 
@@ -4914,7 +4935,7 @@ if universe_choice != "Všechny burzy":
 st.markdown("### 🌍 Univerzum")
 st.caption("NASDAQ/NYSE jsou získávány z Nasdaq Trader; XETRA z oficiálního seznamu Deutsche Börse. XETRA je omezeno na Instrument Type = CS (Common Stock / Equity).")
 
-# V6.29.10-DIAG: samostatný malý test Yahoo datové vrstvy. Nemění screening ani skórování.
+# V6.29.11-DIAG: samostatné testy Yahoo datové vrstvy. Nemění screening ani skórování.
 diag_run = st.button("🧪 Otestovat načítání fundamentů (max. 12 titulů)", help="Provede čerstvý test malého vzorku z vybraných burz. Nespouští screening a nemění jeho pravidla.")
 if diag_run:
     st.cache_data.clear()
@@ -5037,6 +5058,62 @@ if diag_run:
         st.caption("Důležité: chybějící pole v Yahoo neznamená automaticky chybu aplikace. Diagnostika odděluje prázdná pole od zachycených výjimek; výsledky ukážou, kde je potřeba další kontrola.")
     else:
         st.warning("Ze zvoleného univerza se nepodařilo sestavit diagnostický vzorek.")
+    st.stop()
+
+# V6.29.11-DIAG: reproduce the real screening candidate selection, then inspect a small
+# sequential sample through the exact fetch_fundamentals path used by screening.
+diag_candidates_run = st.button(
+    "🧪 Otestovat skutečný výběr screeningu (20 titulů)",
+    help="Zopakuj předvýběr a výběr kandidátů podle aktuálního nastavení, potom načti prvních 20 titulů stejnou funkcí jako screening. Nemění skórování ani pravidla."
+)
+if diag_candidates_run:
+    st.markdown("## 🧪 Diagnostika skutečného výběru")
+    st.caption("Používá aktuální univerzum a nastavené limity předvýběru/fundamentální fáze. Testuje prvních 20 skutečně vybraných kandidátů stejnou funkcí jako screening a zvlášť ukazuje chyby info/fast_info.")
+    saved_tickers_diag = st.session_state.get("screening_fundamental_tickers", [])
+    stage1_diag = None
+    if saved_tickers_diag:
+        # Prefer the exact candidate list from the user's previous screening run;
+        # this avoids re-downloading prices for the entire universe.
+        by_ticker_diag = {str(r.get("Ticker", "")): r for _, r in universe.iterrows()}
+        ordered_rows_diag = [by_ticker_diag[t] for t in map(str, saved_tickers_diag) if t in by_ticker_diag]
+        candidates_diag = pd.DataFrame(ordered_rows_diag)
+        candidate_source_diag = "uložený výběr z předchozího screeningu"
+    else:
+        # If this is a fresh session with no saved candidate list, reproduce the
+        # current selection rules. The price prefilter may need to query the universe.
+        effective_stage1_diag = min(int(max_stage1), int(len(universe)))
+        with st.spinner("V relaci není uložen výběr; sestavuji aktuální kandidáty podle stejných pravidel…"):
+            stage1_diag = prefilter_by_market_data(universe, effective_stage1_diag)
+            candidates_diag = build_stage1_candidates(stage1_diag, max_candidates)
+        candidate_source_diag = "nově sestavený výběr podle aktuálních nastavení"
+    sample_diag = candidates_diag.head(20).copy()
+    stage1_count_diag = len(stage1_diag) if stage1_diag is not None else "uloženo"
+    st.write(f"Zdroj kandidátů: **{candidate_source_diag}** · univerzum: **{len(universe):,}** · předvýběr: **{stage1_count_diag}** · kandidáti: **{len(candidates_diag):,}** · testovaný vzorek: **{len(sample_diag)}**")
+    # Clear only this function's cache so the diagnostic reflects fresh Yahoo requests.
+    fetch_fundamentals.clear()
+    diag_results = []
+    diag_progress = st.progress(0.0, text="Připravuji test…")
+    for i, (_, r) in enumerate(sample_diag.iterrows()):
+        diag_results.append(fetch_fundamentals(
+            r["Ticker"], r["Exchange"], r.get("Name", ""), r.get("ISIN", ""), diagnostic=True
+        ))
+        diag_progress.progress((i + 1) / max(1, len(sample_diag)), text=f"Test skutečného výběru {i+1}/{len(sample_diag)} · {r['Exchange']}:{r['Ticker']}")
+    if diag_results:
+        dd = pd.DataFrame(diag_results)
+        show_cols = ["Exchange", "Ticker", "Yahoo Ticker", "Status", "Available Params", "Market Cap", "P/E", "Forward P/E", "P/S", "ROE", "Revenue Growth", "Earnings Growth", "Free Cash Flow", "Debt/Equity", "Diag info", "Diag fast_info", "Diag info error", "Diag fast_info error", "Error"]
+        show_cols = [c for c in show_cols if c in dd.columns]
+        st.markdown("### Výsledky stejné funkce jako ve screeningu")
+        st.dataframe(dd[show_cols], use_container_width=True, hide_index=True)
+        st.markdown("### Souhrn")
+        st.dataframe(pd.DataFrame([{
+            "Testováno": len(dd), "info OK": int((dd.get("Diag info", pd.Series(dtype=str)) == "OK").sum()),
+            "fast_info OK": int((dd.get("Diag fast_info", pd.Series(dtype=str)) == "OK").sum()),
+            "Market Cap dostupný": int(dd["Market Cap"].notna().sum()), "P/E dostupné": int(dd["P/E"].notna().sum()),
+            "Forward P/E dostupné": int(dd["Forward P/E"].notna().sum()), "P/S dostupné": int(dd["P/S"].notna().sum()),
+            "Chyba celé funkce": int((dd["Status"] == "ERROR").sum()),
+        }]), use_container_width=True, hide_index=True)
+        with st.expander("Diagnostická pole Yahoo (pro přesné určení příčiny)", expanded=True):
+            st.dataframe(dd[[c for c in ["Exchange", "Ticker", "Yahoo Ticker", "Diag info keys", "Diag fast_info keys", "Diag price", "Diag shares", "Diag info error", "Diag fast_info error", "Error"] if c in dd.columns]], use_container_width=True, hide_index=True)
     st.stop()
 
 if not run and "screening_results" not in st.session_state:
