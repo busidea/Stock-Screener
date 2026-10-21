@@ -54,7 +54,7 @@ def update_runtime(status=None, stage=None, message=None, error=None, run_id=Non
 
 
 st.title("📊 Stock-Screener")
-st.caption("V6.29.11-DIAG · BUILD 20261021-B – Diagnostika dat · screeningová logika beze změny")
+st.caption("V6.29.12-DIAG · BUILD 20261021-C – Oprava aliasů Yahoo fast_info · diagnostika")
 
 NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 NYSE_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
@@ -493,10 +493,36 @@ def fetch_fundamentals(ticker, exchange, name="", isin="", diagnostic=False):
             ni_current = api_ni_cur if not pd.isna(api_ni_cur) else ni_current
             ni_old = api_ni_prev if not pd.isna(api_ni_prev) else ni_old
 
-        price = first_valid(info.get("currentPrice"), fast.get("last_price"), info.get("regularMarketPrice"))
-        shares = first_valid(info.get("sharesOutstanding"), info.get("impliedSharesOutstanding"))
-        market_cap = first_valid(info.get("marketCap"), fast.get("market_cap"), price * shares if not pd.isna(price) and not pd.isna(shares) else np.nan)
-        pe = first_valid(info.get("trailingPE")); fpe = first_valid(info.get("forwardPE")); ps = first_valid(info.get("priceToSalesTrailing12Months"))
+        # Yahoo/yfinance fast_info has appeared with both snake_case and camelCase
+        # keys. Do not treat a non-empty but partial info dict as proof that quote
+        # fields are present; explicitly check both documented key spellings.
+        def map_first(mapping, *keys):
+            if not isinstance(mapping, dict):
+                try: mapping = dict(mapping)
+                except Exception: return np.nan
+            for key in keys:
+                if key in mapping:
+                    value = first_valid(mapping.get(key))
+                    if not pd.isna(value):
+                        return value
+            return np.nan
+
+        price = first_valid(
+            info.get("currentPrice"), info.get("regularMarketPrice"),
+            map_first(fast, "last_price", "lastPrice", "regularMarketPrice", "regular_market_price")
+        )
+        shares = first_valid(
+            info.get("sharesOutstanding"), info.get("impliedSharesOutstanding"),
+            map_first(fast, "shares", "sharesOutstanding", "shares_outstanding")
+        )
+        market_cap = first_valid(
+            info.get("marketCap"), info.get("market_cap"),
+            map_first(fast, "market_cap", "marketCap"),
+            price * shares if not pd.isna(price) and not pd.isna(shares) else np.nan
+        )
+        pe = first_valid(info.get("trailingPE"), info.get("trailing_pe"))
+        fpe = first_valid(info.get("forwardPE"), info.get("forward_pe"))
+        ps = first_valid(info.get("priceToSalesTrailing12Months"), info.get("price_to_sales_trailing_12_months"))
         revenue = rev_current; previous_revenue = rev_hist[1] if len(rev_hist) >= 2 else np.nan
         net_income = ni_current; previous_net_income = ni_hist[1] if len(ni_hist) >= 2 else np.nan
         equity = safe_float(equity_s.iloc[0]) if not equity_s.empty else np.nan
