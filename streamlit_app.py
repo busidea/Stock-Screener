@@ -54,7 +54,7 @@ def update_runtime(status=None, stage=None, message=None, error=None, run_id=Non
 
 
 st.title("📊 Stock-Screener")
-st.caption("V6.29.12-DIAG · BUILD 20261021-C – Oprava aliasů Yahoo fast_info · diagnostika")
+st.caption("V6.29.14 · BUILD 20261021-D – Oddělení hlavního příběhu a příbuzných příležitostí")
 
 NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 NYSE_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
@@ -1058,11 +1058,18 @@ def story_fit(r, selected_story):
         base += 15 if (not pd.isna(price) and price >= 50) else 0
         return float(min(100, base))
 
+    # Value search is deliberately valuation-led. A high quality/growth score
+    # must not drown out the valuation signal, as happened with the old simple mean.
+    if selected_story == "💰 Value / levná firma":
+        components = [(v, 0.70), (q, 0.20), (g, 0.10)]
+        available = [(score, weight) for score, weight in components if not pd.isna(score)]
+        denom = sum(weight for _, weight in available)
+        return round(sum(score * weight for score, weight in available) / denom, 1) if denom else np.nan
+
     mapping = {
         "🏆 Quality Compounder": (q, g, v),
         "💎 Kvalita za rozumnou cenu": (q, v, g),
         "🚀 Růst za rozumnou cenu": (g, q, v),
-        "💰 Value / levná firma": (v, q, g),
         "🔄 Recovery candidate": (ts, q, v),
         "🌐 Cyclical / commodity recovery": (g, q, v),
         "🏗️ Asset / financial recovery": (q, v, ts),
@@ -4939,7 +4946,7 @@ story_options = [
 ]
 selected_stories = st.sidebar.multiselect("Příběhy", story_options, default=story_options[:9], help="Neatraktivní příběhy nemusíš hledat; Value Trap zde slouží jako výjimka – upozornění na levnou firmu se slabými základy.")
 min_data = st.sidebar.slider("Min. počet dostupných parametrů", 3, len(PARAMS), 7, 1)
-min_story_fit = st.sidebar.slider("Min. shoda s příběhem", 0, 100, 60, 5, help="Určuje, jak dobře musí titul odpovídat hledanému příběhu, aby se dostal mezi kandidáty. Nejde o investiční doporučení.")
+min_story_fit = st.sidebar.slider("Min. shoda s příběhem", 0, 100, 60, 5, help="Určuje minimální shodu pro zařazení do hlavních kandidátů nebo mezi příbuzné příležitosti. Hlavní seznam navíc vyžaduje shodu automaticky určeného příběhu. U Value má Value Score váhu 70 %. Nejde o investiční doporučení.")
 
 with st.sidebar.expander("⚙️ Klasické filtry (volitelné)"):
     use_classic = st.checkbox("Použít klasické filtry", value=False)
@@ -5311,14 +5318,21 @@ def passes_classic(r):
     return all(checks)
 
 results_df["Pass"] = results_df.apply(passes_classic, axis=1) if use_classic else True
-# V6.6: kandidáta neurčuje název automaticky přiřazeného příběhu.
-# Rozhodující je Shoda s příběhem, protože cílem screeneru je vytipovat
-# i hraniční firmy, které algoritmus zařadil do jiného, příbuzného příběhu.
+# V6.29.14: keep fit-based discovery, but do not mix adjacent archetypes into
+# the main result list. Exact selected-story matches are primary; other eligible
+# names remain visible in a separate related-opportunities section.
 if selected_stories:
     results_df["Story Selected"] = results_df["Shoda s příběhem"].notna() & (results_df["Shoda s příběhem"] >= min_story_fit)
+    results_df["Primary Story Fit"] = results_df.apply(
+        lambda r: story_fit(r, r.get("Story")) if r.get("Story") in selected_stories else np.nan, axis=1
+    )
+    results_df["Primary Story Match"] = results_df["Story"].isin(selected_stories) & results_df["Primary Story Fit"].notna() & (results_df["Primary Story Fit"] >= min_story_fit)
 else:
     results_df["Story Selected"] = True
+    results_df["Primary Story Fit"] = np.nan
+    results_df["Primary Story Match"] = True
 results_df["Eligible"] = (results_df["Available Params"] >= min_data) & results_df["Pass"] & results_df["Story Selected"]
+results_df["Related Opportunity"] = results_df["Eligible"] & ~results_df["Primary Story Match"]
 update_runtime(status="running", stage="4/6", message=f"Charakter/recovery/příběh dokončen: {int(results_df["Eligible"].sum())}")
 stage_progress.progress(1.0, text=f"✅ 3/6 Charakter + recovery + příběh dokončen · {int(results_df["Eligible"].sum())} kandidátů")
 stage_status.write(f"✅ **3/6 dokončeno:** {int(results_df["Eligible"].sum())} kandidátů splňuje podmínky.")
@@ -5461,13 +5475,24 @@ d.metric("Vybraný příběh", int(results_df["Story Selected"].sum()))
 e.metric("Kandidáti", int(results_df["Eligible"].sum()))
 
 st.markdown("### 🧭 Mapa investičních příběhů")
-st.caption("Skóre není predikce výnosu ani doporučení. Shoda s příběhem říká, jak moc titul odpovídá hledanému příběhu; Investiční atraktivita pomáhá určit pořadí kandidátů. Kandidátem je titul s minimální nastavenou shodou, nikoli pouze titul, kterému algoritmus přidělil stejný název příběhu. Priorita = 60 % shoda + 40 % atraktivita. Textová vrstva má vysvětlovat hlavně problém, aktuální změnu, mechanismus a rizika; do priority se nezapočítává.")
+st.caption("Skóre není predikce výnosu ani doporučení. Hlavní seznam obsahuje pouze tituly, jejichž automaticky určený příběh odpovídá zvolenému příběhu a které současně splní minimální shodu, datové a případné klasické filtry. Příbuzné příběhy se zobrazují odděleně jako doplňkové příležitosti. U Value / levná firma tvoří Value Score 70 % shody s příběhem, Quality 20 % a Growth 10 %; ostatní příběhy si ponechávají původní logiku skórování. Priorita zůstává 60 % shoda + 40 % obecná investiční atraktivita.")
 
-story_counts = results_df[results_df["Available Params"] >= min_data]["Story"].value_counts().rename_axis("Příběh").reset_index(name="Počet")
+story_base = results_df[results_df["Available Params"] >= min_data].copy()
+story_counts = story_base["Story"].value_counts().rename_axis("Automaticky určený příběh").reset_index(name="Počet s dostatkem dat")
+story_counts["Hlavní kandidáti"] = story_counts["Automaticky určený příběh"].map(results_df[results_df["Eligible"] & results_df["Primary Story Match"]]["Story"].value_counts()).fillna(0).astype(int)
+story_counts["Příbuzné příležitosti"] = story_counts["Automaticky určený příběh"].map(results_df[results_df["Related Opportunity"]]["Story"].value_counts()).fillna(0).astype(int)
 st.dataframe(story_counts, use_container_width=True, hide_index=True)
 
-st.markdown("### 🎯 Kandidáti")
-passed = results_df[results_df["Eligible"]].copy()
+related = results_df[results_df["Related Opportunity"]].copy()
+if not related.empty:
+    with st.expander(f"🧩 Příbuzné příběhy – doplňkové příležitosti ({len(related)})", expanded=False):
+        st.caption("Tyto firmy dosáhly minimální shody s hledaným profilem, ale jejich automaticky určený hlavní příběh je jiný. Nejsou smíchány s hlavním seznamem.")
+        related_view = related[["Ticker", "Name", "Story", "Company Archetype", "Shoda s příběhem", "Investiční atraktivita", "Value Score", "Quality Score", "Growth Score"]].copy()
+        related_view = related_view.rename(columns={"Name":"Firma", "Story":"Příbuzný příběh", "Company Archetype":"Charakter", "Shoda s příběhem":"Shoda", "Investiční atraktivita":"Atraktivita", "Value Score":"Value", "Quality Score":"Quality", "Growth Score":"Growth"})
+        st.dataframe(related_view, use_container_width=True, hide_index=True)
+
+st.markdown("### 🎯 Hlavní kandidáti zvoleného příběhu")
+passed = results_df[results_df["Eligible"] & results_df["Primary Story Match"]].copy()
 with st.expander("🧩 Diagnostika titulů se Story Fit ≥ minimum", expanded=False):
     sf = results_df[results_df["Story Selected"]].copy()
     if sf.empty:
@@ -5507,7 +5532,7 @@ with st.expander("🧩 Diagnostika titulů se Story Fit ≥ minimum", expanded=F
                 + (f" Potenciální shoda s vybraným příběhem je **{r['Potenciální shoda s příběhem']:.0f}/100**, ale kvůli nedostatku dat se jako skutečná shoda nepoužije." if not pd.isna(r.get('Potenciální shoda s příběhem')) and int(r['Available Params']) < min_data else "")
             )
 if passed.empty:
-    st.info("Pro zvolený příběh a nastavení dat nebyl nalezen žádný kandidát.")
+    st.info("V hlavním seznamu není žádný titul, jehož automaticky určený příběh odpovídá zvolenému příběhu a který splňuje nastavené limity. Příbuzné příležitosti mohou být dostupné v samostatné rozbalovací sekci výše.")
 else:
     # V5.1: hlavní tabulka je záměrně kompaktní. Ekonomické detaily jsou níže.
     compact = passed.copy()
