@@ -54,7 +54,7 @@ def update_runtime(status=None, stage=None, message=None, error=None, run_id=Non
 
 
 st.title("📊 Stock-Screener")
-st.caption("V6.29.9 · BUILD 20261020-C – Screener · nezávislý Analytik připravuje pracovní hypotézy pro další ověření")
+st.caption("V6.29.10-DIAG · BUILD 20261021-A – Diagnostika dat · screeningová logika beze změny")
 
 NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 NYSE_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
@@ -4913,6 +4913,131 @@ if universe_choice != "Všechny burzy":
 
 st.markdown("### 🌍 Univerzum")
 st.caption("NASDAQ/NYSE jsou získávány z Nasdaq Trader; XETRA z oficiálního seznamu Deutsche Börse. XETRA je omezeno na Instrument Type = CS (Common Stock / Equity).")
+
+# V6.29.10-DIAG: samostatný malý test Yahoo datové vrstvy. Nemění screening ani skórování.
+diag_run = st.button("🧪 Otestovat načítání fundamentů (max. 12 titulů)", help="Provede čerstvý test malého vzorku z vybraných burz. Nespouští screening a nemění jeho pravidla.")
+if diag_run:
+    st.cache_data.clear()
+    st.markdown("## 🧪 Diagnostika načítání fundamentů")
+    st.caption("Test používá nejvýše 4 tituly z každé vybrané burzy. Zaznamenává úspěch/chyby info, fast_info a finančních výkazů. Neprovádí screening ani nepočítá Story Fit.")
+
+    # Preferred controls are recognizable liquid equities; when absent, choose from the live official universe.
+    diag_targets = {
+        "NASDAQ": [("MSFT", "Microsoft"), ("AAPL", "Apple"), ("NVDA", "NVIDIA"), ("AMZN", "Amazon")],
+        "NYSE": [("JPM", "JPMorgan"), ("KO", "Coca-Cola"), ("CAT", "Caterpillar"), ("GTN", "Gray Media")],
+        "XETRA": [("SAP", "SAP"), ("SIE", "Siemens"), ("HEI", "Heidelberg Materials"), ("ALV", "Allianz")],
+    }
+    diag_sample = []
+    for ex in selected_exchanges:
+        part = universe[universe["Exchange"].astype(str).str.upper() == ex].copy()
+        used = set()
+        for wanted, name_hint in diag_targets.get(ex, []):
+            match = part[part["Ticker"].astype(str).str.upper().isin([wanted, wanted + ".DE"])]
+            if match.empty and "Name" in part.columns:
+                match = part[part["Name"].astype(str).str.contains(re.escape(name_hint), case=False, na=False)]
+            if not match.empty:
+                r = match.iloc[0]
+                key = str(r.get("Ticker", ""))
+                if key not in used:
+                    diag_sample.append(r.to_dict()); used.add(key)
+        # Ensure up to four examples per exchange even if preferred names are absent.
+        for _, r in part.iterrows():
+            if len([x for x in diag_sample if str(x.get("Exchange", "")).upper() == ex]) >= 4:
+                break
+            key = str(r.get("Ticker", ""))
+            if key not in used:
+                diag_sample.append(r.to_dict()); used.add(key)
+    diag_rows = []
+    diag_details = []
+    prog = st.progress(0.0, text="Připravuji diagnostiku…")
+    for i, r in enumerate(diag_sample):
+        requested = clean_text(r.get("Ticker"))
+        ex = clean_text(r.get("Exchange")).upper()
+        name = clean_text(r.get("Name"))
+        isin = clean_text(r.get("ISIN"))
+        yahoo_ticker, mapping = requested, "direct"
+        mapping_error = ""
+        if ex in ("NASDAQ", "NYSE"):
+            yahoo_ticker = normalize_us_ticker(requested)
+        elif ex == "XETRA":
+            try:
+                yahoo_ticker, mapping = resolve_xetra_symbol(requested, name, isin)
+            except Exception as exc:
+                mapping_error = f"{type(exc).__name__}: {exc}"
+        info, fast = {}, {}
+        info_error = fast_error = income_error = balance_error = cashflow_error = ""
+        income_ok = balance_ok = cashflow_ok = False
+        try:
+            yt = yf.Ticker(yahoo_ticker)
+        except Exception as exc:
+            yt = None
+            info_error = f"Ticker init: {type(exc).__name__}: {exc}"
+        if yt is not None:
+            try:
+                info = yt.info or {}
+            except Exception as exc:
+                info_error = f"{type(exc).__name__}: {exc}"
+            try:
+                fast = dict(yt.fast_info)
+            except Exception as exc:
+                fast_error = f"{type(exc).__name__}: {exc}"
+            try:
+                z = yt.income_stmt
+                income_ok = isinstance(z, pd.DataFrame) and not z.empty
+                if not income_ok: income_error = "Výkaz je prázdný"
+            except Exception as exc:
+                income_error = f"{type(exc).__name__}: {exc}"
+            try:
+                z = yt.balance_sheet
+                balance_ok = isinstance(z, pd.DataFrame) and not z.empty
+                if not balance_ok: balance_error = "Výkaz je prázdný"
+            except Exception as exc:
+                balance_error = f"{type(exc).__name__}: {exc}"
+            try:
+                z = yt.cashflow
+                cashflow_ok = isinstance(z, pd.DataFrame) and not z.empty
+                if not cashflow_ok: cashflow_error = "Výkaz je prázdný"
+            except Exception as exc:
+                cashflow_error = f"{type(exc).__name__}: {exc}"
+        price = first_valid(info.get("currentPrice"), fast.get("last_price"), info.get("regularMarketPrice"))
+        shares = first_valid(info.get("sharesOutstanding"), info.get("impliedSharesOutstanding"))
+        mcap = first_valid(info.get("marketCap"), fast.get("market_cap"), price * shares if not pd.isna(price) and not pd.isna(shares) else np.nan)
+        pe = first_valid(info.get("trailingPE"))
+        fpe = first_valid(info.get("forwardPE"))
+        ps = first_valid(info.get("priceToSalesTrailing12Months"))
+        missing_valuation = [label for label, val in (("Price", price), ("Market Cap", mcap), ("P/E", pe), ("Forward P/E", fpe), ("P/S", ps)) if pd.isna(val)]
+        diag_rows.append({
+            "Burza": ex, "Ticker": requested, "Yahoo symbol": yahoo_ticker, "Název": name,
+            "info": "OK" if info else "CHYBÍ", "fast_info": "OK" if fast else "CHYBÍ",
+            "Price": price, "Shares": shares, "Market Cap": mcap, "P/E": pe, "Forward P/E": fpe, "P/S": ps,
+            "Income stmt": "OK" if income_ok else "CHYBÍ", "Balance sheet": "OK" if balance_ok else "CHYBÍ", "Cashflow": "OK" if cashflow_ok else "CHYBÍ",
+            "Chybějící valuace": ", ".join(missing_valuation) if missing_valuation else "—", "Mapping": mapping,
+        })
+        diag_details.append({
+            "Ticker": f"{ex}:{requested} → {yahoo_ticker}",
+            "info keys": ", ".join(sorted(info.keys())) if info else "—",
+            "fast_info keys": ", ".join(sorted(str(k) for k in fast.keys())) if fast else "—",
+            "info chyba": info_error or "—", "fast_info chyba": fast_error or "—",
+            "income chyba": income_error or "—", "balance chyba": balance_error or "—", "cashflow chyba": cashflow_error or "—",
+            "mapping chyba": mapping_error or "—",
+        })
+        prog.progress((i + 1) / max(1, len(diag_sample)), text=f"Diagnostika {i+1}/{len(diag_sample)} · {ex}:{requested}")
+        time.sleep(0.15)
+    if diag_rows:
+        diag_df = pd.DataFrame(diag_rows)
+        st.markdown("### Souhrn po titulech")
+        st.dataframe(diag_df, use_container_width=True, hide_index=True)
+        st.markdown("### Souhrn podle burzy")
+        summary_rows = []
+        for ex, group in diag_df.groupby("Burza", dropna=False):
+            summary_rows.append({"Burza": ex, "Počet": len(group), "info OK": int((group["info"] == "OK").sum()), "fast_info OK": int((group["fast_info"] == "OK").sum()), "Market Cap dostupný": int(group["Market Cap"].notna().sum()), "P/E dostupné": int(group["P/E"].notna().sum()), "P/S dostupné": int(group["P/S"].notna().sum())})
+        st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
+        with st.expander("Podrobné chyby a dostupná pole", expanded=True):
+            st.dataframe(pd.DataFrame(diag_details), use_container_width=True, hide_index=True)
+        st.caption("Důležité: chybějící pole v Yahoo neznamená automaticky chybu aplikace. Diagnostika odděluje prázdná pole od zachycených výjimek; výsledky ukážou, kde je potřeba další kontrola.")
+    else:
+        st.warning("Ze zvoleného univerza se nepodařilo sestavit diagnostický vzorek.")
+    st.stop()
 
 if not run and "screening_results" not in st.session_state:
     runtime = get_runtime_state()
