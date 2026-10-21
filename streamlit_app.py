@@ -616,6 +616,25 @@ def fetch_fundamentals(ticker, exchange, name="", isin="", diagnostic=False):
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
+def _download_close_chunk_cached(tickers):
+    """Cache only the pure Yahoo price-data result, never Streamlit UI messages.
+
+    `tickers` is a tuple so it can be used as a stable cache key. Exceptions are
+    deliberately allowed to propagate: a transient Yahoo failure should not be
+    cached as a successful empty result.
+    """
+    chunk = list(tickers)
+    data = yf.download(
+        chunk, period="1y", interval="1d", auto_adjust=True,
+        progress=False, threads=False, group_by="column"
+    )
+    close = data["Close"] if isinstance(data, pd.DataFrame) and "Close" in data else pd.DataFrame()
+    if isinstance(close, pd.Series):
+        close = close.to_frame()
+        close.columns = [chunk[0]]
+    return close
+
+
 def prefilter_by_market_data(universe, target, _progress_callback=None):
     """Stage 0/1: use batched one-year prices for the whole universe.
     This is deliberately not a valuation filter: it keeps both beaten-down and
@@ -633,12 +652,11 @@ def prefilter_by_market_data(universe, target, _progress_callback=None):
         if _progress_callback:
             _progress_callback(i / max(1, len(tickers)), f"Čekám na Yahoo · dávka {i+1}–{min(i+len(chunk), len(tickers))} · celkem {i:,}/{len(tickers):,}")
         try:
-            data=yf.download(chunk, period="1y", interval="1d", auto_adjust=True,
-                             progress=False, threads=False, group_by="column")
-            close=data["Close"] if isinstance(data,pd.DataFrame) and "Close" in data else pd.DataFrame()
-            if isinstance(close,pd.Series):
-                close=close.to_frame()
-                close.columns=[chunk[0]]
+            # Cache each pure data batch separately. The outer function remains
+            # uncached because its progress callback updates Streamlit elements
+            # created by the caller; caching this UI side effect triggers
+            # CacheReplayClosureError on cache hits.
+            close = _download_close_chunk_cached(tuple(chunk))
             if close.empty: continue
             for t in close.columns:
                 s=pd.to_numeric(close[t],errors="coerce").dropna()
@@ -4881,7 +4899,7 @@ def analyst_render(ticker_input):
 
 # Page navigation. Analytik is deliberately isolated from the Screener execution path.
 st.sidebar.markdown("## 🧭 Modul")
-app_page = st.sidebar.radio("", ["📊 Screener", "🔎 Analytik"], index=0, label_visibility="collapsed")
+app_page = st.sidebar.radio("Navigace aplikace", ["📊 Screener", "🔎 Analytik"], index=0, label_visibility="collapsed")
 if app_page == "🔎 Analytik":
     analyst_render("")
     st.stop()
