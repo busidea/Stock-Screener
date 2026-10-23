@@ -15,7 +15,7 @@ from datetime import datetime
 st.set_page_config(page_title="Stock-Screener", page_icon="🔎", layout="wide")
 
 RUNTIME_LOG = Path("/tmp/stock_screener_runtime.json")
-ANALYST_FALLBACK_REVISION = "DF52-B · oborové režimy, příčinná analýza změn a jednodušší analytik"
+ANALYST_FALLBACK_REVISION = "DF52-C · kategorie příběhu, automatické rozpoznání tickeru a jednoduchý výběr příběhu"
 
 @st.cache_resource(show_spinner=False)
 def get_runtime_state():
@@ -54,7 +54,7 @@ def update_runtime(status=None, stage=None, message=None, error=None, run_id=Non
 
 
 st.title("📊 Stock-Screener")
-st.caption("V6.29.14 · BUILD 20261021-D – Oddělení hlavního příběhu a příbuzných příležitostí")
+st.caption("V6.29.15 · BUILD 20261023-A – Kategorie příběhu v Analytikovi, ticker bez burzy, jednoduchý výběr příběhu")
 
 NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 NYSE_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
@@ -1707,6 +1707,77 @@ ANALYST_STORIES = [
 
 
 
+def analyst_search_symbol(ticker, preferred_exchange="Automaticky"):
+    """Resolve a ticker through Yahoo Search, but accept only explicit equity symbols.
+
+    Exchange-scoped lookups prefer that exchange. Automatic lookup prefers an exact
+    symbol match; if several plausible listings remain, it returns no result rather
+    than silently choosing an unrelated company.
+    """
+    requested = clean_text(ticker).upper().strip()
+    if not requested:
+        return "", "", "Prázdný ticker."
+    aliases = {}
+    if preferred_exchange == "XETRA":
+        aliases = {"NOK": "NOKIA.DE", "NOKIA": "NOKIA.DE"}
+    if requested in aliases:
+        return aliases[requested], "XETRA", "známý alias tickeru pro XETRA"
+    queries = [requested]
+    # Company-name queries help when the mnemonic used by the exchange differs
+    # from the Yahoo Finance symbol (for example Nokia on XETRA).
+    if requested in {"NOK", "NOKIA"}:
+        queries.append("Nokia Oyj")
+    candidates = []
+    headers = {"User-Agent": "Mozilla/5.0"}
+    for query in queries:
+        try:
+            response = requests.get(
+                "https://query1.finance.yahoo.com/v1/finance/search",
+                params={"q": query, "quotesCount": 15, "newsCount": 0},
+                headers=headers, timeout=10,
+            )
+            response.raise_for_status()
+            for item in response.json().get("quotes", []):
+                symbol = clean_text(item.get("symbol")).upper()
+                qtype = clean_text(item.get("quoteType")).upper()
+                name = clean_text(item.get("longname") or item.get("shortname") or item.get("name"))
+                if not symbol or qtype not in ("EQUITY", "STOCK"):
+                    continue
+                inferred = "XETRA" if symbol.endswith(".DE") else ("NASDAQ" if item.get("exchange") in ("NMS", "NGM", "NCM", "NASDAQ") else ("NYSE" if item.get("exchange") in ("NYQ", "NYSE") else "JINÁ BURZA"))
+                if preferred_exchange in ("NASDAQ", "NYSE", "XETRA") and inferred != preferred_exchange:
+                    continue
+                rank = 0
+                bare = symbol.split(".")[0].replace("-", ".")
+                if symbol == requested or bare == requested.replace("-", "."):
+                    rank += 100
+                if requested in {"NOK", "NOKIA"} and "NOKIA" in name.upper():
+                    rank += 80
+                if preferred_exchange == "XETRA" and symbol.endswith(".DE"):
+                    rank += 20
+                if preferred_exchange == "Automaticky" and symbol.endswith(".DE") and requested in {"NOK", "NOKIA"}:
+                    rank += 10
+                candidates.append((rank, symbol, inferred, name))
+        except Exception:
+            continue
+    # Collapse duplicate symbols returned by separate queries.
+    unique = {}
+    for item in candidates:
+        old = unique.get(item[1])
+        if old is None or item[0] > old[0]:
+            unique[item[1]] = item
+    ranked = sorted(unique.values(), reverse=True)
+    if not ranked:
+        return "", "", "Yahoo Search nenašel jednoznačný akciový symbol pro zadaný ticker."
+    best_rank = ranked[0][0]
+    best = [item for item in ranked if item[0] == best_rank]
+    # Exact ticker symbol is sufficiently discriminative. For fuzzy/company-name
+    # matches require a unique best listing on the requested exchange.
+    if len(best) != 1:
+        return "", "", "Ticker odpovídá více burzovním listingům; zadej přesnější symbol nebo burzu."
+    _, symbol, inferred, _ = best[0]
+    return symbol, inferred, "Yahoo Search – ověřený kandidát; identita bude ještě potvrzena Chart API"
+
+
 def analyst_yahoo_ticker(ticker, exchange):
     """Resolve common input aliases to the verified Yahoo Finance symbol.
 
@@ -1714,6 +1785,13 @@ def analyst_yahoo_ticker(ticker, exchange):
     exact-symbol identity firewall in analyst_get_quote_data().
     """
     ticker = clean_text(ticker).upper()
+    if exchange == "Automaticky":
+        resolved, _, _ = analyst_search_symbol(ticker, "Automaticky")
+        return resolved or normalize_us_ticker(ticker)
+    if exchange == "XETRA":
+        resolved, _, _ = analyst_search_symbol(ticker, "XETRA")
+        if resolved:
+            return resolved
     if exchange in ("NASDAQ", "NYSE"):
         return normalize_us_ticker(ticker)
 
@@ -3022,13 +3100,16 @@ def _analyst_handoff_value(value, digits=2):
 
 def analyst_build_chatgpt_handoff(company, ticker, yahoo_ticker, exchange, q, annual, quarterly, news, sec,
                                   ai_result, user_question="", user_thesis="", price=None,
-                                  numerical_audit=None):
+                                  numerical_audit=None, selected_story=""):
+
     """Build a portable research brief and ready-to-paste instructions for a new ChatGPT company-analysis chat."""
     now = datetime.now().strftime("%d.%m.%Y %H:%M")
     lines = [
-        "ZADÁNÍ PRO CHATGPT ANALYTIK — Stock-Screener V6.29.9",
+        "ZADÁNÍ PRO CHATGPT ANALYTIK — Stock-Screener V6.29.15",
         f"Datum vytvoření balíčku: {now}",
         "",
+        "KATEGORIE VYBRANÁ UŽIVATELEM: " + (clean_text(selected_story) if clean_text(selected_story) else "Neuvedena — žádnou kategorii si nedomýšlej."),
+        "POVINNÉ POSOUZENÍ SHODY S VYBRANOU KATEGORIÍ: Pokud je kategorie výše uvedena, hned po úvodní investiční tezi a hlavní otázce zařaď krátký blok ‚Shoda s vybraným investičním příběhem‘. Zvol právě jeden verdikt: Shoda / Částečná shoda / Neshoda / Neurčitelné. V 2–4 větách vysvětli, které ověřené důkazy kategorii podporují nebo vyvracejí a co je rozhodující. Poté uveď vlastní nezávislou klasifikaci firmy a praktický význam pro investora. Nejde o polemiku se Screenerem ani o povinnost kategorii potvrdit: pokud důkazy nesedí, řekni to přímo. Kategorii nepovažuj za známku kvality ani za doporučení nákupu. Pokud není uvedena, tento blok vynech.",
         "ROLE A ÚKOL",
         "Jsi nezávislý analytik veřejně obchodovaných společností. Proveď vlastní, aktuální výzkum pomocí dostupných nástrojů ChatGPT: začni oficiálním IR, posledními výsledky a prezentacemi, regulatorními podáními a přepisy výsledkových hovorů; doplň relevantní nezávislé zdroje, konkurenty a ocenění. Neomezuj se na tento balíček: ověř důležitá tvrzení a dohledávej chybějící kontext. U externích tvrzení uváděj zdroj a datum; pokud zdroj nebo údaj nelze ověřit, výslovně to přiznej.",
         "ZÁSADNÍ PRAVIDLO NEZÁVISLOSTI: Stock-Screener je pouze poskytovatel prvotního impulsu, identifikace společnosti, orientačních dat a případných indicií. Není partnerem do diskuse ani autoritou, vůči níž máš svou analýzu vymezovat. Nevytvářej analýzu jako reakci na Screener, neorganizuj ji podle jeho tvrzení a nevěnuj samostatnou kapitolu porovnávání, opravování či polemice s jeho výstupem. Neuváděj formulace typu ‚Screener tvrdí‘, ‚oprava vůči Screeneru‘ nebo ‚na rozdíl od Screeneru‘. Balíček používej jen jako startovní bod; jeho teze, skóre, výběr zpráv a čísla nemají žádnou zvláštní autoritu.",
@@ -3053,6 +3134,7 @@ def analyst_build_chatgpt_handoff(company, ticker, yahoo_ticker, exchange, q, an
         "",
         "IDENTITA A TRŽNÍ DATA",
         f"Společnost: {company}", f"Zadaný ticker: {ticker}", f"Yahoo Finance ticker: {yahoo_ticker}", f"Trh: {exchange}",
+        f"Kategorie investičního příběhu vybraná uživatelem: {clean_text(selected_story) or 'neuvedena'}",
         f"Sektor: {_analyst_czech_sector(q.get('sector'))}; odvětví: {q.get('industry') or '—'}; země: {_analyst_czech_country(q.get('country')) if q.get('country') else '—'}",
         "OBOROVÝ ANALYTICKÝ REŽIM: " + analyst_sector_guidance(q),
         f"Cena: {_analyst_handoff_value(q.get('price'))} {clean_text(q.get('currency'))}",
@@ -4542,7 +4624,7 @@ def _analyst_valuation_comment(q, price):
 
 def analyst_render(ticker_input):
     st.title("🔎 Analytik")
-    st.caption("Nezávislé výzkumné jádro · Analytik nevidí Screener ani důvod, proč byl titul vybrán.")
+    st.caption("Nezávislé výzkumné jádro · Analytik samostatně ověřuje firmu i zvolený investiční příběh.")
 
     c1, c2 = st.columns([3, 1])
     with c1:
@@ -4550,8 +4632,9 @@ def analyst_render(ticker_input):
     with c2:
         ticker_hint = clean_text(ticker_input).upper()
         xetra_alias_hints = {"MTU", "MTU.DE", "MTU AERO ENGINES", "MTU AERO ENGINES AG", "MTX", "MTX.DE"}
-        default_ex = 2 if ticker_hint.endswith(".DE") or ticker_hint in xetra_alias_hints else 0
-        exchange = st.selectbox("Trh", ["NASDAQ", "NYSE", "XETRA"], index=default_ex)
+        default_ex = 3 if ticker_hint.endswith(".DE") or ticker_hint in xetra_alias_hints else 0
+        exchange = st.selectbox("Trh (nepovinné)", ["Automaticky", "NASDAQ", "NYSE", "XETRA"], index=default_ex,
+                                help="Ve výchozím režimu se Analytik pokusí najít správný listing podle tickeru. U nejednoznačných tickerů zkontroluj burzu.")
 
     user_question = st.text_area(
         "Co chceš u firmy zjistit? (nepovinné)",
@@ -4564,6 +4647,14 @@ def analyst_render(ticker_input):
         placeholder="Např. Restrukturalizace může obnovit ziskovost, ale trh už započítal příliš optimistický scénář.",
         help="Analytik tuto tezi nemá potvrzovat automaticky; musí hledat také důkazy proti ní."
     )
+    analyst_story_options = ["— bez předvolené kategorie —", "🏆 Quality Compounder", "💎 Kvalita za rozumnou cenu", "🚀 Růst za rozumnou cenu", "💰 Value / levná firma", "🔄 Operating turnaround", "🔄 Recovery candidate", "🌐 Cyclical / commodity recovery", "🏗️ Asset / financial recovery", "🏢 Real-estate value", "🛠️ Operational improvement", "🚀 Growth / recovery", "🔥 High Growth / dražší příběh", "🪤 Value Trap – varování"]
+    session_story = clean_text(st.session_state.get("screening_story", ""))
+    story_default = session_story if session_story in analyst_story_options else "— bez předvolené kategorie —"
+    selected_story = st.selectbox("Investiční příběh ze Screeneru k nezávislému ověření (nepovinné)", analyst_story_options,
+                                  index=analyst_story_options.index(story_default),
+                                  help="Kategorie se předvyplní z výběru ve Screeneru, pokud už byla zvolena. Analytik ji musí ověřit, ne automaticky potvrdit.")
+    if selected_story == "— bez předvolené kategorie —":
+        selected_story = ""
     analyse = st.button("🔬 Spustit analytické jádro", type="primary")
     with st.expander("🧪 Diagnostika Groq připojení", expanded=False):
         st.write("Tento test nic nemění na API klíči. Ověří pouze, zda Streamlit Cloud dokáže z tohoto serveru oslovit Groq a zda Groq přijme klíč i model.")
@@ -4593,7 +4684,17 @@ def analyst_render(ticker_input):
         st.warning("Zadej ticker.")
         return
 
-    yahoo_ticker = analyst_yahoo_ticker(ticker, exchange)
+    requested_exchange = exchange
+    if exchange == "Automaticky":
+        resolved_symbol, resolved_exchange, resolve_note = analyst_search_symbol(ticker, "Automaticky")
+        if not resolved_symbol:
+            st.error(f"Ticker se nepodařilo jednoznačně rozpoznat. {resolve_note} Zkus zadat burzu nebo přesný Yahoo ticker (např. NOKIA.DE).")
+            return
+        yahoo_ticker = resolved_symbol
+        exchange = resolved_exchange or "JINÁ BURZA"
+        st.caption(f"Automaticky rozpoznaný listing: **{yahoo_ticker}** · {exchange}. Identita bude ověřena znovu před načtením dat.")
+    else:
+        yahoo_ticker = analyst_yahoo_ticker(ticker, exchange)
     status = st.empty()
     status.info("1/5 Ověřuji identitu firmy a načítám veřejná data…")
     # V6.28.7: Analytik identity hardening + direct Yahoo data path.
@@ -4711,7 +4812,7 @@ def analyst_render(ticker_input):
         status.warning("5/5 Data načtena; AI syntéza není dostupná. Výstup je omezen na dostupná data a fallback.")
 
     st.markdown(f"## {company}")
-    st.caption(f"Ticker **{ticker}** · Yahoo **{yahoo_ticker}** · {exchange} · načteno {datetime.now().strftime('%d.%m.%Y %H:%M')} · build **V6.29.9 / 20261020-C**")
+    st.caption(f"Ticker **{ticker}** · Yahoo **{yahoo_ticker}** · {exchange} · načteno {datetime.now().strftime('%d.%m.%Y %H:%M')} · build **V6.29.15 / 20261023-A**")
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Cena", f"{analyst_human_number(q.get('price'), 2)} {q.get('currency', '')}")
@@ -4733,7 +4834,7 @@ def analyst_render(ticker_input):
 
     with st.expander("🧠 2. Co se ve firmě právě mění", expanded=True):
         completion_status = ai_result.get("completion_status", "unknown") if isinstance(ai_result, dict) else "unknown"
-        st.caption("V6.29.9: Analytik vytváří pracovní hypotézu, nikoli hotový externí výzkum. Pokud AI nedodá úplnou syntézu, fallback musí respektovat obchodní model; titulky jsou signály, nikoli potvrzená fakta.")
+        st.caption("V6.29.15: Analytik vytváří pracovní hypotézu, nikoli hotový externí výzkum. Pokud AI nedodá úplnou syntézu, fallback musí respektovat obchodní model; titulky jsou signály, nikoli potvrzená fakta.")
         if isinstance(ai_result, dict) and not ai_result.get("ok"):
             st.warning("AI syntéza není dostupná. Finanční přehled níže přesto zůstává k dispozici, protože se počítá přímo z načtených ročních dat.")
         elif completion_status == "ai_recovery":
@@ -4750,10 +4851,10 @@ def analyst_render(ticker_input):
             st.caption("Automatická kontrola směru číselných tvrzení nenašla zjevný rozpor. Kontrola je konzervativní a nezaručuje, že je celý text bez chyb.")
 
     with st.expander("🧭 3. Přenosný podklad pro nový chat ChatGPT – analýza této firmy", expanded=True):
-        st.write("Tento export je hlavní praktický výstup pro další hloubkový výzkum. Obsahuje identitu firmy, finanční řady, mezery v datech, výstup původní AI, dostupné titulky s odkazy a kompletní obecné zadání pro nezávislou analýzu. Zkopíruj celý text do nového chatu ChatGPT věnovaného této firmě, nebo stáhni TXT; ChatGPT má podklady nezávisle ověřit a doplnit aktuální výzkum.")
+        st.write("Tento export je hlavní praktický výstup pro další hloubkový výzkum. Obsahuje identitu firmy, finanční řady, mezery v datech, výstup původní AI, dostupné titulky s odkazy a kompletní zadání pro nezávislou analýzu. Pokud je vybrán investiční příběh, ChatGPT dostane pokyn nezávisle posoudit, zda mu firma skutečně odpovídá. Zkopíruj celý text do nového chatu ChatGPT věnovaného této firmě, nebo stáhni TXT.")
         handoff = analyst_build_chatgpt_handoff(
             company, ticker, yahoo_ticker, exchange, q, annual, quarterly, news, sec, ai_result,
-            user_question, user_thesis, price, numerical_audit
+            user_question, user_thesis, price, numerical_audit, selected_story
         )
         handoff_widget_key = "analyst_chatgpt_handoff_" + hashlib.md5(handoff.encode("utf-8")).hexdigest()[:12]
         st.text_area("Kompletní zadání a důkazní balíček pro ChatGPT", value=handoff, height=420, key=handoff_widget_key)
@@ -4869,7 +4970,7 @@ def analyst_render(ticker_input):
         st.write(f"Evidence položek: {ai_result.get('evidence_count', '—')}")
         st.write(f"AI model: {ai_result.get('model', '—')}")
         st.write(f"Kontrola kódu fallbacku: {ANALYST_FALLBACK_REVISION}")
-        st.write("Pravidlo V6.29.9 / DF52-C + PERIOD-SCENARIO-AUDIT + STORY-VALUATION-FCF-MERGE + ADAPTIVE-ANALYSIS-STRUCTURE: Analytik má formulovat pracovní tezi, ekonomický mechanismus, nejsilnější protitezi a konkrétní neznámé. Ukazatele se volí podle obchodního modelu; u bank nejsou běžné FCF a provozní marže hlavním rámcem. ChatGPT má tezi nezávisle ověřit z primárních zdrojů a aktuálního výzkumu. Aplikace pracuje převážně s RSS titulky/popisky, nikoli automaticky s plným textem každého článku.")
+        st.write("Pravidlo V6.29.15 / DF52-C + PERIOD-SCENARIO-AUDIT + STORY-VALUATION-FCF-MERGE + ADAPTIVE-ANALYSIS-STRUCTURE: Analytik má formulovat pracovní tezi, ekonomický mechanismus, nejsilnější protitezi a konkrétní neznámé. Ukazatele se volí podle obchodního modelu; u bank nejsou běžné FCF a provozní marže hlavním rámcem. ChatGPT má tezi nezávisle ověřit z primárních zdrojů a aktuálního výzkumu. Aplikace pracuje převážně s RSS titulky/popisky, nikoli automaticky s plným textem každého článku.")
         st.write(f"Stav dokončení AI: { {'primary_ai': 'původní odpověď formálně úplná', 'ai_recovery': 'použita záchranná AI odpověď', 'deterministic_fallback': 'použit datový fallback'}.get(ai_result.get('completion_status'), 'stav není k dispozici') }")
         diag = ai_result.get("completion_diagnostics") or {}
         if diag:
@@ -4944,7 +5045,8 @@ story_options = [
     "🔥 High Growth / dražší příběh",
     "🪤 Value Trap – varování",
 ]
-selected_stories = st.sidebar.multiselect("Příběhy", story_options, default=story_options[:9], help="Neatraktivní příběhy nemusíš hledat; Value Trap zde slouží jako výjimka – upozornění na levnou firmu se slabými základy.")
+selected_story = st.sidebar.selectbox("Příběh", story_options, index=0, key="screening_story", help="Vyber jeden investiční příběh. Výběr je okamžitý; ostatní příběhy není potřeba odstraňovat.")
+selected_stories = [selected_story] if selected_story else []
 min_data = st.sidebar.slider("Min. počet dostupných parametrů", 3, len(PARAMS), 7, 1)
 min_story_fit = st.sidebar.slider("Min. shoda s příběhem", 0, 100, 60, 5, help="Určuje minimální shodu pro zařazení do hlavních kandidátů nebo mezi příbuzné příležitosti. Hlavní seznam navíc vyžaduje shodu automaticky určeného příběhu. U Value má Value Score váhu 70 %. Nejde o investiční doporučení.")
 
@@ -5318,7 +5420,7 @@ def passes_classic(r):
     return all(checks)
 
 results_df["Pass"] = results_df.apply(passes_classic, axis=1) if use_classic else True
-# V6.29.14: keep fit-based discovery, but do not mix adjacent archetypes into
+# V6.29.15: one selected story via selectbox; preserve fit-based discovery, but do not mix adjacent archetypes into
 # the main result list. Exact selected-story matches are primary; other eligible
 # names remain visible in a separate related-opportunities section.
 if selected_stories:
