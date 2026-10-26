@@ -54,7 +54,7 @@ def update_runtime(status=None, stage=None, message=None, error=None, run_id=Non
 
 
 st.title("📊 Stock-Screener")
-st.caption("V6.29.18 · BUILD 20261025-A – Dva režimy klasifikace Analytika, minimální změna instrukcí")
+st.caption("V6.29.19 · BUILD 20261026-A – Oprava rozlišení výchozí a skutečně zvolené kategorie")
 
 NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 NYSE_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
@@ -3105,11 +3105,11 @@ def analyst_build_chatgpt_handoff(company, ticker, yahoo_ticker, exchange, q, an
     """Build a portable research brief and ready-to-paste instructions for a new ChatGPT company-analysis chat."""
     now = datetime.now().strftime("%d.%m.%Y %H:%M")
     lines = [
-        "ZADÁNÍ PRO CHATGPT ANALYTIK — Stock-Screener V6.29.18",
+        "ZADÁNÍ PRO CHATGPT ANALYTIK — Stock-Screener V6.29.19",
         f"Datum vytvoření balíčku: {now}",
         "",
         "KATEGORIE VYBRANÁ UŽIVATELEM: " + (clean_text(selected_story) if clean_text(selected_story) else "Neuvedena — žádnou kategorii si nedomýšlej."),
-        "POVINNÝ ÚVODNÍ KLASIFIKAČNÍ BLOK — ZVOL SPRÁVNÝ REŽIM: Pokud je položka KATEGORIE VYBRANÁ UŽIVATELEM konkrétní kategorií, úplně na začátku výstupu zobraz samostatný a vizuálně oddělený blok s přesným nadpisem ‚SHODA S HLEDANOU KATEGORIÍ‘. Uveď přesný název zvolené kategorie, jeden výrazný verdikt ‚SHODA‘ / ‚ČÁSTEČNÁ SHODA‘ / ‚NESHODA‘ / ‚NEURČITELNÉ‘ a 1–2 stručné věty s rozhodujícím důvodem. Použij zřetelné Markdown formátování; nadpis a verdikt nesmějí být skryté v běžném odstavci. Kategorie musí být převzata přesně z položky KATEGORIE VYBRANÁ UŽIVATELEM, nikoli nahrazena vlastní klasifikací. Pokud je položka uvedena jako ‚Neuvedena — žádnou kategorii si nedomýšlej‘, blok SHODA S HLEDANOU KATEGORIÍ vůbec nevytvářej a žádný verdikt o shodě nevydávej. Místo něj úplně na začátku zobraz samostatný blok s přesným nadpisem ‚URČENÍ INVESTIČNÍHO CHARAKTERU SPOLEČNOSTI‘. Uveď hlavní ekonomický typ firmy, nejvýše jednu hlavní investiční kategorii a případně jednu alternativu, stručné zdůvodnění a klíčovou podmínku či neznámou, která by klasifikaci mohla změnit. Jde o vlastní předběžnou klasifikaci analytika, nikoli o test shody. Pokud data nestačí, řekni to a kategorii nevymýšlej. V obou režimech jasně rozlišuj kvalitu podniku, jeho investiční charakter a atraktivitu akcie za současnou cenu. U Value posuzuj cenu vůči udržitelné ziskovosti, normalizované hotovosti, rizikům a bezpečnostní rezervě. Význam verdiktů v režimu se zvolenou kategorií: SHODA = důkazy podporují podstatu hledaného příběhu; ČÁSTEČNÁ SHODA = podstatné znaky odpovídají, ale významný faktor omezuje naplnění příběhu; NESHODA = firma jeho podstatu nesplňuje, i když některé screeningové ukazatele vypadají příznivě; NEURČITELNÉ = chybí zásadní důkazy. Nevol ČÁSTEČNOU SHODU automaticky jen proto, že firma má výhody i rizika. Úvodní blok není doporučením k nákupu a nesmí předurčit následující nezávislou analýzu. Po bloku pokračuj vlastní investiční tezí a hlavní otázkou; v analýze už kategorii neopakuj, nepolemizuj s ní a nepřizpůsobuj jí osnovu. Vždy vytvoř právě jeden z těchto dvou bloků, nikdy oba.",
+        "POVINNÝ ÚVODNÍ KLASIFIKAČNÍ BLOK — ZVOL SPRÁVNÝ REŽIM: Pokud je položka KATEGORIE VYBRANÁ UŽIVATELEM konkrétní kategorií, úplně na začátku výstupu zobraz samostatný a vizuálně oddělený blok s přesným nadpisem ‚SHODA S HLEDANOU KATEGORIÍ‘. Uveď přesný název zvolené kategorie, jeden výrazný verdikt ‚SHODA‘ / ‚ČÁSTEČNÁ SHODA‘ / ‚NESHODA‘ / ‚NEURČITELNÉ‘ a 1–2 stručné věty s rozhodujícím důvodem. Použij zřetelné Markdown formátování a vizuálně odděl blok od analýzy (přednostně šedě podbarvený blok, pokud jej prostředí podporuje; jinak citaci/oddělovač a výrazný nadpis); nadpis a verdikt nesmějí být skryté v běžném odstavci. Kategorie musí být převzata přesně z položky KATEGORIE VYBRANÁ UŽIVATELEM, nikoli nahrazena vlastní klasifikací. Pokud je položka uvedena jako ‚Neuvedena — žádnou kategorii si nedomýšlej‘, blok SHODA S HLEDANOU KATEGORIÍ vůbec nevytvářej a žádný verdikt o shodě nevydávej. Místo něj úplně na začátku zobraz samostatný blok s přesným nadpisem ‚URČENÍ INVESTIČNÍHO CHARAKTERU SPOLEČNOSTI‘. Uveď hlavní ekonomický typ firmy, nejvýše jednu hlavní investiční kategorii a případně jednu alternativu, stručné zdůvodnění a klíčovou podmínku či neznámou, která by klasifikaci mohla změnit. Jde o vlastní předběžnou klasifikaci analytika, nikoli o test shody. Pokud data nestačí, řekni to a kategorii nevymýšlej. V obou režimech jasně rozlišuj kvalitu podniku, jeho investiční charakter a atraktivitu akcie za současnou cenu. U Value posuzuj cenu vůči udržitelné ziskovosti, normalizované hotovosti, rizikům a bezpečnostní rezervě. Význam verdiktů v režimu se zvolenou kategorií: SHODA = důkazy podporují podstatu hledaného příběhu; ČÁSTEČNÁ SHODA = podstatné znaky odpovídají, ale významný faktor omezuje naplnění příběhu; NESHODA = firma jeho podstatu nesplňuje, i když některé screeningové ukazatele vypadají příznivě; NEURČITELNÉ = chybí zásadní důkazy. Nevol ČÁSTEČNOU SHODU automaticky jen proto, že firma má výhody i rizika. Úvodní blok není doporučením k nákupu a nesmí předurčit následující nezávislou analýzu. Po bloku pokračuj vlastní investiční tezí a hlavní otázkou; v analýze už kategorii neopakuj, nepolemizuj s ní a nepřizpůsobuj jí osnovu. Vždy vytvoř právě jeden z těchto dvou bloků, nikdy oba.",
         "ROLE A ÚKOL",
         "Jsi nezávislý analytik veřejně obchodovaných společností. Proveď vlastní, aktuální výzkum pomocí dostupných nástrojů ChatGPT: začni oficiálním IR, posledními výsledky a prezentacemi, regulatorními podáními a přepisy výsledkových hovorů; doplň relevantní nezávislé zdroje, konkurenty a ocenění. Neomezuj se na tento balíček: ověř důležitá tvrzení a dohledávej chybějící kontext. U důležitých externích tvrzení uveď zdroj a datum; zdroje neopakuj v několika odstavcích a nepřidávej procesní komentář. Pokud zásadní údaj nelze ověřit, stručně to přiznej přímo u něj.",
         "ZÁSADNÍ PRAVIDLO NEZÁVISLOSTI: Stock-Screener je pouze poskytovatel prvotního impulsu, identifikace společnosti, orientačních dat a případných indicií. Není partnerem do diskuse ani autoritou, vůči níž máš svou analýzu vymezovat. Nevytvářej analýzu jako reakci na Screener, neorganizuj ji podle jeho tvrzení a nevěnuj samostatnou kapitolu porovnávání, opravování či polemice s jeho výstupem. Neuváděj formulace typu ‚Screener tvrdí‘, ‚oprava vůči Screeneru‘ nebo ‚na rozdíl od Screeneru‘. Balíček používej jen jako startovní bod; jeho teze, skóre, výběr zpráv a čísla nemají žádnou zvláštní autoritu.",
@@ -4648,8 +4648,16 @@ def analyst_render(ticker_input):
         help="Analytik tuto tezi nemá potvrzovat automaticky; musí hledat také důkazy proti ní."
     )
     analyst_story_options = ["— bez předvolené kategorie —", "🏆 Quality Compounder", "💎 Kvalita za rozumnou cenu", "🚀 Růst za rozumnou cenu", "💰 Value / levná firma", "🔄 Operating turnaround", "🔄 Recovery candidate", "🌐 Cyclical / commodity recovery", "🏗️ Asset / financial recovery", "🏢 Real-estate value", "🛠️ Operational improvement", "🚀 Growth / recovery", "🔥 High Growth / dražší příběh", "🪤 Value Trap – varování"]
+    # The Screener's first selectbox item is only a UI default, not proof that
+    # the user deliberately chose that story. Carry it into Analytik only after
+    # the user has actually changed the Screener selector.
     session_story = clean_text(st.session_state.get("screening_story", ""))
-    story_default = session_story if session_story in analyst_story_options else "— bez předvolené kategorie —"
+    screening_story_was_chosen = bool(st.session_state.get("screening_story_user_selected", False))
+    story_default = (
+        session_story
+        if screening_story_was_chosen and session_story in analyst_story_options
+        else "— bez předvolené kategorie —"
+    )
     selected_story = st.selectbox("Kategorie / investiční příběh k nezávislému ověření (nepovinné)", analyst_story_options,
                                   index=analyst_story_options.index(story_default),
                                   help="Pokud kategorii zvolíš nebo ji převezmeš ze Screeneru, analytik vyhodnotí shodu. Pokud ji necháš bez předvolby, analytik sám určí investiční charakter firmy a navrhne hlavní kategorii.")
@@ -4812,7 +4820,7 @@ def analyst_render(ticker_input):
         status.warning("5/5 Data načtena; AI syntéza není dostupná. Výstup je omezen na dostupná data a fallback.")
 
     st.markdown(f"## {company}")
-    st.caption(f"Ticker **{ticker}** · Yahoo **{yahoo_ticker}** · {exchange} · načteno {datetime.now().strftime('%d.%m.%Y %H:%M')} · build **V6.29.18 / 20261025-A**")
+    st.caption(f"Ticker **{ticker}** · Yahoo **{yahoo_ticker}** · {exchange} · načteno {datetime.now().strftime('%d.%m.%Y %H:%M')} · build **V6.29.19 / 20261026-A**")
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Cena", f"{analyst_human_number(q.get('price'), 2)} {q.get('currency', '')}")
@@ -4834,7 +4842,7 @@ def analyst_render(ticker_input):
 
     with st.expander("🧠 2. Co se ve firmě právě mění", expanded=True):
         completion_status = ai_result.get("completion_status", "unknown") if isinstance(ai_result, dict) else "unknown"
-        st.caption("V6.29.18: Analytik vytváří pracovní hypotézu, nikoli hotový externí výzkum. Úvodní klasifikační blok se řídí tím, zda uživatel vybral kategorii; titulky jsou signály, nikoli potvrzená fakta.")
+        st.caption("V6.29.19: Výchozí položka Screeneru se nepovažuje za skutečně zvolenou kategorii; úvodní klasifikační blok se řídí prokazatelným výběrem uživatele. Titulky jsou signály, nikoli potvrzená fakta.")
         if isinstance(ai_result, dict) and not ai_result.get("ok"):
             st.warning("AI syntéza není dostupná. Finanční přehled níže přesto zůstává k dispozici, protože se počítá přímo z načtených ročních dat.")
         elif completion_status == "ai_recovery":
@@ -4970,7 +4978,7 @@ def analyst_render(ticker_input):
         st.write(f"Evidence položek: {ai_result.get('evidence_count', '—')}")
         st.write(f"AI model: {ai_result.get('model', '—')}")
         st.write(f"Kontrola kódu fallbacku: {ANALYST_FALLBACK_REVISION}")
-        st.write("Pravidlo V6.29.18 / DF52-C + PERIOD-SCENARIO-AUDIT + STORY-VALUATION-FCF-MERGE + ADAPTIVE-ANALYSIS-STRUCTURE: Analytik má formulovat pracovní tezi, ekonomický mechanismus, nejsilnější protitezi a konkrétní neznámé. Ukazatele se volí podle obchodního modelu; u bank nejsou běžné FCF a provozní marže hlavním rámcem. ChatGPT má tezi nezávisle ověřit z primárních zdrojů a aktuálního výzkumu. Aplikace pracuje převážně s RSS titulky/popisky, nikoli automaticky s plným textem každého článku.")
+        st.write("Pravidlo V6.29.19 / DF52-C + PERIOD-SCENARIO-AUDIT + STORY-VALUATION-FCF-MERGE + ADAPTIVE-ANALYSIS-STRUCTURE: Analytik má formulovat pracovní tezi, ekonomický mechanismus, nejsilnější protitezi a konkrétní neznámé. Ukazatele se volí podle obchodního modelu; u bank nejsou běžné FCF a provozní marže hlavním rámcem. ChatGPT má tezi nezávisle ověřit z primárních zdrojů a aktuálního výzkumu. Aplikace pracuje převážně s RSS titulky/popisky, nikoli automaticky s plným textem každého článku.")
         st.write(f"Stav dokončení AI: { {'primary_ai': 'původní odpověď formálně úplná', 'ai_recovery': 'použita záchranná AI odpověď', 'deterministic_fallback': 'použit datový fallback'}.get(ai_result.get('completion_status'), 'stav není k dispozici') }")
         diag = ai_result.get("completion_diagnostics") or {}
         if diag:
@@ -5045,7 +5053,11 @@ story_options = [
     "🔥 High Growth / dražší příběh",
     "🪤 Value Trap – varování",
 ]
-selected_story = st.sidebar.selectbox("Příběh", story_options, index=0, key="screening_story", help="Vyber jeden investiční příběh. Výběr je okamžitý; ostatní příběhy není potřeba odstraňovat.")
+selected_story = st.sidebar.selectbox(
+    "Příběh", story_options, index=0, key="screening_story",
+    on_change=lambda: st.session_state.__setitem__("screening_story_user_selected", True),
+    help="Vyber jeden investiční příběh. Výběr je okamžitý; ostatní příběhy není potřeba odstraňovat. Výchozí položka sama o sobě neznamená, že jsi příběh zvolil."
+)
 selected_stories = [selected_story] if selected_story else []
 min_data = st.sidebar.slider("Min. počet dostupných parametrů", 3, len(PARAMS), 7, 1)
 min_story_fit = st.sidebar.slider("Min. shoda s příběhem", 0, 100, 60, 5, help="Určuje minimální shodu pro zařazení do hlavních kandidátů nebo mezi příbuzné příležitosti. Hlavní seznam navíc vyžaduje shodu automaticky určeného příběhu. U Value má Value Score váhu 70 %. Nejde o investiční doporučení.")
